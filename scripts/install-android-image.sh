@@ -129,9 +129,9 @@ SDKMANAGER_FLAGS="--sdk_root=$ANDROID_SDK_ROOT"
 # ---------------------------------------------------------------------------
 list_installed_images() {
   info "Installed system images:"
-  "$SDKMANAGER_BIN" $SDKMANAGER_FLAGS --list_installed 2>/dev/null \
+  (set +o pipefail; "$SDKMANAGER_BIN" $SDKMANAGER_FLAGS --list_installed 2>/dev/null \
     | grep "system-images" \
-    | awk '{print "  "$1}' \
+    | awk '{print "  "$1}') \
     || echo "  (none or could not query)"
 }
 
@@ -141,11 +141,11 @@ list_installed_images() {
 list_available_images() {
   local filter="${1:-system-images}"
   info "Available system images (may take a moment to fetch):"
-  "$SDKMANAGER_BIN" $SDKMANAGER_FLAGS --list 2>/dev/null \
+  (set +o pipefail; "$SDKMANAGER_BIN" $SDKMANAGER_FLAGS --list 2>/dev/null \
     | grep "$filter" \
     | grep -v "Installed" \
     | awk '{print "  "$1}' \
-    | head -60 \
+    | head -60) \
     || echo "  (could not fetch list — check internet connection)"
 }
 
@@ -154,8 +154,8 @@ list_available_images() {
 # ---------------------------------------------------------------------------
 is_package_installed() {
   local pkg="$1"
-  "$SDKMANAGER_BIN" $SDKMANAGER_FLAGS --list_installed 2>/dev/null \
-    | grep -qF "$pkg"
+  (set +o pipefail; "$SDKMANAGER_BIN" $SDKMANAGER_FLAGS --list_installed 2>/dev/null \
+    | grep -qF "$pkg")
 }
 
 # ---------------------------------------------------------------------------
@@ -183,7 +183,7 @@ create_avd_for_api() {
 
   step "Checking existing AVDs..."
   local existing
-  existing="$("$AVDMANAGER_BIN" list avd 2>/dev/null | grep "Name:" | sed 's/.*Name: //' | xargs 2>/dev/null || echo "")"
+  existing="$(set +o pipefail; "$AVDMANAGER_BIN" list avd 2>/dev/null | grep "Name:" | sed 's/.*Name: //' | xargs 2>/dev/null || echo "")"
 
   if echo "$existing" | grep -qF "$avd_name"; then
     success "AVD '$avd_name' already exists — skipping creation."
@@ -253,12 +253,12 @@ if [[ -z "$API_LEVEL" ]]; then
 
   # Show available images for common API levels
   info "Available system images (google_apis, $ANDROID_ABI):"
-  "$SDKMANAGER_BIN" $SDKMANAGER_FLAGS --list 2>/dev/null \
+  (set +o pipefail; "$SDKMANAGER_BIN" $SDKMANAGER_FLAGS --list 2>/dev/null \
     | grep "system-images" \
     | grep "google_apis" \
     | grep "$ANDROID_ABI" \
     | awk '{print "  "$1}' \
-    | head -30 \
+    | head -30) \
     || echo "  (could not fetch list)"
 
   printf "\n"

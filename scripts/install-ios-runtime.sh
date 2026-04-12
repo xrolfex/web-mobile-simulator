@@ -84,7 +84,7 @@ fi
 list_installed_runtimes() {
   local json
   json="$(xcrun simctl list runtimes -j 2>/dev/null || echo '{"runtimes":[]}')"
-  echo "$json" | python3 -c "
+  python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 runtimes = data.get('runtimes', [])
@@ -97,7 +97,7 @@ else:
         ident = r.get('identifier', '')
         build = r.get('buildversion', '')
         print(f'  {avail}  {name}  [{ident}]  build={build}')
-" 2>/dev/null || echo "  (could not parse runtime list)"
+" <<< "$json" 2>/dev/null || echo "  (could not parse runtime list)"
 }
 
 # ---------------------------------------------------------------------------
@@ -121,7 +121,7 @@ list_available_runtimes() {
 # ---------------------------------------------------------------------------
 get_latest_ios_runtime_name() {
   # Parse installed runtimes sorted by version, return highest iOS version name
-  xcrun simctl list runtimes -j 2>/dev/null | python3 -c "
+  python3 -c "
 import sys, json, re
 data = json.load(sys.stdin)
 ios_runtimes = [
@@ -136,7 +136,7 @@ if ios_runtimes:
         return tuple(int(p) for p in parts)
     latest = sorted(ios_runtimes, key=version_key, reverse=True)[0]
     print(latest.get('name', ''))
-" 2>/dev/null || echo ""
+" <<< "$(xcrun simctl list runtimes -j 2>/dev/null || echo '{"runtimes":[]}')" 2>/dev/null || echo ""
 }
 
 # ---------------------------------------------------------------------------
@@ -149,7 +149,7 @@ is_runtime_installed() {
   version_num="${search_version#iOS }"
   version_num="${version_num#ios }"
 
-  xcrun simctl list runtimes -j 2>/dev/null | python3 -c "
+  python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 version_search = '${version_num}'
@@ -165,7 +165,7 @@ for r in data.get('runtimes', []):
             print('unavailable')
             sys.exit(0)
 print('not_found')
-" 2>/dev/null || echo "not_found"
+" <<< "$(xcrun simctl list runtimes -j 2>/dev/null || echo '{"runtimes":[]}')" 2>/dev/null || echo "not_found"
 }
 
 # ---------------------------------------------------------------------------
@@ -274,7 +274,7 @@ if [[ "$VERSION_ARG" == "latest" ]]; then
   # Try xcrun simctl runtime list to get available (not yet installed) runtimes
   step "Checking available runtimes from Apple..."
   if xcrun simctl runtime list -j &>/dev/null 2>&1; then
-    LATEST_AVAILABLE="$(xcrun simctl runtime list -j 2>/dev/null | python3 -c "
+    LATEST_AVAILABLE="$(python3 -c "
 import sys, json, re
 try:
     data = json.load(sys.stdin)
@@ -292,7 +292,7 @@ try:
         print(latest)
 except Exception:
     pass
-" 2>/dev/null || echo "")"
+" <<< "$(xcrun simctl runtime list -j 2>/dev/null || echo '{}')" 2>/dev/null || echo "")"
 
     if [[ -n "$LATEST_AVAILABLE" ]]; then
       VERSION_ARG="$LATEST_AVAILABLE"

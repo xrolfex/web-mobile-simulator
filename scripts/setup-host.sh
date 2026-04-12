@@ -230,12 +230,12 @@ step "Listing installed iOS runtimes..."
 
 # Get installed runtimes as JSON
 INSTALLED_RUNTIMES_JSON="$(xcrun simctl list runtimes -j 2>/dev/null || echo '{"runtimes":[]}')"
-INSTALLED_RUNTIME_COUNT="$(echo "$INSTALLED_RUNTIMES_JSON" | python3 -c "
+INSTALLED_RUNTIME_COUNT="$(python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 runtimes = [r for r in data.get('runtimes', []) if r.get('isAvailable', False)]
 print(len(runtimes))
-" 2>/dev/null || echo "0")"
+" <<< "$INSTALLED_RUNTIMES_JSON" 2>/dev/null || echo "0")"
 
 if [[ "$INSTALLED_RUNTIME_COUNT" -gt 0 ]]; then
   success "$INSTALLED_RUNTIME_COUNT iOS runtime(s) already installed:"
@@ -271,12 +271,12 @@ else
     fi
 
     # Re-check after download attempt
-    INSTALLED_RUNTIME_COUNT="$(xcrun simctl list runtimes -j 2>/dev/null | python3 -c "
+    INSTALLED_RUNTIME_COUNT="$(python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 runtimes = [r for r in data.get('runtimes', []) if r.get('isAvailable', False)]
 print(len(runtimes))
-" 2>/dev/null || echo "0")"
+" <<< "$(xcrun simctl list runtimes -j 2>/dev/null || echo '{"runtimes":[]}')" 2>/dev/null || echo "0")"
 
     if [[ "$INSTALLED_RUNTIME_COUNT" -gt 0 ]]; then
       success "$INSTALLED_RUNTIME_COUNT iOS runtime(s) now available"
@@ -405,11 +405,11 @@ declare -a SDK_PACKAGES=(
 
 # Get currently installed packages for idempotency check
 info "Fetching list of installed SDK packages..."
-INSTALLED_PACKAGES="$("$SDKMANAGER" --list_installed --sdk_root="$ANDROID_SDK_ROOT" 2>/dev/null | grep -v '^\-\-' | grep -v '^Installed' | grep -v '^  Name' || echo "")"
+INSTALLED_PACKAGES="$(set +o pipefail; "$SDKMANAGER" --list_installed --sdk_root="$ANDROID_SDK_ROOT" 2>/dev/null | grep -v '^\-\-' | grep -v '^Installed' | grep -v '^  Name' || echo "")"
 
 install_sdk_package() {
   local pkg="$1"
-  if echo "$INSTALLED_PACKAGES" | grep -qF "$pkg"; then
+  if echo "$INSTALLED_PACKAGES" | grep -qF "$pkg" 2>/dev/null; then
     success "Already installed: $pkg"
   else
     info "Installing: $pkg ..."
@@ -456,7 +456,7 @@ step "Checking existing Android Virtual Devices..."
 
 # avdmanager may not be on PATH yet — use full path
 if [[ -x "$AVDMANAGER" ]]; then
-  EXISTING_AVDS="$("$AVDMANAGER" list avd 2>/dev/null | grep "Name:" | sed 's/.*Name: //' | xargs 2>/dev/null || echo "")"
+  EXISTING_AVDS="$(set +o pipefail; "$AVDMANAGER" list avd 2>/dev/null | grep "Name:" | sed 's/.*Name: //' | xargs 2>/dev/null || echo "")"
 else
   EXISTING_AVDS=""
   warn "avdmanager not found at $AVDMANAGER"
@@ -614,12 +614,12 @@ else
 fi
 
 if xcrun simctl list runtimes &>/dev/null; then
-  IOS_COUNT="$(xcrun simctl list runtimes -j 2>/dev/null | python3 -c "
+  IOS_COUNT="$(python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 runtimes = [r for r in data.get('runtimes', []) if r.get('isAvailable', False)]
 print(len(runtimes))
-" 2>/dev/null || echo '?')"
+" <<< "$(xcrun simctl list runtimes -j 2>/dev/null || echo '{"runtimes":[]}')" 2>/dev/null || echo '?')"
   if [[ "$IOS_COUNT" != "0" && "$IOS_COUNT" != "?" ]]; then
     check_item "iOS Simulator runtimes" "$IOS_COUNT runtime(s)" "ok"
   else
