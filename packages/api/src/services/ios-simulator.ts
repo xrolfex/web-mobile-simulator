@@ -681,6 +681,136 @@ export class IOSSimulatorService {
     log(`Text sent to device ${udid}`);
   }
 
+  /**
+   * Send a tap (touch down + up) at the given pixel coordinates on the iOS simulator.
+   * Uses: `xcrun simctl io <udid> sendTouchEvent down|up <x> <y>` (Xcode 15+).
+   *
+   * @param udid - The device UDID.
+   * @param x    - X pixel coordinate on the device screen.
+   * @param y    - Y pixel coordinate on the device screen.
+   * @throws If the simulator is not running or the command fails.
+   */
+  async sendTap(udid: string, x: number, y: number): Promise<void> {
+    log(`Sending tap to device ${udid} at (${x}, ${y})`);
+    await this.assertSimctlAvailable();
+
+    const px = String(Math.round(x));
+    const py = String(Math.round(y));
+
+    await exec(SIMCTL, ['simctl', 'io', udid, 'sendTouchEvent', 'began', px, py], XCRUN_EXEC_OPTIONS);
+    // Brief delay between began and ended to simulate a real tap
+    await new Promise<void>(resolve => setTimeout(resolve, 50));
+    await exec(SIMCTL, ['simctl', 'io', udid, 'sendTouchEvent', 'ended', px, py], XCRUN_EXEC_OPTIONS);
+
+    log(`Tap sent to device ${udid} at (${x}, ${y})`);
+  }
+
+  /**
+   * Send a swipe gesture from one point to another on the iOS simulator.
+   * Uses a series of `sendTouchEvent` commands: began → moved (interpolated) → ended.
+   *
+   * @param udid       - The device UDID.
+   * @param x1         - Starting X pixel coordinate.
+   * @param y1         - Starting Y pixel coordinate.
+   * @param x2         - Ending X pixel coordinate.
+   * @param y2         - Ending Y pixel coordinate.
+   * @param durationMs - Approximate duration of the swipe in milliseconds (default 300).
+   * @throws If the simulator is not running or the command fails.
+   */
+  async sendSwipe(
+    udid: string,
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    durationMs: number = 300,
+  ): Promise<void> {
+    log(`Sending swipe to device ${udid} from (${x1},${y1}) to (${x2},${y2})`);
+    await this.assertSimctlAvailable();
+
+    // Number of intermediate move steps for a smooth swipe
+    const steps = Math.max(5, Math.round(durationMs / 30));
+    const stepDelay = durationMs / steps;
+
+    // Touch down at start point
+    await exec(SIMCTL, ['simctl', 'io', udid, 'sendTouchEvent', 'began',
+      String(Math.round(x1)), String(Math.round(y1))], XCRUN_EXEC_OPTIONS);
+
+    // Interpolate move events
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      const ix = Math.round(x1 + (x2 - x1) * t);
+      const iy = Math.round(y1 + (y2 - y1) * t);
+      await new Promise<void>(resolve => setTimeout(resolve, stepDelay));
+      await exec(SIMCTL, ['simctl', 'io', udid, 'sendTouchEvent', 'moved',
+        String(ix), String(iy)], XCRUN_EXEC_OPTIONS);
+    }
+
+    // Touch up at end point
+    await exec(SIMCTL, ['simctl', 'io', udid, 'sendTouchEvent', 'ended',
+      String(Math.round(x2)), String(Math.round(y2))], XCRUN_EXEC_OPTIONS);
+
+    log(`Swipe sent to device ${udid}`);
+  }
+
+  /**
+   * Send a key event to the iOS simulator.
+   *
+   * For printable characters, uses `xcrun simctl io <udid> type <char>`.
+   * For special keys (Enter, Backspace, etc.), uses `xcrun simctl io <udid> sendKeyboardEvent <key>`
+   * which is available in Xcode 15+.
+   *
+   * @param udid - The device UDID.
+   * @param key  - The logical key value from KeyboardEvent.key (e.g. 'a', 'Enter', 'Backspace').
+   * @param code - The physical key code from KeyboardEvent.code (e.g. 'KeyA', 'Enter').
+   * @throws If the simulator is not running or the command fails.
+   */
+  async sendKeyEvent(udid: string, key: string, code: string): Promise<void> {
+    await this.assertSimctlAvailable();
+
+    // Map browser key names to simctl keyboard event codes
+    // simctl io sendKeyboardEvent uses key codes from IOHIDUsageTables.h
+    const specialKeyMap: Record<string, number> = {
+      'Enter': 0x28,        // kHIDUsage_KeyboardReturnOrEnter
+      'Backspace': 0x2A,    // kHIDUsage_KeyboardDeleteOrBackspace
+      'Delete': 0x4C,       // kHIDUsage_KeyboardDeleteForward
+      'Tab': 0x2B,          // kHIDUsage_KeyboardTab
+      'Escape': 0x29,       // kHIDUsage_KeyboardEscape
+      'ArrowUp': 0x52,      // kHIDUsage_KeyboardUpArrow
+      'ArrowDown': 0x51,    // kHIDUsage_KeyboardDownArrow
+      'ArrowLeft': 0x50,    // kHIDUsage_KeyboardLeftArrow
+      'ArrowRight': 0x4F,   // kHIDUsage_KeyboardRightArrow
+      ' ': 0x2C,            // kHIDUsage_KeyboardSpacebar
+      'Home': 0x4A,         // kHIDUsage_KeyboardHome
+      'End': 0x4D,          // kHIDUsage_KeyboardEnd
+      'PageUp': 0x4B,       // kHIDUsage_KeyboardPageUp
+      'PageDown': 0x4E,     // kHIDUsage_KeyboardPageDown
+    };
+
+    const hidCode = specialKeyMap[key];
+    if (hidCode !== undefined) {
+      // Use simctl keyboard event for special keys (Xcode 15+)
+      try {
+        await exec(
+          SIMCTL,
+          ['simctl', 'io', udid, 'sendKeyboardEvent', String(hidCode)],
+          XCRUN_EXEC_OPTIONS,
+        );
+      } catch {
+        // sendKeyboardEvent may not be available in older Xcode — log and skip
+        log(`sendKeyboardEvent not supported for key "${key}" (HID code 0x${hidCode.toString(16)})`);
+      }
+    } else if (key.length === 1) {
+      // Single printable character — use `simctl io type`
+      await exec(
+        SIMCTL,
+        ['simctl', 'io', udid, 'type', key],
+        XCRUN_EXEC_OPTIONS,
+      );
+    }
+    // Multi-character keys not in the map are silently ignored
+  }
+
   // -------------------------------------------------------------------------
   // Private helpers
   // -------------------------------------------------------------------------

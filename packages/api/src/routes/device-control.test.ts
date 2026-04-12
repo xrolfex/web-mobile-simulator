@@ -22,6 +22,11 @@ vi.mock('../services/index.js', () => ({
     sendText: vi.fn(),
   },
   androidEmulatorService: {
+    pressButton: vi.fn(),
+    setOrientation: vi.fn(),
+    takeScreenshot: vi.fn(),
+    setClipboard: vi.fn(),
+    getClipboard: vi.fn(),
     openUrl: vi.fn(),
     sendText: vi.fn(),
   },
@@ -50,6 +55,11 @@ const mockSetClipboard = vi.mocked(iosSimulatorService.setClipboard);
 const mockGetClipboard = vi.mocked(iosSimulatorService.getClipboard);
 const mockIosOpenUrl = vi.mocked(iosSimulatorService.openUrl);
 const mockIosSendText = vi.mocked(iosSimulatorService.sendText);
+const mockAndroidPressButton = vi.mocked(androidEmulatorService.pressButton);
+const mockAndroidSetOrientation = vi.mocked(androidEmulatorService.setOrientation);
+const mockAndroidTakeScreenshot = vi.mocked(androidEmulatorService.takeScreenshot);
+const mockAndroidSetClipboard = vi.mocked(androidEmulatorService.setClipboard);
+const mockAndroidGetClipboard = vi.mocked(androidEmulatorService.getClipboard);
 const mockAndroidOpenUrl = vi.mocked(androidEmulatorService.openUrl);
 const mockAndroidSendText = vi.mocked(androidEmulatorService.sendText);
 const mockReadFile = vi.mocked(readFile);
@@ -186,9 +196,10 @@ describe('POST /api/sessions/:id/control/button', () => {
     expect(json.error.message).toContain('creating');
   });
 
-  it('returns 400 with UNSUPPORTED_PLATFORM when session platform is "android"', async () => {
+  it('returns 200 and calls androidEmulatorService.pressButton for Android sessions', async () => {
     // Arrange
     mockGetSession.mockReturnValue(androidSession);
+    mockAndroidPressButton.mockResolvedValue(undefined);
 
     // Act
     const response = await app.inject({
@@ -199,10 +210,12 @@ describe('POST /api/sessions/:id/control/button', () => {
     });
 
     // Assert
-    expect(response.statusCode).toBe(400);
+    expect(response.statusCode).toBe(200);
     const json = response.json();
-    expect(json.success).toBe(false);
-    expect(json.error.code).toBe('UNSUPPORTED_PLATFORM');
+    expect(json.success).toBe(true);
+    expect(mockAndroidPressButton).toHaveBeenCalledOnce();
+    expect(mockAndroidPressButton).toHaveBeenCalledWith('test_avd', 'home');
+    expect(mockPressButton).not.toHaveBeenCalled();
   });
 
   it('returns 400 with INVALID_BUTTON when button value is invalid', async () => {
@@ -291,7 +304,7 @@ describe('POST /api/sessions/:id/control/button', () => {
     }
   });
 
-  it('returns 502 with SIMCTL_ERROR when pressButton throws', async () => {
+  it('returns 502 with COMMAND_ERROR when pressButton throws', async () => {
     // Arrange
     mockGetSession.mockReturnValue(activeIosSession);
     mockPressButton.mockRejectedValue(new Error('simctl failed'));
@@ -308,7 +321,7 @@ describe('POST /api/sessions/:id/control/button', () => {
     expect(response.statusCode).toBe(502);
     const json = response.json();
     expect(json.success).toBe(false);
-    expect(json.error.code).toBe('SIMCTL_ERROR');
+    expect(json.error.code).toBe('COMMAND_ERROR');
     expect(json.error.message).toContain('simctl failed');
   });
 });
@@ -355,9 +368,10 @@ describe('POST /api/sessions/:id/control/rotate', () => {
     expect(json.error.code).toBe('SESSION_NOT_ACTIVE');
   });
 
-  it('returns 400 with UNSUPPORTED_PLATFORM for Android sessions', async () => {
+  it('returns 200 and calls androidEmulatorService.setOrientation for Android sessions', async () => {
     // Arrange
     mockGetSession.mockReturnValue(androidSession);
+    mockAndroidSetOrientation.mockResolvedValue(undefined);
 
     // Act
     const response = await app.inject({
@@ -368,9 +382,12 @@ describe('POST /api/sessions/:id/control/rotate', () => {
     });
 
     // Assert
-    expect(response.statusCode).toBe(400);
+    expect(response.statusCode).toBe(200);
     const json = response.json();
-    expect(json.error.code).toBe('UNSUPPORTED_PLATFORM');
+    expect(json.success).toBe(true);
+    expect(mockAndroidSetOrientation).toHaveBeenCalledOnce();
+    expect(mockAndroidSetOrientation).toHaveBeenCalledWith('test_avd', 'portrait');
+    expect(mockSetOrientation).not.toHaveBeenCalled();
   });
 
   it('returns 400 with INVALID_ORIENTATION when orientation value is invalid', async () => {
@@ -459,7 +476,7 @@ describe('POST /api/sessions/:id/control/rotate', () => {
     }
   });
 
-  it('returns 502 with SIMCTL_ERROR when setOrientation throws', async () => {
+  it('returns 502 with COMMAND_ERROR when setOrientation throws', async () => {
     // Arrange
     mockGetSession.mockReturnValue(activeIosSession);
     mockSetOrientation.mockRejectedValue(new Error('orientation not supported'));
@@ -475,7 +492,7 @@ describe('POST /api/sessions/:id/control/rotate', () => {
     // Assert
     expect(response.statusCode).toBe(502);
     const json = response.json();
-    expect(json.error.code).toBe('SIMCTL_ERROR');
+    expect(json.error.code).toBe('COMMAND_ERROR');
     expect(json.error.message).toContain('orientation not supported');
   });
 });
@@ -518,7 +535,7 @@ describe('POST /api/sessions/:id/control/shake', () => {
     expect(json.error.code).toBe('SESSION_NOT_ACTIVE');
   });
 
-  it('returns 400 with UNSUPPORTED_PLATFORM for Android sessions', async () => {
+  it('returns 400 with UNSUPPORTED_ACTION for Android sessions', async () => {
     // Arrange
     mockGetSession.mockReturnValue(androidSession);
 
@@ -531,7 +548,8 @@ describe('POST /api/sessions/:id/control/shake', () => {
     // Assert
     expect(response.statusCode).toBe(400);
     const json = response.json();
-    expect(json.error.code).toBe('UNSUPPORTED_PLATFORM');
+    expect(json.error.code).toBe('UNSUPPORTED_ACTION');
+    expect(json.error.message).toContain('Android');
   });
 
   it('returns 200 and calls shake with the correct UDID on success', async () => {
@@ -554,7 +572,7 @@ describe('POST /api/sessions/:id/control/shake', () => {
     expect(mockShake).toHaveBeenCalledWith('UDID-12345');
   });
 
-  it('returns 502 with SIMCTL_ERROR when shake throws', async () => {
+  it('returns 502 with COMMAND_ERROR when shake throws', async () => {
     // Arrange
     mockGetSession.mockReturnValue(activeIosSession);
     mockShake.mockRejectedValue(
@@ -570,7 +588,7 @@ describe('POST /api/sessions/:id/control/shake', () => {
     // Assert
     expect(response.statusCode).toBe(502);
     const json = response.json();
-    expect(json.error.code).toBe('SIMCTL_ERROR');
+    expect(json.error.code).toBe('COMMAND_ERROR');
     expect(json.error.message).toContain('Shake gesture is not supported');
   });
 });
@@ -613,9 +631,12 @@ describe('GET /api/sessions/:id/control/screenshot', () => {
     expect(json.error.code).toBe('SESSION_NOT_ACTIVE');
   });
 
-  it('returns 400 with UNSUPPORTED_PLATFORM for Android sessions', async () => {
+  it('returns 200 and calls androidEmulatorService.takeScreenshot for Android sessions', async () => {
     // Arrange
+    const fakePngBuffer = Buffer.from('fake-png-data');
     mockGetSession.mockReturnValue(androidSession);
+    mockAndroidTakeScreenshot.mockResolvedValue(undefined);
+    mockReadFile.mockResolvedValue(fakePngBuffer);
 
     // Act
     const response = await app.inject({
@@ -624,9 +645,14 @@ describe('GET /api/sessions/:id/control/screenshot', () => {
     });
 
     // Assert
-    expect(response.statusCode).toBe(400);
-    const json = response.json();
-    expect(json.error.code).toBe('UNSUPPORTED_PLATFORM');
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['content-type']).toContain('image/png');
+    expect(mockAndroidTakeScreenshot).toHaveBeenCalledOnce();
+    expect(mockAndroidTakeScreenshot).toHaveBeenCalledWith(
+      'test_avd',
+      expect.stringContaining('screenshot-session-abc-'),
+    );
+    expect(mockTakeScreenshot).not.toHaveBeenCalled();
   });
 
   it('returns 200 with image/png content-type and PNG body on success', async () => {
@@ -686,7 +712,7 @@ describe('GET /api/sessions/:id/control/screenshot', () => {
     expect(mockReadFile).toHaveBeenCalledWith(screenshotPath);
   });
 
-  it('returns 502 with SIMCTL_ERROR when takeScreenshot throws', async () => {
+  it('returns 502 with COMMAND_ERROR when takeScreenshot throws', async () => {
     // Arrange
     mockGetSession.mockReturnValue(activeIosSession);
     mockTakeScreenshot.mockRejectedValue(new Error('simctl io failed'));
@@ -700,7 +726,7 @@ describe('GET /api/sessions/:id/control/screenshot', () => {
     // Assert
     expect(response.statusCode).toBe(502);
     const json = response.json();
-    expect(json.error.code).toBe('SIMCTL_ERROR');
+    expect(json.error.code).toBe('COMMAND_ERROR');
     expect(json.error.message).toContain('simctl io failed');
   });
 
@@ -840,9 +866,10 @@ describe('POST /api/sessions/:id/control/clipboard', () => {
     expect(json.error.code).toBe('SESSION_NOT_ACTIVE');
   });
 
-  it('returns 400 with UNSUPPORTED_PLATFORM when session platform is "android"', async () => {
+  it('returns 200 and calls androidEmulatorService.setClipboard for Android sessions', async () => {
     // Arrange — text validation happens first, so provide valid text
     mockGetSession.mockReturnValue(androidSession);
+    mockAndroidSetClipboard.mockResolvedValue(undefined);
 
     // Act
     const response = await app.inject({
@@ -853,10 +880,12 @@ describe('POST /api/sessions/:id/control/clipboard', () => {
     });
 
     // Assert
-    expect(response.statusCode).toBe(400);
+    expect(response.statusCode).toBe(200);
     const json = response.json();
-    expect(json.success).toBe(false);
-    expect(json.error.code).toBe('UNSUPPORTED_PLATFORM');
+    expect(json.success).toBe(true);
+    expect(mockAndroidSetClipboard).toHaveBeenCalledOnce();
+    expect(mockAndroidSetClipboard).toHaveBeenCalledWith('test_avd', 'hello');
+    expect(mockSetClipboard).not.toHaveBeenCalled();
   });
 
   it('returns 400 with INVALID_TEXT when text field is missing from body', async () => {
@@ -958,7 +987,7 @@ describe('POST /api/sessions/:id/control/clipboard', () => {
     expect(mockSetClipboard).toHaveBeenCalledWith('UDID-12345', '');
   });
 
-  it('returns 502 with SIMCTL_ERROR when setClipboard throws', async () => {
+  it('returns 502 with COMMAND_ERROR when setClipboard throws', async () => {
     // Arrange
     mockGetSession.mockReturnValue(activeIosSession);
     mockSetClipboard.mockRejectedValue(new Error('pbcopy exited with code 1'));
@@ -975,7 +1004,7 @@ describe('POST /api/sessions/:id/control/clipboard', () => {
     expect(response.statusCode).toBe(502);
     const json = response.json();
     expect(json.success).toBe(false);
-    expect(json.error.code).toBe('SIMCTL_ERROR');
+    expect(json.error.code).toBe('COMMAND_ERROR');
     expect(json.error.message).toContain('pbcopy exited with code 1');
   });
 });
@@ -1018,9 +1047,10 @@ describe('GET /api/sessions/:id/control/clipboard', () => {
     expect(json.error.code).toBe('SESSION_NOT_ACTIVE');
   });
 
-  it('returns 400 with UNSUPPORTED_PLATFORM when session platform is "android"', async () => {
+  it('returns 200 and calls androidEmulatorService.getClipboard for Android sessions', async () => {
     // Arrange
     mockGetSession.mockReturnValue(androidSession);
+    mockAndroidGetClipboard.mockResolvedValue('android clipboard text');
 
     // Act
     const response = await app.inject({
@@ -1029,10 +1059,13 @@ describe('GET /api/sessions/:id/control/clipboard', () => {
     });
 
     // Assert
-    expect(response.statusCode).toBe(400);
+    expect(response.statusCode).toBe(200);
     const json = response.json();
-    expect(json.success).toBe(false);
-    expect(json.error.code).toBe('UNSUPPORTED_PLATFORM');
+    expect(json.success).toBe(true);
+    expect(json.data.text).toBe('android clipboard text');
+    expect(mockAndroidGetClipboard).toHaveBeenCalledOnce();
+    expect(mockAndroidGetClipboard).toHaveBeenCalledWith('test_avd');
+    expect(mockGetClipboard).not.toHaveBeenCalled();
   });
 
   it('returns 200 with { text } payload and calls getClipboard with correct UDID', async () => {
@@ -1072,7 +1105,7 @@ describe('GET /api/sessions/:id/control/clipboard', () => {
     expect(json.data.text).toBe('');
   });
 
-  it('returns 502 with SIMCTL_ERROR when getClipboard throws', async () => {
+  it('returns 502 with COMMAND_ERROR when getClipboard throws', async () => {
     // Arrange
     mockGetSession.mockReturnValue(activeIosSession);
     mockGetClipboard.mockRejectedValue(new Error('pbpaste failed'));
@@ -1087,7 +1120,7 @@ describe('GET /api/sessions/:id/control/clipboard', () => {
     expect(response.statusCode).toBe(502);
     const json = response.json();
     expect(json.success).toBe(false);
-    expect(json.error.code).toBe('SIMCTL_ERROR');
+    expect(json.error.code).toBe('COMMAND_ERROR');
     expect(json.error.message).toContain('pbpaste failed');
   });
 });

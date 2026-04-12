@@ -98,51 +98,6 @@ const VALID_ORIENTATIONS: DeviceOrientation[] = [
 // ---------------------------------------------------------------------------
 
 /**
- * Look up a session and verify it is active on an iOS device.
- * Returns the session's `platformDeviceId` (UDID) on success, or sends an
- * error reply and returns `null` on failure.
- *
- * @param id     - Session UUID from the route param.
- * @param reply  - The Fastify reply instance used to send error responses.
- * @returns The simulator UDID, or `null` if a response has already been sent.
- */
-async function resolveIosSession(
-  id: string,
-  reply: FastifyReply,
-): Promise<string | null> {
-  const session = sessionManagerService.getSession(id);
-
-  if (session === null) {
-    await reply.code(404).send(
-      errorResponse('SESSION_NOT_FOUND', `Session "${id}" not found.`),
-    );
-    return null;
-  }
-
-  if (session.status !== 'active') {
-    await reply.code(400).send(
-      errorResponse(
-        'SESSION_NOT_ACTIVE',
-        `Session is "${session.status}", not active.`,
-      ),
-    );
-    return null;
-  }
-
-  if (session.device.platform !== 'ios') {
-    await reply.code(400).send(
-      errorResponse(
-        'UNSUPPORTED_PLATFORM',
-        'Device control is not yet supported for Android.',
-      ),
-    );
-    return null;
-  }
-
-  return session.device.platformDeviceId;
-}
-
-/**
  * Look up a session and verify it is active.
  * Returns the session on success, or sends an error reply and returns `null`.
  *
@@ -183,24 +138,29 @@ async function resolveActiveSession(
 /**
  * Device control route plugin.
  *
- * Registers endpoints for hardware-level simulator interactions that cannot
- * be performed through the VNC stream:
+ * Registers endpoints for hardware-level simulator/emulator interactions that
+ * cannot be performed through the VNC stream (iOS and Android supported unless
+ * noted):
  * - POST /api/sessions/:id/control/button     — Press a hardware button
  * - POST /api/sessions/:id/control/rotate     — Set device orientation
- * - POST /api/sessions/:id/control/shake      — Trigger a shake gesture
+ * - POST /api/sessions/:id/control/shake      — Trigger a shake gesture (iOS only)
  * - GET  /api/sessions/:id/control/screenshot — Capture and return a PNG screenshot
+ * - POST /api/sessions/:id/control/clipboard  — Set clipboard text
+ * - GET  /api/sessions/:id/control/clipboard  — Get clipboard text
+ * - POST /api/sessions/:id/control/open-url   — Open a URL or deep-link
+ * - POST /api/sessions/:id/control/send-text  — Type text into the focused field
  */
 const deviceControlRoutes: FastifyPluginAsync = async (fastify) => {
   // ── POST /api/sessions/:id/control/button ──────────────────────────────────
 
   /**
-   * Press a hardware button on the session's iOS simulator.
+   * Press a hardware button on the session's simulator or emulator (iOS and Android supported).
    *
    * Responds with:
    * - 200 OK           — button pressed successfully
-   * - 400 Bad Request  — invalid button name, session not active, or non-iOS platform
+   * - 400 Bad Request  — invalid button name or session not active
    * - 404 Not Found    — session does not exist
-   * - 502 Bad Gateway  — simctl command failed
+   * - 502 Bad Gateway  — device command failed
    */
   fastify.post(
     '/api/sessions/:id/control/button',
@@ -217,16 +177,20 @@ const deviceControlRoutes: FastifyPluginAsync = async (fastify) => {
         );
       }
 
-      const udid = await resolveIosSession(id, reply);
-      if (udid === null) return;
+      const session = await resolveActiveSession(id, reply);
+      if (session === null) return;
 
       try {
-        await iosSimulatorService.pressButton(udid, button);
+        if (session.device.platform === 'ios') {
+          await iosSimulatorService.pressButton(session.device.platformDeviceId, button);
+        } else {
+          await androidEmulatorService.pressButton(session.device.platformDeviceId, button);
+        }
         return reply.code(200).send(successResponse({ success: true }));
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : 'Failed to press button.';
         return reply.code(502).send(
-          errorResponse('SIMCTL_ERROR', message, String(error)),
+          errorResponse('COMMAND_ERROR', message, String(error)),
         );
       }
     },
@@ -235,13 +199,13 @@ const deviceControlRoutes: FastifyPluginAsync = async (fastify) => {
   // ── POST /api/sessions/:id/control/rotate ──────────────────────────────────
 
   /**
-   * Set the orientation of the session's iOS simulator.
+   * Set the orientation of the session's simulator or emulator (iOS and Android supported).
    *
    * Responds with:
    * - 200 OK           — orientation set successfully
-   * - 400 Bad Request  — invalid orientation, session not active, or non-iOS platform
+   * - 400 Bad Request  — invalid orientation or session not active
    * - 404 Not Found    — session does not exist
-   * - 502 Bad Gateway  — simctl command failed
+   * - 502 Bad Gateway  — device command failed
    */
   fastify.post(
     '/api/sessions/:id/control/rotate',
@@ -258,16 +222,20 @@ const deviceControlRoutes: FastifyPluginAsync = async (fastify) => {
         );
       }
 
-      const udid = await resolveIosSession(id, reply);
-      if (udid === null) return;
+      const session = await resolveActiveSession(id, reply);
+      if (session === null) return;
 
       try {
-        await iosSimulatorService.setOrientation(udid, orientation);
+        if (session.device.platform === 'ios') {
+          await iosSimulatorService.setOrientation(session.device.platformDeviceId, orientation);
+        } else {
+          await androidEmulatorService.setOrientation(session.device.platformDeviceId, orientation);
+        }
         return reply.code(200).send(successResponse({ success: true }));
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : 'Failed to set orientation.';
         return reply.code(502).send(
-          errorResponse('SIMCTL_ERROR', message, String(error)),
+          errorResponse('COMMAND_ERROR', message, String(error)),
         );
       }
     },
@@ -278,12 +246,13 @@ const deviceControlRoutes: FastifyPluginAsync = async (fastify) => {
   /**
    * Trigger a shake gesture on the session's iOS simulator.
    *
-   * Note: The shake command requires Xcode 15+ — an appropriate 502 is
-   * returned for older installations.
+   * Note: Shake is iOS-only. Android sessions receive a 400 with
+   * `UNSUPPORTED_ACTION`. The shake command also requires Xcode 15+ — an
+   * appropriate 502 is returned for older installations.
    *
    * Responds with:
    * - 200 OK           — shake triggered successfully
-   * - 400 Bad Request  — session not active or non-iOS platform
+   * - 400 Bad Request  — session not active or Android session
    * - 404 Not Found    — session does not exist
    * - 502 Bad Gateway  — simctl command failed or not supported
    */
@@ -292,16 +261,22 @@ const deviceControlRoutes: FastifyPluginAsync = async (fastify) => {
     async (request: SessionIdParamRequest, reply: FastifyReply) => {
       const { id } = request.params;
 
-      const udid = await resolveIosSession(id, reply);
-      if (udid === null) return;
+      const session = await resolveActiveSession(id, reply);
+      if (session === null) return;
+
+      if (session.device.platform !== 'ios') {
+        return reply.code(400).send(
+          errorResponse('UNSUPPORTED_ACTION', 'Shake gesture is not supported on Android.'),
+        );
+      }
 
       try {
-        await iosSimulatorService.shake(udid);
+        await iosSimulatorService.shake(session.device.platformDeviceId);
         return reply.code(200).send(successResponse({ success: true }));
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : 'Failed to trigger shake.';
         return reply.code(502).send(
-          errorResponse('SIMCTL_ERROR', message, String(error)),
+          errorResponse('COMMAND_ERROR', message, String(error)),
         );
       }
     },
@@ -310,17 +285,17 @@ const deviceControlRoutes: FastifyPluginAsync = async (fastify) => {
   // ── GET /api/sessions/:id/control/screenshot ───────────────────────────────
 
   /**
-   * Capture a PNG screenshot of the session's iOS simulator and return it
-   * as a binary response with content-type `image/png`.
+   * Capture a PNG screenshot of the session's simulator or emulator and return
+   * it as a binary response with content-type `image/png`.
    *
    * The screenshot is written to a temporary file, read into memory, returned
    * to the client, and then cleaned up — all in a single request cycle.
    *
    * Responds with:
    * - 200 OK           — PNG image body
-   * - 400 Bad Request  — session not active or non-iOS platform
+   * - 400 Bad Request  — session not active
    * - 404 Not Found    — session does not exist
-   * - 502 Bad Gateway  — simctl command failed
+   * - 502 Bad Gateway  — device command failed
    * - 500 Internal Server Error — temp file read failure
    */
   fastify.get(
@@ -328,13 +303,17 @@ const deviceControlRoutes: FastifyPluginAsync = async (fastify) => {
     async (request: SessionIdParamRequest, reply: FastifyReply) => {
       const { id } = request.params;
 
-      const udid = await resolveIosSession(id, reply);
-      if (udid === null) return;
+      const session = await resolveActiveSession(id, reply);
+      if (session === null) return;
 
       const tempPath = join(tmpdir(), `screenshot-${id}-${Date.now()}.png`);
 
       try {
-        await iosSimulatorService.takeScreenshot(udid, tempPath);
+        if (session.device.platform === 'ios') {
+          await iosSimulatorService.takeScreenshot(session.device.platformDeviceId, tempPath);
+        } else {
+          await androidEmulatorService.takeScreenshot(session.device.platformDeviceId, tempPath);
+        }
 
         const imageBuffer = await readFile(tempPath);
         return reply.code(200).type('image/png').send(imageBuffer);
@@ -342,12 +321,12 @@ const deviceControlRoutes: FastifyPluginAsync = async (fastify) => {
         const message =
           error instanceof Error ? error.message : 'Failed to take screenshot.';
         return reply.code(502).send(
-          errorResponse('SIMCTL_ERROR', message, String(error)),
+          errorResponse('COMMAND_ERROR', message, String(error)),
         );
       } finally {
         // Always clean up the temp file, whether the request succeeded or not.
         await unlink(tempPath).catch(() => {
-          // Ignore cleanup errors — file may not exist if simctl failed before writing.
+          // Ignore cleanup errors — file may not exist if the command failed before writing.
         });
       }
     },
@@ -356,13 +335,13 @@ const deviceControlRoutes: FastifyPluginAsync = async (fastify) => {
   // ── POST /api/sessions/:id/control/clipboard ───────────────────────────────
 
   /**
-   * Set the clipboard text on the session's iOS simulator.
+   * Set the clipboard text on the session's simulator or emulator (iOS and Android supported).
    *
    * Responds with:
    * - 200 OK           — clipboard set successfully
-   * - 400 Bad Request  — missing/invalid text, session not active, or non-iOS platform
+   * - 400 Bad Request  — missing/invalid text or session not active
    * - 404 Not Found    — session does not exist
-   * - 502 Bad Gateway  — simctl command failed
+   * - 502 Bad Gateway  — device command failed
    */
   fastify.post(
     '/api/sessions/:id/control/clipboard',
@@ -376,16 +355,20 @@ const deviceControlRoutes: FastifyPluginAsync = async (fastify) => {
         );
       }
 
-      const udid = await resolveIosSession(id, reply);
-      if (udid === null) return;
+      const session = await resolveActiveSession(id, reply);
+      if (session === null) return;
 
       try {
-        await iosSimulatorService.setClipboard(udid, text);
+        if (session.device.platform === 'ios') {
+          await iosSimulatorService.setClipboard(session.device.platformDeviceId, text);
+        } else {
+          await androidEmulatorService.setClipboard(session.device.platformDeviceId, text);
+        }
         return reply.code(200).send(successResponse({ success: true }));
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : 'Failed to set clipboard.';
         return reply.code(502).send(
-          errorResponse('SIMCTL_ERROR', message, String(error)),
+          errorResponse('COMMAND_ERROR', message, String(error)),
         );
       }
     },
@@ -394,29 +377,31 @@ const deviceControlRoutes: FastifyPluginAsync = async (fastify) => {
   // ── GET /api/sessions/:id/control/clipboard ────────────────────────────────
 
   /**
-   * Get the clipboard text from the session's iOS simulator.
+   * Get the clipboard text from the session's simulator or emulator (iOS and Android supported).
    *
    * Responds with:
    * - 200 OK           — `{ text: string }` payload
-   * - 400 Bad Request  — session not active or non-iOS platform
+   * - 400 Bad Request  — session not active
    * - 404 Not Found    — session does not exist
-   * - 502 Bad Gateway  — simctl command failed
+   * - 502 Bad Gateway  — device command failed
    */
   fastify.get(
     '/api/sessions/:id/control/clipboard',
     async (request: SessionIdParamRequest, reply: FastifyReply) => {
       const { id } = request.params;
 
-      const udid = await resolveIosSession(id, reply);
-      if (udid === null) return;
+      const session = await resolveActiveSession(id, reply);
+      if (session === null) return;
 
       try {
-        const text = await iosSimulatorService.getClipboard(udid);
+        const text = session.device.platform === 'ios'
+          ? await iosSimulatorService.getClipboard(session.device.platformDeviceId)
+          : await androidEmulatorService.getClipboard(session.device.platformDeviceId);
         return reply.code(200).send(successResponse<GetClipboardResponse>({ text }));
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : 'Failed to get clipboard.';
         return reply.code(502).send(
-          errorResponse('SIMCTL_ERROR', message, String(error)),
+          errorResponse('COMMAND_ERROR', message, String(error)),
         );
       }
     },

@@ -35,8 +35,8 @@ function warn(message: string): void {
  * 4. On WebSocket close or error, subscriptions are cleaned up.
  * 5. On capture error the WebSocket is closed with code 1011.
  *
- * Input messages from the browser are expected to be JSON-encoded events
- * such as touch or key events (forwarding to the device is a future task).
+ * Input messages from the browser are JSON-encoded events for touch and key
+ * input forwarding to the device.
  */
 const wsStreamRoutes: FastifyPluginAsync = async (fastify) => {
   // @fastify/websocket v11 + Fastify 5: handler receives (socket, request)
@@ -122,14 +122,24 @@ const wsStreamRoutes: FastifyPluginAsync = async (fastify) => {
                 deviceX,
                 deviceY,
               ).catch((err: unknown) => {
-                warn(`Failed to forward tap for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
+                const errMsg = err instanceof Error ? err.message : String(err);
+                warn(`Failed to forward tap for session ${sessionId}: ${errMsg}`);
+                if (socket.readyState === 1 /* WebSocket.OPEN */) {
+                  socket.send(JSON.stringify({ type: 'error', message: `Tap failed: ${errMsg}` }));
+                }
               });
-            } else if (session.device.platform === 'ios') {
-              // iOS touch injection is not supported via simctl — there is no built-in
-              // simctl command for programmatic touch input injection. Users interact
-              // directly through the Simulator.app GUI window that opens alongside
-              // the session.
-              log(`iOS touch event received for session ${sessionId} at (${deviceX}, ${deviceY}) — forwarding not yet supported`);
+            } else if (session.device.platform === 'ios' && session.device.platformDeviceId) {
+              iosSimulatorService.sendTap(
+                session.device.platformDeviceId,
+                deviceX,
+                deviceY,
+              ).catch((err: unknown) => {
+                const errMsg = err instanceof Error ? err.message : String(err);
+                warn(`Failed to forward tap for session ${sessionId}: ${errMsg}`);
+                if (socket.readyState === 1 /* WebSocket.OPEN */) {
+                  socket.send(JSON.stringify({ type: 'error', message: `Tap failed: ${errMsg}` }));
+                }
+              });
             }
           } else if (msg.type === 'touch' && msg.action === 'swipe') {
             const deviceStartX = msg.deviceStartX as number;
@@ -150,7 +160,54 @@ const wsStreamRoutes: FastifyPluginAsync = async (fastify) => {
                 deviceStartX, deviceStartY,
                 deviceEndX, deviceEndY,
               ).catch((err: unknown) => {
-                warn(`Failed to forward swipe for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
+                const errMsg = err instanceof Error ? err.message : String(err);
+                warn(`Failed to forward swipe for session ${sessionId}: ${errMsg}`);
+                if (socket.readyState === 1 /* WebSocket.OPEN */) {
+                  socket.send(JSON.stringify({ type: 'error', message: `Swipe failed: ${errMsg}` }));
+                }
+              });
+            } else if (session.device.platform === 'ios' && session.device.platformDeviceId) {
+              iosSimulatorService.sendSwipe(
+                session.device.platformDeviceId,
+                deviceStartX, deviceStartY,
+                deviceEndX, deviceEndY,
+              ).catch((err: unknown) => {
+                const errMsg = err instanceof Error ? err.message : String(err);
+                warn(`Failed to forward swipe for session ${sessionId}: ${errMsg}`);
+                if (socket.readyState === 1 /* WebSocket.OPEN */) {
+                  socket.send(JSON.stringify({ type: 'error', message: `Swipe failed: ${errMsg}` }));
+                }
+              });
+            }
+          } else if (msg.type === 'key') {
+            const key = msg.key as string;
+            const code = msg.code as string;
+
+            if (typeof key !== 'string' || !key) return;
+
+            if (session.device.platform === 'android' && session.device.platformDeviceId) {
+              androidEmulatorService.sendKeyEvent(
+                session.device.platformDeviceId,
+                key,
+                code,
+              ).catch((err: unknown) => {
+                const errMsg = err instanceof Error ? err.message : String(err);
+                warn(`Failed to forward key event for session ${sessionId}: ${errMsg}`);
+                if (socket.readyState === 1 /* WebSocket.OPEN */) {
+                  socket.send(JSON.stringify({ type: 'error', message: `Key event failed: ${errMsg}` }));
+                }
+              });
+            } else if (session.device.platform === 'ios' && session.device.platformDeviceId) {
+              iosSimulatorService.sendKeyEvent(
+                session.device.platformDeviceId,
+                key,
+                code,
+              ).catch((err: unknown) => {
+                const errMsg = err instanceof Error ? err.message : String(err);
+                warn(`Failed to forward key event for session ${sessionId}: ${errMsg}`);
+                if (socket.readyState === 1 /* WebSocket.OPEN */) {
+                  socket.send(JSON.stringify({ type: 'error', message: `Key event failed: ${errMsg}` }));
+                }
               });
             }
           }

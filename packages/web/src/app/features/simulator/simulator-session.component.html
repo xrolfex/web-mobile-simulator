@@ -91,7 +91,7 @@
     }
 
     <!-- ── Device Controls ──────────────────────────────────────────── -->
-    @if (isReady() && session()!.device.platform === 'ios') {
+    @if (isReady()) {
       <div class="controls-section">
         <h3 class="controls-section__title">Device Controls</h3>
 
@@ -140,16 +140,19 @@
             <span class="ctrl-btn__label">Vol −</span>
           </button>
 
-          <button
-            class="ctrl-btn"
-            (click)="onShake()"
-            [disabled]="controlBusy()"
-            title="Shake Gesture"
-            aria-label="Trigger shake gesture"
-          >
-            <span class="ctrl-btn__icon" aria-hidden="true">📳</span>
-            <span class="ctrl-btn__label">Shake</span>
-          </button>
+          @if (session()!.device.platform === 'ios') {
+            <!-- TODO: Add Android Back button once SimulatorButton type includes 'back' -->
+            <button
+              class="ctrl-btn"
+              (click)="onShake()"
+              [disabled]="controlBusy()"
+              title="Shake Gesture"
+              aria-label="Trigger shake gesture"
+            >
+              <span class="ctrl-btn__icon" aria-hidden="true">📳</span>
+              <span class="ctrl-btn__label">Shake</span>
+            </button>
+          }
 
           <button
             class="ctrl-btn"
@@ -193,37 +196,38 @@
       <div class="controls-section">
         <h3 class="controls-section__title">Quick Actions</h3>
 
-        <!-- Clipboard (iOS only) -->
-        @if (session()!.device.platform === 'ios') {
-          <div class="quick-action">
-            <label class="quick-action__label">📋 Clipboard</label>
-            <div class="quick-action__row">
-              <input
-                type="text"
-                class="quick-action__input"
-                placeholder="Text to paste…"
-                [(ngModel)]="clipboardText"
-                [disabled]="controlBusy()"
-                aria-label="Clipboard text"
-                (keydown.enter)="onSetClipboard()"
-              />
-              <button
-                class="quick-action__btn"
-                (click)="onSetClipboard()"
-                [disabled]="controlBusy() || !clipboardText()"
-                title="Set device clipboard"
-                aria-label="Set clipboard on device"
-              >Paste</button>
-              <button
-                class="quick-action__btn quick-action__btn--secondary"
-                (click)="onGetClipboard()"
-                [disabled]="controlBusy()"
-                title="Read device clipboard"
-                aria-label="Read clipboard from device"
-              >Read</button>
-            </div>
+        <!-- Clipboard (both platforms) -->
+        <div class="quick-action">
+          <label class="quick-action__label">📋 Clipboard</label>
+          <div class="quick-action__row">
+            <input
+              type="text"
+              class="quick-action__input"
+              placeholder="Text to paste…"
+              [ngModel]="clipboardText()" (ngModelChange)="clipboardText.set($event)"
+              [disabled]="controlBusy()"
+              aria-label="Clipboard text"
+              (keydown.enter)="onSetClipboard()"
+            />
+            <button
+              class="quick-action__btn"
+              (click)="onSetClipboard()"
+              [disabled]="controlBusy() || !clipboardText()"
+              title="Set device clipboard"
+              aria-label="Set clipboard on device"
+            >Paste</button>
+            <button
+              class="quick-action__btn quick-action__btn--secondary"
+              (click)="onGetClipboard()"
+              [disabled]="controlBusy()"
+              title="Read device clipboard"
+              aria-label="Read clipboard from device"
+            >Read</button>
           </div>
-        }
+          @if (session()!.device.platform === 'android') {
+            <p class="quick-action__hint">Requires Android 12+ (API 31)</p>
+          }
+        </div>
 
         <!-- Open URL (both platforms) -->
         <div class="quick-action">
@@ -233,7 +237,7 @@
               type="url"
               class="quick-action__input"
               placeholder="https:// or deep-link…"
-              [(ngModel)]="urlText"
+              [ngModel]="urlText()" (ngModelChange)="urlText.set($event)"
               [disabled]="controlBusy()"
               aria-label="URL to open"
               (keydown.enter)="onOpenUrl()"
@@ -256,7 +260,7 @@
               type="text"
               class="quick-action__input"
               placeholder="Text to type…"
-              [(ngModel)]="sendTextValue"
+              [ngModel]="sendTextValue()" (ngModelChange)="sendTextValue.set($event)"
               [disabled]="controlBusy()"
               aria-label="Text to type on device"
               (keydown.enter)="onSendText()"

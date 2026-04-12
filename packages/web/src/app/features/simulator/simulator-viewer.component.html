@@ -56,8 +56,12 @@
     <canvas
       #displayCanvas
       class="display-canvas"
-      (click)="onCanvasClick($event)"
-      aria-label="Simulator screen — click to interact"
+      tabindex="0"
+      (pointerdown)="onCanvasPointerDown($event)"
+      (pointerup)="onCanvasPointerUp($event)"
+      (pointermove)="onCanvasPointerMove($event)"
+      (keydown)="onCanvasKeyDown($event)"
+      aria-label="Simulator screen — click, drag, or type to interact"
     ></canvas>
 
     @if (connectionState() === 'connecting') {

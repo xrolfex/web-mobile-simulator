@@ -80,6 +80,20 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
   private frameCount = 0;
   private fpsInterval: ReturnType<typeof setInterval> | null = null;
 
+  /**
+   * Minimum pointer displacement (in CSS pixels) required to classify
+   * a pointer-down/up sequence as a swipe rather than a tap.
+   */
+  private readonly SWIPE_THRESHOLD_PX = 10;
+
+  /** Recorded position at the start of a pointer-down event. */
+  private dragStart: {
+    x: number;
+    y: number;
+    clientX: number;
+    clientY: number;
+  } | null = null;
+
   // ── Lifecycle ──────────────────────────────────────────────────────────
 
   ngAfterViewInit(): void {
@@ -129,7 +143,7 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
    * Handle click/tap on the canvas — forward as a touch event to the server.
    * Normalizes coordinates to 0–1 range relative to the device screen.
    */
-  protected onCanvasClick(event: MouseEvent): void {
+  private onCanvasClick(event: MouseEvent | PointerEvent): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
     const canvas = this.canvasRef.nativeElement;
@@ -159,6 +173,130 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
     }
   }
 
+  /**
+   * Handle pointer-down on the canvas — record the drag start position and
+   * capture the pointer so subsequent events fire even outside the element.
+   */
+  protected onCanvasPointerDown(event: PointerEvent): void {
+    const canvas = this.canvasRef.nativeElement;
+    const rect = canvas.getBoundingClientRect();
+
+    const displayX = event.clientX - rect.left;
+    const displayY = event.clientY - rect.top;
+
+    // Normalize to 0–1 based on the canvas display size
+    const x = displayX / rect.width;
+    const y = displayY / rect.height;
+
+    this.dragStart = { x, y, clientX: event.clientX, clientY: event.clientY };
+
+    // Capture pointer so pointermove/pointerup fire even if pointer leaves canvas
+    canvas.setPointerCapture(event.pointerId);
+  }
+
+  /**
+   * Handle pointer-up on the canvas.
+   *
+   * - If the total displacement exceeds {@link SWIPE_THRESHOLD_PX}, sends a
+   *   swipe message to the server.
+   * - Otherwise, delegates to {@link onCanvasClick} to send a tap message.
+   */
+  protected onCanvasPointerUp(event: PointerEvent): void {
+    if (!this.dragStart) return;
+
+    const start = this.dragStart;
+    this.dragStart = null;
+
+    const dx = event.clientX - start.clientX;
+    const dy = event.clientY - start.clientY;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+
+    if (distance >= this.SWIPE_THRESHOLD_PX) {
+      // Treat as a swipe
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+      const canvas = this.canvasRef.nativeElement;
+      const rect = canvas.getBoundingClientRect();
+
+      const endDisplayX = event.clientX - rect.left;
+      const endDisplayY = event.clientY - rect.top;
+
+      const endX = endDisplayX / rect.width;
+      const endY = endDisplayY / rect.height;
+
+      this.ws.send(
+        JSON.stringify({
+          type: 'touch',
+          action: 'swipe',
+          startX: start.x,
+          startY: start.y,
+          endX,
+          endY,
+          deviceStartX: Math.round(start.x * this.frameWidth()),
+          deviceStartY: Math.round(start.y * this.frameHeight()),
+          deviceEndX: Math.round(endX * this.frameWidth()),
+          deviceEndY: Math.round(endY * this.frameHeight()),
+        }),
+      );
+    } else {
+      // Treat as a tap — reuse existing tap logic
+      this.onCanvasClick(event);
+    }
+  }
+
+  /**
+   * Handle pointer-move on the canvas.
+   * Prevents default browser behaviour (text selection, scroll, zoom)
+   * during a drag gesture.
+   */
+  protected onCanvasPointerMove(event: PointerEvent): void {
+    if (this.dragStart) {
+      event.preventDefault();
+    }
+  }
+
+  /**
+   * Handle keydown events on the canvas — forward as a key event to the server.
+   * Prevents default browser behavior for keys that would interfere
+   * (arrows, space, tab, etc.) while the canvas is focused.
+   */
+  protected onCanvasKeyDown(event: KeyboardEvent): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+    // Don't capture modifier-only presses (Shift, Ctrl, Alt, Meta alone)
+    if (['Shift', 'Control', 'Alt', 'Meta'].includes(event.key)) return;
+
+    // Prevent default browser behavior for keys that would scroll/navigate
+    // while the simulator canvas is focused
+    const preventDefaultKeys = [
+      'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+      'Space', ' ', 'Tab', 'Backspace', 'Enter', 'Escape',
+    ];
+    if (preventDefaultKeys.includes(event.key)) {
+      event.preventDefault();
+    }
+
+    this.ws.send(
+      JSON.stringify({
+        type: 'key',
+        action: 'down',
+        key: event.key,
+        code: event.code,
+        shift: event.shiftKey,
+        ctrl: event.ctrlKey,
+        alt: event.altKey,
+        meta: event.metaKey,
+      }),
+    );
+  }
+
+  // ── Public API ─────────────────────────────────────────────────────────
+
+  /** Programmatically focus the canvas element so keyboard events are captured. */
+  public focusCanvas(): void {
+    this.canvasRef?.nativeElement?.focus();
+  }
+
   // ── Private helpers ────────────────────────────────────────────────────
 
   /**
@@ -175,6 +313,8 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
         this.ws.onopen = () => {
           this.ngZone.run(() => {
             this.setConnectionState('connected');
+            // Auto-focus the canvas so keyboard events are captured immediately
+            this.canvasRef?.nativeElement?.focus();
           });
         };
 
@@ -183,7 +323,17 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
           if (event.data instanceof ArrayBuffer) {
             this.renderFrame(event.data);
           }
-          // Text messages could be control responses (ignore for now)
+          // Text messages are control responses (e.g. error feedback)
+          if (typeof event.data === 'string') {
+            try {
+              const msg = JSON.parse(event.data) as { type?: string; message?: string };
+              if (msg.type === 'error' && msg.message) {
+                console.warn('[SimulatorViewer] Backend error:', msg.message);
+              }
+            } catch {
+              // Ignore non-JSON text messages
+            }
+          }
         };
 
         this.ws.onclose = (event: CloseEvent) => {

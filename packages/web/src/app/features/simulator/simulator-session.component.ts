@@ -2,6 +2,7 @@ import {
   Component,
   OnInit,
   OnDestroy,
+  ViewChild,
   signal,
   inject,
   computed,
@@ -114,6 +115,10 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
   private readonly toast = inject(ToastService);
   private pollSubscription: Subscription | null = null;
   private pollAttempts = 0;
+
+  /** Reference to the viewer component used to re-focus the canvas. */
+  @ViewChild(SimulatorViewerComponent)
+  private readonly viewerRef?: SimulatorViewerComponent;
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -239,11 +244,13 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
         if (!response.success) {
           this.toast.error(response.error?.message ?? `Failed to press ${button}.`);
         }
+        this.refocusCanvas();
       },
       error: (err: unknown) => {
         this.controlBusy.set(false);
         const message = err instanceof Error ? err.message : `Failed to press ${button}.`;
         this.toast.error(message);
+        this.refocusCanvas();
       },
     });
   }
@@ -265,11 +272,13 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
         } else {
           this.toast.error(response.error?.message ?? 'Failed to rotate device.');
         }
+        this.refocusCanvas();
       },
       error: (err: unknown) => {
         this.controlBusy.set(false);
         const message = err instanceof Error ? err.message : 'Failed to rotate device.';
         this.toast.error(message);
+        this.refocusCanvas();
       },
     });
   }
@@ -288,11 +297,13 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
         if (!response.success) {
           this.toast.error(response.error?.message ?? 'Failed to trigger shake.');
         }
+        this.refocusCanvas();
       },
       error: (err: unknown) => {
         this.controlBusy.set(false);
         const message = err instanceof Error ? err.message : 'Failed to trigger shake.';
         this.toast.error(message);
+        this.refocusCanvas();
       },
     });
   }
@@ -318,11 +329,13 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
         document.body.removeChild(anchor);
         URL.revokeObjectURL(url);
         this.toast.success('Screenshot saved.');
+        this.refocusCanvas();
       },
       error: (err: unknown) => {
         this.controlBusy.set(false);
         const message = err instanceof Error ? err.message : 'Failed to take screenshot.';
         this.toast.error(message);
+        this.refocusCanvas();
       },
     });
   }
@@ -345,11 +358,13 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
         } else {
           this.toast.error(response.error?.message ?? 'Failed to set clipboard.');
         }
+        this.refocusCanvas();
       },
       error: (err: unknown) => {
         this.controlBusy.set(false);
         const message = err instanceof Error ? err.message : 'Failed to set clipboard.';
         this.toast.error(message);
+        this.refocusCanvas();
       },
     });
   }
@@ -371,11 +386,13 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
         } else {
           this.toast.error(response.error?.message ?? 'Failed to get clipboard.');
         }
+        this.refocusCanvas();
       },
       error: (err: unknown) => {
         this.controlBusy.set(false);
         const message = err instanceof Error ? err.message : 'Failed to get clipboard.';
         this.toast.error(message);
+        this.refocusCanvas();
       },
     });
   }
@@ -397,11 +414,13 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
         } else {
           this.toast.error(response.error?.message ?? 'Failed to open URL.');
         }
+        this.refocusCanvas();
       },
       error: (err: unknown) => {
         this.controlBusy.set(false);
         const message = err instanceof Error ? err.message : 'Failed to open URL.';
         this.toast.error(message);
+        this.refocusCanvas();
       },
     });
   }
@@ -424,16 +443,23 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
         } else {
           this.toast.error(response.error?.message ?? 'Failed to send text.');
         }
+        this.refocusCanvas();
       },
       error: (err: unknown) => {
         this.controlBusy.set(false);
         const message = err instanceof Error ? err.message : 'Failed to send text.';
         this.toast.error(message);
+        this.refocusCanvas();
       },
     });
   }
 
   // ── Private helpers ────────────────────────────────────────────────────────
+
+  /** Re-focus the simulator canvas so keyboard events continue working after a control action. */
+  private refocusCanvas(): void {
+    this.viewerRef?.focusCanvas();
+  }
 
   /**
    * Upload a file to the session API and handle the response.

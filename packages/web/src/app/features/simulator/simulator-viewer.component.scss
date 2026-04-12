@@ -212,9 +212,21 @@
   object-fit: contain;
   cursor: pointer;
   image-rendering: auto;
+  // Prevent browser scroll/zoom interference during drag gestures
+  touch-action: none;
 
   // Smooth transitions when resolution changes
   transition: width 0.2s ease, height 0.2s ease;
+
+  &:focus {
+    outline: 2px solid var(--accent-color, #4a9eff);
+    outline-offset: 2px;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--accent-color, #4a9eff);
+    outline-offset: 2px;
+  }
 }
 
 // ── Overlay states ────────────────────────────────────────────────────────────

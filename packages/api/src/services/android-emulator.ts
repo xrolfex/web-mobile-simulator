@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { arch } from 'node:os';
 import { config } from '../config.js';
-import type { DeviceType, Runtime, SimulatorDevice, DeviceState } from '@web-mobile-simulator/shared';
+import type { DeviceType, Runtime, SimulatorDevice, DeviceState, SimulatorButton, DeviceOrientation } from '@web-mobile-simulator/shared';
 import { DEVICE_BOOT_TIMEOUT_MS } from '@web-mobile-simulator/shared';
 import { exec } from '../utils/exec.js';
 
@@ -264,6 +264,9 @@ export class AndroidEmulatorService {
    */
   private readonly runningProcesses: Map<string, ChildProcess> = new Map();
 
+  /** Cache of resolved ADB ports keyed by AVD name. */
+  private readonly adbPortCache = new Map<string, number>();
+
   // ---------------------------------------------------------------------------
   // Public API
   // ---------------------------------------------------------------------------
@@ -460,6 +463,9 @@ export class AndroidEmulatorService {
    * @throws If the emulator process fails to start or the boot timeout is exceeded.
    */
   async bootEmulator(avdName: string): Promise<{ pid: number; adbPort: number }> {
+    // Invalidate any stale cached port so the post-boot lookup resolves fresh.
+    this.adbPortCache.delete(avdName);
+
     this.assertSdkInstalled();
 
     const emulatorArgs = [
@@ -501,6 +507,9 @@ export class AndroidEmulatorService {
    * @throws If no running emulator is found for the given AVD name.
    */
   async shutdownEmulator(avdName: string): Promise<void> {
+    // Evict the cached port so a subsequent boot gets a fresh lookup.
+    this.adbPortCache.delete(avdName);
+
     this.assertSdkInstalled();
 
     const adbPort = await this.getAdbPort(avdName);
@@ -559,6 +568,12 @@ export class AndroidEmulatorService {
    * @returns The port number (e.g. `5554`) if the emulator is running, or `null`.
    */
   async getAdbPort(avdName: string): Promise<number | null> {
+    // Fast path: return cached port if available.
+    const cached = this.adbPortCache.get(avdName);
+    if (cached !== undefined) {
+      return cached;
+    }
+
     this.assertSdkInstalled();
 
     const { stdout } = await exec(ADB, ['devices']);
@@ -576,6 +591,8 @@ export class AndroidEmulatorService {
         const { stdout: avdOut } = await exec(ADB, ['-s', serial, 'emu', 'avd', 'name']);
         const reportedName = avdOut.split('\n')[0]?.trim();
         if (reportedName === avdName) {
+          // Cache the successful lookup before returning.
+          this.adbPortCache.set(avdName, port);
           return port;
         }
       } catch {
@@ -584,6 +601,14 @@ export class AndroidEmulatorService {
     }
 
     return null;
+  }
+
+  /**
+   * Clear the cached ADB port mappings. Useful for testing or after emulator
+   * reconnection when the port assignment may have changed.
+   */
+  clearAdbPortCache(): void {
+    this.adbPortCache.clear();
   }
 
   /**
@@ -673,6 +698,220 @@ export class AndroidEmulatorService {
       String(Math.round(x2)), String(Math.round(y2)),
       String(Math.round(durationMs)),
     ]);
+  }
+
+  /**
+   * Send a key event to the Android emulator via ADB.
+   * Maps standard browser keyboard event keys to Android KEYCODE_* values.
+   * Uses: `adb -s emulator-<port> shell input keyevent <keycode>`
+   *
+   * For printable characters, uses `input text` instead of keyevent for better
+   * Unicode support.
+   *
+   * @param avdName - Name of the running AVD.
+   * @param key     - The logical key value from KeyboardEvent.key (e.g. 'a', 'Enter', 'Backspace').
+   * @param code    - The physical key code from KeyboardEvent.code (e.g. 'KeyA', 'Enter').
+   * @throws If the emulator is not running or the command fails.
+   */
+  async sendKeyEvent(avdName: string, key: string, code: string): Promise<void> {
+    this.assertSdkInstalled();
+    const adbPort = await this.getAdbPort(avdName);
+    if (adbPort === null) {
+      throw new Error(`Cannot send key event: emulator "${avdName}" is not running.`);
+    }
+    const serial = `emulator-${adbPort}`;
+
+    // Map special keys to Android keycodes
+    const keyMap: Record<string, string> = {
+      'Enter': 'KEYCODE_ENTER',
+      'Backspace': 'KEYCODE_DEL',
+      'Delete': 'KEYCODE_FORWARD_DEL',
+      'Tab': 'KEYCODE_TAB',
+      'Escape': 'KEYCODE_ESCAPE',
+      'ArrowUp': 'KEYCODE_DPAD_UP',
+      'ArrowDown': 'KEYCODE_DPAD_DOWN',
+      'ArrowLeft': 'KEYCODE_DPAD_LEFT',
+      'ArrowRight': 'KEYCODE_DPAD_RIGHT',
+      ' ': 'KEYCODE_SPACE',
+      'Home': 'KEYCODE_MOVE_HOME',
+      'End': 'KEYCODE_MOVE_END',
+      'PageUp': 'KEYCODE_PAGE_UP',
+      'PageDown': 'KEYCODE_PAGE_DOWN',
+    };
+
+    const mappedKeycode = keyMap[key];
+    if (mappedKeycode) {
+      await exec(ADB, ['-s', serial, 'shell', 'input', 'keyevent', mappedKeycode]);
+    } else if (key.length === 1) {
+      // Single printable character — use `input text` for better Unicode handling
+      // ADB input text requires spaces to be encoded as %s
+      const escapedChar = key === ' ' ? '%s' : key;
+      await exec(ADB, ['-s', serial, 'shell', 'input', 'text', escapedChar]);
+    }
+    // Multi-character keys not in the map (e.g. 'Shift', 'Control') are silently ignored
+  }
+
+  /**
+   * Simulate pressing a hardware button on the Android emulator via ADB keyevent.
+   *
+   * Button → keyevent mapping:
+   * - `'home'`        → `KEYCODE_HOME`
+   * - `'lock'`        → `KEYCODE_POWER`
+   * - `'volumeUp'`    → `KEYCODE_VOLUME_UP`
+   * - `'volumeDown'`  → `KEYCODE_VOLUME_DOWN`
+   *
+   * Uses: `adb -s emulator-<port> shell input keyevent <KEYCODE>`
+   *
+   * @param avdName - Name of the running AVD.
+   * @param button  - Button to press.
+   * @throws If the emulator is not running, the button is unrecognised, or the command fails.
+   */
+  async pressButton(avdName: string, button: SimulatorButton): Promise<void> {
+    this.assertSdkInstalled();
+    const adbPort = await this.getAdbPort(avdName);
+    if (adbPort === null) {
+      throw new Error(`Cannot press button: emulator "${avdName}" is not running.`);
+    }
+    const serial = `emulator-${adbPort}`;
+
+    const keyEventMap: Record<SimulatorButton, string> = {
+      home: 'KEYCODE_HOME',
+      lock: 'KEYCODE_POWER',
+      volumeUp: 'KEYCODE_VOLUME_UP',
+      volumeDown: 'KEYCODE_VOLUME_DOWN',
+    };
+
+    const keyEvent = keyEventMap[button];
+    if (!keyEvent) {
+      throw new Error(`Unknown button: "${button}". Valid options: ${Object.keys(keyEventMap).join(', ')}`);
+    }
+
+    await exec(ADB, ['-s', serial, 'shell', 'input', 'keyevent', keyEvent]);
+  }
+
+  /**
+   * Set the device screen orientation on the Android emulator via ADB system settings.
+   *
+   * Orientation → `user_rotation` value mapping:
+   * - `'portrait'`            → `0`
+   * - `'landscapeLeft'`       → `1`
+   * - `'portraitUpsideDown'`  → `2`
+   * - `'landscapeRight'`      → `3`
+   *
+   * Auto-rotation is disabled first (`accelerometer_rotation 0`) so the manual
+   * rotation value takes effect immediately.
+   *
+   * Uses two sequential `adb -s <serial> shell settings put system …` calls.
+   *
+   * @param avdName     - Name of the running AVD.
+   * @param orientation - Desired screen orientation.
+   * @throws If the emulator is not running, the orientation is unrecognised, or a command fails.
+   */
+  async setOrientation(avdName: string, orientation: DeviceOrientation): Promise<void> {
+    this.assertSdkInstalled();
+    const adbPort = await this.getAdbPort(avdName);
+    if (adbPort === null) {
+      throw new Error(`Cannot set orientation: emulator "${avdName}" is not running.`);
+    }
+    const serial = `emulator-${adbPort}`;
+
+    const rotationMap: Record<DeviceOrientation, string> = {
+      portrait: '0',
+      landscapeLeft: '1',
+      portraitUpsideDown: '2',
+      landscapeRight: '3',
+    };
+
+    const rotation = rotationMap[orientation];
+    if (rotation === undefined) {
+      throw new Error(
+        `Invalid orientation: "${orientation}". Valid options: ${Object.keys(rotationMap).join(', ')}`,
+      );
+    }
+
+    // Disable auto-rotation so the manual value takes effect
+    await exec(ADB, ['-s', serial, 'shell', 'settings', 'put', 'system', 'accelerometer_rotation', '0']);
+    // Apply the desired rotation value
+    await exec(ADB, ['-s', serial, 'shell', 'settings', 'put', 'system', 'user_rotation', rotation]);
+  }
+
+  /**
+   * Capture a screenshot from the Android emulator and save it to a local file.
+   *
+   * Steps:
+   * 1. `adb -s <serial> shell screencap -p /sdcard/screenshot.png` — capture on device
+   * 2. `adb -s <serial> pull /sdcard/screenshot.png <outputPath>` — copy to host
+   * 3. `adb -s <serial> shell rm /sdcard/screenshot.png` — clean up device copy
+   *
+   * Using the two-step capture+pull approach avoids binary encoding issues that
+   * occur with `exec-out` on some ADB versions.
+   *
+   * @param avdName    - Name of the running AVD.
+   * @param outputPath - Absolute path on the host where the PNG will be written.
+   * @throws If the emulator is not running or any ADB command fails.
+   */
+  async takeScreenshot(avdName: string, outputPath: string): Promise<void> {
+    this.assertSdkInstalled();
+    const adbPort = await this.getAdbPort(avdName);
+    if (adbPort === null) {
+      throw new Error(`Cannot take screenshot: emulator "${avdName}" is not running.`);
+    }
+    const serial = `emulator-${adbPort}`;
+    const devicePath = '/sdcard/screenshot.png';
+
+    // 1. Capture to device storage
+    await exec(ADB, ['-s', serial, 'shell', 'screencap', '-p', devicePath]);
+    // 2. Pull from device to host
+    await exec(ADB, ['-s', serial, 'pull', devicePath, outputPath]);
+    // 3. Remove from device storage
+    await exec(ADB, ['-s', serial, 'shell', 'rm', devicePath]);
+  }
+
+  /**
+   * Set the clipboard text on the Android emulator.
+   *
+   * Uses the `cmd clipboard set` service (available on Android API 31+).
+   * On older API levels the underlying command may fail with an informative error.
+   *
+   * Uses: `adb -s <serial> shell cmd clipboard set "<text>"`
+   *
+   * @param avdName - Name of the running AVD.
+   * @param text    - The text to place on the clipboard.
+   * @throws If the emulator is not running or the command fails.
+   */
+  async setClipboard(avdName: string, text: string): Promise<void> {
+    this.assertSdkInstalled();
+    const adbPort = await this.getAdbPort(avdName);
+    if (adbPort === null) {
+      throw new Error(`Cannot set clipboard: emulator "${avdName}" is not running.`);
+    }
+    const serial = `emulator-${adbPort}`;
+    // Escape single quotes for the shell argument
+    const escaped = text.replace(/'/g, `'\\''`);
+    await exec(ADB, ['-s', serial, 'shell', 'cmd', 'clipboard', 'set', escaped]);
+  }
+
+  /**
+   * Get the current clipboard text from the Android emulator.
+   *
+   * Uses the `cmd clipboard get` service (available on Android API 31+).
+   * On older API levels the underlying command may fail with an informative error.
+   *
+   * Uses: `adb -s <serial> shell cmd clipboard get`
+   *
+   * @param avdName - Name of the running AVD.
+   * @returns The current clipboard text (may be empty).
+   * @throws If the emulator is not running or the command fails.
+   */
+  async getClipboard(avdName: string): Promise<string> {
+    this.assertSdkInstalled();
+    const adbPort = await this.getAdbPort(avdName);
+    if (adbPort === null) {
+      throw new Error(`Cannot get clipboard: emulator "${avdName}" is not running.`);
+    }
+    const serial = `emulator-${adbPort}`;
+    const { stdout } = await exec(ADB, ['-s', serial, 'shell', 'cmd', 'clipboard', 'get']);
+    return stdout.trim();
   }
 
   /**
