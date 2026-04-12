@@ -11,6 +11,7 @@ import { Subscription, interval } from 'rxjs';
 import { switchMap, takeWhile } from 'rxjs/operators';
 
 import { ApiService } from '../../core/services/api.service';
+import { ToastService } from '../../core/services/toast.service';
 import { Session, SessionStatus } from '../../core/types/api.types';
 import { SimulatorViewerComponent } from './simulator-viewer.component';
 import type { ConnectionState } from './simulator-viewer.component';
@@ -89,6 +90,7 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
   private readonly api = inject(ApiService);
   private readonly route = inject(ActivatedRoute);
   private readonly router = inject(Router);
+  private readonly toast = inject(ToastService);
   private pollSubscription: Subscription | null = null;
   private pollAttempts = 0;
 
@@ -127,6 +129,7 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
         const message =
           err instanceof Error ? err.message : 'Failed to stop the session.';
         this.errorMessage.set(message);
+        this.toast.error(message);
         this.stopping.set(false);
       },
     });
@@ -228,15 +231,22 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
         if (response.success && response.data) {
           this.uploadMessage.set(response.data.result.message);
           this.uploadSuccess.set(response.data.result.success);
+          if (response.data.result.success) {
+            this.toast.success(`App installed: ${response.data.result.fileName}`);
+          } else {
+            this.toast.warning(response.data.result.message);
+          }
         } else {
           this.uploadMessage.set(response.error?.message ?? 'Upload failed.');
           this.uploadSuccess.set(false);
+          this.toast.error(response.error?.message ?? 'Upload failed.');
         }
       },
       error: (err: unknown) => {
         this.uploading.set(false);
         const message = err instanceof Error ? err.message : 'Upload failed. Please try again.';
         this.uploadMessage.set(message);
+        this.toast.error(message);
         this.uploadSuccess.set(false);
       },
     });
@@ -267,13 +277,14 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
             return;
           }
 
-          const loadedSession = response.data;
+          const loadedSession = response.data.session;
           this.session.set(loadedSession);
 
           if (this.isTerminalStatus(loadedSession.status)) {
             this.loading.set(false);
             if (loadedSession.status === 'error') {
               this.errorMessage.set('Session encountered an error.');
+              this.toast.error('Session encountered an error and cannot recover.');
             }
             this.stopPolling();
             return;
@@ -288,6 +299,7 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
           // Still creating — check attempt limit
           if (this.pollAttempts >= MAX_POLL_ATTEMPTS) {
             this.errorMessage.set('Session is taking too long to start.');
+            this.toast.warning('Session is taking too long to start. Please check the backend.');
             this.loading.set(false);
             this.stopPolling();
           }
@@ -296,6 +308,7 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
           const message =
             err instanceof Error ? err.message : 'Network error loading session.';
           this.errorMessage.set(message);
+          this.toast.error(message);
           this.loading.set(false);
         },
       });
@@ -304,11 +317,11 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
     this.api.getSession(sessionId).subscribe({
       next: (response) => {
         if (!response.success || !response.data) return;
-        this.session.set(response.data);
-        if (response.data.status === 'active' && response.data.streamUrl) {
+        this.session.set(response.data.session);
+        if (response.data.session.status === 'active' && response.data.session.streamUrl) {
           this.loading.set(false);
           this.stopPolling();
-        } else if (this.isTerminalStatus(response.data.status)) {
+        } else if (this.isTerminalStatus(response.data.session.status)) {
           this.loading.set(false);
           this.stopPolling();
         }

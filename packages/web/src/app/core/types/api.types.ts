@@ -134,6 +134,12 @@ export interface AppUploadResponse {
 
 // ── List Response Shapes ──────────────────────────────────────────────────────
 
+/** Response shape from GET /api/sessions */
+export interface SessionListResponse {
+  sessions: Session[];
+  capacity: SessionCapacityInfo;
+}
+
 /** Response body from the runtimes list endpoint. */
 export interface RuntimeListResponse {
   runtimes: Runtime[];

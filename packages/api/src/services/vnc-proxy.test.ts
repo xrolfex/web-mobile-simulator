@@ -39,7 +39,7 @@ describe('VNCProxyService', () => {
       expect(result.wsPort).toBeTypeOf('number');
       expect(result.wsPort).toBeGreaterThanOrEqual(19000);
       expect(result.wsPort).toBeLessThanOrEqual(19099);
-      expect(result.wsUrl).toBe(`ws://localhost:${result.wsPort}`);
+      expect(result.wsUrl).toBe(`/ws/vnc/session-1`);
     });
 
     it('returns a port in the configured range', async () => {
@@ -64,11 +64,10 @@ describe('VNCProxyService', () => {
       expect(a.wsPort).not.toBe(b.wsPort);
     });
 
-    it('the wsUrl follows the ws://localhost:<port> format', async () => {
-      const { wsUrl, wsPort } = await service.startProxy('session-url', '127.0.0.1', 5900);
+    it('the wsUrl is a path-based relative URL', async () => {
+      const { wsUrl } = await service.startProxy('session-url', '127.0.0.1', 5900);
 
-      expect(wsUrl).toMatch(/^ws:\/\/localhost:\d+$/);
-      expect(wsUrl).toBe(`ws://localhost:${wsPort}`);
+      expect(wsUrl).toBe('/ws/vnc/session-url');
     });
   });
 

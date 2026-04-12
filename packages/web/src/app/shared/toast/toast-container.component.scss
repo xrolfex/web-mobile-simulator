@@ -1,0 +1,108 @@
+// ── Keyframes ─────────────────────────────────────────────────────────────────
+
+@keyframes slideIn {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+// ── Container ─────────────────────────────────────────────────────────────────
+
+.toast-container {
+  position: fixed;
+  top: 1.25rem;
+  right: 1.25rem;
+  z-index: 10000;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  // Prevent the container itself from capturing pointer events when empty.
+  pointer-events: none;
+}
+
+// ── Individual toast ──────────────────────────────────────────────────────────
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  min-width: 300px;
+  max-width: 450px;
+  padding: 0.875rem 1rem;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  font-family: var(--font-sans);
+  color: var(--color-text-primary);
+  animation: slideIn 0.3s ease both;
+  // Re-enable pointer events on the toast itself.
+  pointer-events: auto;
+
+  // ── Type-specific left accent border ──────────────────────────────────────
+
+  &--success {
+    border-left: 4px solid #4ade80;
+  }
+
+  &--error {
+    border-left: 4px solid #f87171;
+  }
+
+  &--info {
+    border-left: 4px solid #818cf8;
+  }
+
+  &--warning {
+    border-left: 4px solid #fbbf24;
+  }
+}
+
+// ── Toast icon ────────────────────────────────────────────────────────────────
+
+.toast__icon {
+  font-size: 1rem;
+  line-height: 1.5;
+  flex-shrink: 0;
+}
+
+// ── Toast message ─────────────────────────────────────────────────────────────
+
+.toast__message {
+  flex: 1;
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  color: var(--color-text-primary);
+  word-break: break-word;
+}
+
+// ── Dismiss button ────────────────────────────────────────────────────────────
+
+.toast__dismiss {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--color-text-muted);
+  font-size: 0.8rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0.2rem;
+  border-radius: 4px;
+  transition: color 0.15s ease, background 0.15s ease;
+
+  &:hover {
+    color: var(--color-text-primary);
+    background: rgba(255, 255, 255, 0.08);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+}

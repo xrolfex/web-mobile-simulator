@@ -30,7 +30,7 @@ Web Mobile Simulator is a self-hosted platform that runs iOS Simulators and Andr
 - ✅ Monorepo architecture with pnpm workspaces
 - ✅ Angular 21 SPA frontend with dark theme (standalone components, Signals, OnPush)
 - ✅ Fastify 5 API backend with health check endpoint
-- ✅ Docker + Caddy containerisation (reverse proxy, static file serving, WebSocket proxy)
+- ✅ Docker + nginx containerisation (reverse proxy, static file serving, WebSocket proxy)
 - ✅ Shared TypeScript types and constants across frontend and backend
 
 ### Roadmap
@@ -56,7 +56,7 @@ Web Mobile Simulator is a self-hosted platform that runs iOS Simulators and Andr
 | **pnpm** | ≥ 9.0.0 | Workspace manager; install via `npm i -g pnpm` |
 | **Docker Desktop for Mac** | Latest | Required for containerised deployment |
 
-> **Note:** iOS Simulators cannot run in Docker or Linux — they require direct access to macOS and the Xcode toolchain. All simulator/emulator processes run on the host; only the API and proxy layers are containerised.
+> **Note:** iOS Simulators cannot run in Docker or Linux — they require direct access to macOS and the Xcode toolchain. All simulator/emulator processes run on the host. In production, the API, web, and nginx are all containerised; in development, only the Angular dev server and nginx run in Docker while the API runs directly on the host.
 
 ---
 
@@ -73,14 +73,14 @@ cp .env.example .env
 # Install all workspace dependencies
 pnpm install
 
-# Start the Angular dev server and Fastify API in parallel
-pnpm dev
+# Start the hybrid dev environment (API on host + Angular/nginx in Docker)
+./scripts/dev.sh
 ```
 
 | Service | URL |
 |---|---|
-| Angular SPA | http://localhost:4200 |
-| Fastify API | http://localhost:3000 |
+| App (via nginx) | http://localhost:8080 |
+| Fastify API (host) | http://localhost:3000 |
 | Health check | http://localhost:3000/api/health |
 
 ---
@@ -114,8 +114,16 @@ web-mobile-simulator/
 │   └── architecture/
 │       └── ARCHITECTURE.md   # Full architecture diagrams and ADRs
 │
-├── scripts/                  # Host setup and utility scripts (in progress)
-├── Caddyfile                 # Caddy reverse proxy config (API + WS proxy + SPA fallback)
+├── scripts/
+│   ├── dev.sh                # Start hybrid dev environment (API on host + Docker)
+│   ├── setup-host.sh         # Install host dependencies (Homebrew, Android SDK, etc.)
+│   ├── start.sh              # Start production containers
+│   ├── stop.sh               # Stop production containers
+│   ├── health-check.sh       # Smoke-test all services
+│   ├── install-ios-runtime.sh   # Download and install an iOS runtime
+│   └── install-android-image.sh # Download and install an Android system image
+├── nginx.conf                   # nginx production config (static serving, gzip, SPA fallback)
+├── nginx.dev.conf               # nginx dev reverse proxy config (API + WS proxy + HMR)
 ├── .env.example              # Environment variable template
 ├── pnpm-workspace.yaml       # Workspace package globs
 ├── tsconfig.base.json        # Shared TypeScript base config
@@ -126,15 +134,44 @@ web-mobile-simulator/
 
 ## Development
 
-### Run in dev mode
+### Development (hybrid: API on host + Docker)
+
+The API server runs directly on macOS because it needs access to Xcode CLI tools
+(`xcrun simctl`), Android SDK (`avdmanager`, `emulator`, `adb`), and other
+macOS-native binaries that cannot run inside Linux containers.
+
+**Quick start** (recommended):
 
 ```bash
-pnpm dev
+./scripts/dev.sh
 ```
 
-Runs `pnpm dev` in all packages in parallel (`pnpm --parallel -r run dev`):
-- `packages/web` → `ng serve` on **:4200**
-- `packages/api` → `tsx watch src/server.ts` on **:3000**
+This script builds shared types, starts the API on the host, and launches
+the Angular dev server + nginx in Docker. Open [http://localhost:8080](http://localhost:8080).
+
+**Manual start** (step by step):
+
+```bash
+# 1. Build shared types (needed by both API and web)
+pnpm --filter @web-mobile-simulator/shared build
+
+# 2. Start the API on the host (port 3000)
+pnpm --filter @web-mobile-simulator/api run dev
+
+# 3. In another terminal, start Docker (Angular + nginx)
+docker compose -f docker-compose.dev.yml up --build
+
+# 4. Open http://localhost:8080
+```
+
+**Stop everything:**
+
+```bash
+./scripts/dev.sh --stop
+```
+
+> **Note:** `docker-compose.dev.yml` starts the **web (Angular)** and **nginx** containers only.
+> The API runs on the host — it is **not** started by Docker Compose in dev mode.
 
 ### Build all packages
 
@@ -179,15 +216,20 @@ VNC_PROXY_PORT_RANGE_START=6900
 VNC_PROXY_PORT_RANGE_END=6999
 ```
 
-### Run with Docker
+### Production (all services in Docker)
+
+In production, all three services are containerised together via `docker-compose.yml`:
 
 ```bash
-docker-compose up --build
+docker compose up --build
 ```
 
-This starts the `caddy` and `api` containers. Caddy serves the Angular static build and proxies all `/api/*` and `/ws/*` traffic to the Fastify container on port 3000.
+This starts the `api`, `web`, and `nginx` containers. nginx serves the Angular
+static build and proxies all `/api/*` and `/ws/*` traffic to the Fastify container
+on port 3000.
 
-> **Note:** Simulators and emulators run on the macOS host — not inside Docker. The API container communicates back to host tooling (`xcrun`, `adb`, `avdmanager`) via CLI spawning over host networking.
+> **Note:** In production, all services (API, web, nginx) run in Docker containers.
+> The host-only dev setup is only for development where macOS tools are needed.
 
 ---
 
@@ -196,7 +238,7 @@ This starts the `caddy` and `api` containers. Caddy serves the Angular static bu
 The platform is split into four distinct layers:
 
 1. **Browser** — Angular 21 SPA renders the device picker, runtime manager, and embeds noVNC (iOS) or scrcpy-web (Android) for live streaming.
-2. **Reverse Proxy (Caddy)** — Serves the Angular static build, routes `/api/*` to Fastify, and proxies WebSocket streams from host-side websockify/scrcpy processes.
+2. **Reverse Proxy (nginx)** — Serves the Angular static build, routes `/api/*` to Fastify, and proxies WebSocket streams from host-side websockify/scrcpy processes.
 3. **API (Fastify / Node.js)** — Manages session lifecycle, spawns and monitors simulator/emulator processes, allocates VNC proxy ports, and persists state to SQLite via Drizzle ORM.
 4. **Host macOS** — Runs iOS Simulators (via `xcrun simctl`) and Android Emulators (via `emulator` CLI), plus websockify (VNC→WS bridge) and scrcpy instances — one per active session.
 
@@ -262,8 +304,8 @@ interface ApiResponse<T> {
 | **scrcpy** | Latest | Android Emulator display capture and input injection |
 | **SQLite** | — | Session and device state persistence |
 | **Drizzle ORM** | Latest | Type-safe schema, queries, and migrations for SQLite |
-| **Docker** | — | Containerises the API and Caddy proxy |
-| **Caddy** | v2 | Reverse proxy — TLS termination, static serving, WebSocket proxy |
+| **Docker** | — | Containerises nginx and the Angular build (all services in production) |
+| **nginx** | latest (Alpine) | Reverse proxy — static serving, gzip compression, WebSocket proxy, SPA fallback |
 | **pnpm** | 9+ | Monorepo package manager with workspaces |
 | **Vitest** | 4.x | Unit testing for the Angular package |
 

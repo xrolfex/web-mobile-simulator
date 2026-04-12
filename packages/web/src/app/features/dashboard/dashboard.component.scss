@@ -311,3 +311,161 @@
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+// ── Capacity bar ──────────────────────────────────────────────────────────────
+
+.capacity-bar {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  padding: 0.875rem 1.25rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  margin-bottom: 2rem;
+
+  &__info {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    flex-shrink: 0;
+  }
+
+  &__label {
+    font-size: 0.85rem;
+    color: var(--color-text-muted);
+    font-weight: 500;
+  }
+
+  &__count {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--color-text-primary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  &__max {
+    font-size: 0.9rem;
+    font-weight: 400;
+    color: var(--color-text-muted);
+  }
+
+  &__progress-track {
+    flex: 1;
+    height: 6px;
+    background: var(--color-surface-raised);
+    border-radius: 3px;
+    overflow: hidden;
+    min-width: 80px;
+  }
+
+  &__progress-fill {
+    height: 100%;
+    background: var(--color-accent);
+    border-radius: 3px;
+    transition: width 0.4s ease, background 0.3s ease;
+    min-width: 2px;
+
+    &--warning {
+      background: #fbbf24;
+    }
+
+    &--full {
+      background: #f87171;
+    }
+  }
+
+  &__platforms {
+    display: flex;
+    gap: 0.75rem;
+    flex-shrink: 0;
+  }
+
+  &__platform-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+    background: var(--color-surface-raised);
+    padding: 0.2rem 0.5rem;
+    border-radius: 6px;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+// ── Session history ───────────────────────────────────────────────────────────
+
+.session-history {
+  margin-top: 2rem;
+
+  &__toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.75rem 0;
+    background: none;
+    border: none;
+    border-top: 1px solid var(--color-border);
+    color: var(--color-text-muted);
+    font-size: 0.9rem;
+    font-weight: 500;
+    font-family: var(--font-sans);
+    cursor: pointer;
+    transition: color 0.15s ease;
+
+    &:hover {
+      color: var(--color-text-primary);
+    }
+  }
+
+  &__toggle-icon {
+    font-size: 0.65rem;
+    transition: transform 0.2s ease;
+
+    &--open {
+      transform: rotate(90deg);
+    }
+  }
+
+  &__count {
+    font-size: 0.8rem;
+    opacity: 0.6;
+  }
+
+  &__empty {
+    padding: 1.5rem 0;
+    text-align: center;
+    color: var(--color-text-muted);
+    font-size: 0.85rem;
+  }
+
+  &__list {
+    list-style: none;
+    padding: 0;
+    margin: 0.5rem 0 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+}
+
+// ── History session row modifier ──────────────────────────────────────────────
+
+.session-row--history {
+  opacity: 0.6;
+  border-style: dashed;
+
+  &:hover {
+    opacity: 0.8;
+  }
+}
+
+// ── Terminated badge ──────────────────────────────────────────────────────────
+
+.status-badge--terminated {
+  background: var(--color-surface-raised);
+  color: var(--color-text-muted);
+  opacity: 0.7;
+}

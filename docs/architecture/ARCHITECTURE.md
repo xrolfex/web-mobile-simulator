@@ -2,7 +2,7 @@
 
 > **Status**: Greenfield / Pre-implementation  
 > **Date**: 2026-04-12  
-> **Stack**: Angular 21 · Fastify · noVNC · websockify · scrcpy · SQLite (Drizzle ORM) · Docker · Caddy · pnpm workspaces
+> **Stack**: Angular 21 · Fastify · noVNC · websockify · scrcpy · SQLite (Drizzle ORM) · Docker · nginx · pnpm workspaces
 
 ---
 
@@ -36,7 +36,7 @@ flowchart TD
         Angular --> RuntimeMgr_UI
     end
 
-    subgraph Caddy["🔀 Reverse Proxy — Caddy"]
+    subgraph Nginx["🔀 Reverse Proxy — nginx"]
         direction TB
         StaticServe["Serve Angular\nstatic build"]
         APIProxy["/api/* → Fastify :3000"]
@@ -74,10 +74,10 @@ flowchart TD
         AndroidEmu --> ScrcpyProc
     end
 
-    Browser -- "HTTPS + WSS" --> Caddy
-    Caddy -- "HTTP :3000" --> Fastify
-    Caddy -- "WS tunnel" --> Websockify
-    Caddy -- "WS / WebRTC tunnel" --> ScrcpyProc
+    Browser -- "HTTPS + WSS" --> Nginx
+    Nginx -- "HTTP :3000" --> Fastify
+    Nginx -- "WS tunnel" --> Websockify
+    Nginx -- "WS / WebRTC tunnel" --> ScrcpyProc
     Fastify -- "spawn / CLI" --> Host
     Fastify -- "port discovery" --> Websockify
 ```
@@ -87,7 +87,7 @@ flowchart TD
 | Layer | Runs In | Communicates Via |
 |---|---|---|
 | Angular 21 SPA | Browser | HTTPS REST + WSS |
-| Caddy | Docker container | TCP/Unix socket to Fastify; WS tunnel to host |
+| nginx | Docker container | TCP/Unix socket to Fastify; WS tunnel to host |
 | Fastify API | Docker container | Host networking / bind-mount socket to macOS host |
 | iOS Simulator | Host macOS | VNC on loopback `:590x` |
 | websockify | Host macOS | Bridges VNC TCP → WS |
@@ -101,11 +101,11 @@ flowchart TD
 | Component | Technology | Role | Port(s) |
 |---|---|---|---|
 | **Angular SPA** | Angular 21.2.x · TypeScript · standalone components · signals · OnPush | Interactive device picker, noVNC viewer, runtime management UI, WebSocket progress display | N/A (browser-side) |
-| **Caddy** | Caddy v2 | Reverse proxy; serves Angular static build; terminates TLS; routes `/api/*` to Fastify; proxies WebSocket connections for VNC and scrcpy streams | `80`, `443` |
+| **nginx** | nginx (Alpine) | Reverse proxy; serves Angular static build; gzip compression; routes `/api/*` to Fastify; proxies WebSocket connections for VNC and scrcpy streams; SPA fallback | `80`, `8080` |
 | **Fastify API** | Fastify · Node.js · TypeScript | REST API for session lifecycle, device inventory, runtime management; manages simulator/emulator processes; allocates websockify ports | `3000` (internal) |
 | **Device Manager** | `xcrun simctl` · `adb` · `avdmanager` (Node.js child_process) | Creates, boots, and terminates iOS Simulators and Android Emulators; queries installed devices and runtimes | — (CLI) |
 | **Runtime Manager** | `xcrun simctl runtime` · `sdkmanager` (Node.js child_process) | Downloads and registers iOS runtimes and Android system images; streams download progress | — (CLI) |
-| **websockify** | websockify (Python/Node) | Bridges VNC TCP connections on loopback to WebSocket endpoints accessible by Caddy proxy | Dynamic `:6080`–`:6180` range |
+| **websockify** | websockify (Python/Node) | Bridges VNC TCP connections on loopback to WebSocket endpoints accessible by nginx proxy | Dynamic `:6080`–`:6180` range |
 | **scrcpy / scrcpy-web** | scrcpy · WebRTC or WS | Captures Android Emulator display and input; streams to browser via WebRTC or WebSocket | Dynamic (negotiated) |
 | **iOS Simulator** | Xcode · `xcrun simctl` | Runs iOS device simulation natively on macOS; exposes display over VNC | `:590x` (loopback) |
 | **Android Emulator** | Android SDK `emulator` CLI · QEMU | Runs Android device emulation natively on macOS (requires KVM/HVF acceleration) | `5554`+ (ADB) |
@@ -123,7 +123,7 @@ sequenceDiagram
     autonumber
     actor User
     participant FE as Angular 21 SPA
-    participant Caddy as Caddy (Reverse Proxy)
+    participant Nginx as nginx (Reverse Proxy)
     participant API as Fastify API
     participant DevMgr as Device Manager
     participant SimProc as iOS Simulator / Android Emulator (Host)
@@ -131,8 +131,8 @@ sequenceDiagram
     participant DB as SQLite (Drizzle)
 
     User->>FE: Selects device type, OS version, device model
-    FE->>Caddy: POST /api/sessions\n{ platform, osVersion, deviceModel }
-    Caddy->>API: POST /api/sessions (proxied)
+    FE->>Nginx: POST /api/sessions\n{ platform, osVersion, deviceModel }
+    Nginx->>API: POST /api/sessions (proxied)
 
     API->>DB: Query available devices & runtimes
     DB-->>API: Device list + runtime availability
@@ -162,27 +162,27 @@ sequenceDiagram
     API->>DB: INSERT session { id, platform, udid/avd, wsPort, status: active }
     DB-->>API: sessionId
 
-    API-->>Caddy: 201 { sessionId, wsUrl: wss://host/stream/{sessionId} }
-    Caddy-->>FE: 201 session created
+    API-->>Nginx: 201 { sessionId, wsUrl: wss://host/stream/{sessionId} }
+    Nginx-->>FE: 201 session created
     FE->>FE: Initialise noVNC (iOS) or scrcpy-web (Android)\nwith wsUrl
 
-    FE->>Caddy: WSS /stream/{sessionId} (upgrade)
-    Caddy->>WSProc: WS proxy → dynamic port
-    WSProc-->>Caddy: stream frames
-    Caddy-->>FE: stream frames
+    FE->>Nginx: WSS /stream/{sessionId} (upgrade)
+    Nginx->>WSProc: WS proxy → dynamic port
+    WSProc-->>Nginx: stream frames
+    Nginx-->>FE: stream frames
 
     Note over FE,WSProc: 🟢 Interactive streaming active
 
     User->>FE: Closes session / navigates away
-    FE->>Caddy: DELETE /api/sessions/{sessionId}
-    Caddy->>API: DELETE /api/sessions/{sessionId}
+    FE->>Nginx: DELETE /api/sessions/{sessionId}
+    Nginx->>API: DELETE /api/sessions/{sessionId}
     API->>DevMgr: terminateSession(sessionId)
     DevMgr->>WSProc: kill websockify / scrcpy process
     DevMgr->>SimProc: xcrun simctl shutdown {UDID} (iOS)\nor adb emu kill (Android)
     DevMgr->>SimProc: xcrun simctl delete {UDID} (optional cleanup)
     API->>DB: UPDATE session { status: terminated, endedAt }
-    API-->>Caddy: 204 No Content
-    Caddy-->>FE: 204
+    API-->>Nginx: 204 No Content
+    Nginx-->>FE: 204
     FE->>FE: Reset viewer, show device picker
 ```
 
@@ -197,15 +197,15 @@ sequenceDiagram
     autonumber
     actor User
     participant FE as Angular 21 SPA
-    participant Caddy as Caddy (Reverse Proxy)
+    participant Nginx as nginx (Reverse Proxy)
     participant API as Fastify API
     participant RuntimeMgr as Runtime Manager Service
     participant CLI as xcrun simctl / sdkmanager (Host)
     participant DB as SQLite (Drizzle)
 
     User->>FE: Opens Runtime Manager view
-    FE->>Caddy: GET /api/runtimes
-    Caddy->>API: GET /api/runtimes
+    FE->>Nginx: GET /api/runtimes
+    Nginx->>API: GET /api/runtimes
     API->>RuntimeMgr: listRuntimes()
 
     par iOS runtimes
@@ -218,20 +218,20 @@ sequenceDiagram
 
     RuntimeMgr-->>API: { ios: [...], android: [...] }
     API->>DB: Upsert runtime catalogue
-    API-->>Caddy: 200 { runtimes: { ios, android } }
-    Caddy-->>FE: runtime list
+    API-->>Nginx: 200 { runtimes: { ios, android } }
+    Nginx-->>FE: runtime list
     FE->>FE: Render runtime grid\n(installed · available · size · version)
 
     User->>FE: Clicks "Download" on a runtime
-    FE->>Caddy: POST /api/runtimes/download\n{ platform, identifier }
-    Caddy->>API: POST /api/runtimes/download
+    FE->>Nginx: POST /api/runtimes/download\n{ platform, identifier }
+    Nginx->>API: POST /api/runtimes/download
 
     API->>DB: INSERT runtimeDownload { id, platform, identifier, status: queued }
-    API-->>Caddy: 202 Accepted { downloadId, progressWsUrl }
-    Caddy-->>FE: 202 { downloadId, progressWsUrl }
+    API-->>Nginx: 202 Accepted { downloadId, progressWsUrl }
+    Nginx-->>FE: 202 { downloadId, progressWsUrl }
 
-    FE->>Caddy: WSS /ws/runtimes/progress/{downloadId}
-    Caddy->>API: WS /ws/runtimes/progress/{downloadId}
+    FE->>Nginx: WSS /ws/runtimes/progress/{downloadId}
+    Nginx->>API: WS /ws/runtimes/progress/{downloadId}
     Note over FE,API: 🔌 Progress WebSocket established
 
     API->>RuntimeMgr: startDownload(downloadId, platform, identifier)
@@ -260,7 +260,7 @@ sequenceDiagram
     API->>DB: UPDATE runtimeDownload { status: installed }
     API-->>FE: WS message { type: complete, identifier }
     FE->>FE: Mark runtime as "Installed"\nEnable "Create Session" for new OS version
-    FE->>Caddy: WS close
+    FE->>Nginx: WS close
 ```
 
 ---
@@ -274,8 +274,8 @@ flowchart TB
     subgraph DockerHost["🐳 Docker Compose on macOS Host"]
         direction TB
 
-        subgraph CaddyContainer["Container: caddy"]
-            CaddyProc["Caddy v2\n• Serves /dist/angular (static)\n• :443 → TLS termination\n• /api/* → fastify:3000\n• /stream/* → host websockify ports\n• /ws/* → host scrcpy ports"]
+        subgraph NginxContainer["Container: nginx"]
+            NginxProc["nginx\n• Serves /dist/angular (static)\n• gzip compression\n• /api/* → fastify:3000\n• /stream/* → host websockify ports\n• /ws/* → host scrcpy ports\n• SPA fallback"]
             AngularBuild["Angular 21 static build\n(COPY'd during docker build)"]
         end
 
@@ -325,12 +325,12 @@ flowchart TB
         AngularApp --> ScrcpyWebViewer
     end
 
-    BrowserClient -- "HTTPS :443\nWSS :443" --> CaddyContainer
-    CaddyContainer -- "HTTP :3000\n(host-network or bridge)" --> FastifyContainer
+    BrowserClient -- "HTTPS :443\nWSS :443" --> NginxContainer
+    NginxContainer -- "HTTP :3000\n(host-network or bridge)" --> FastifyContainer
     FastifyContainer -- "child_process\nspawn CLI tools" --> MacOSHost
-    CaddyContainer -- "WS proxy\n(host port range)" --> StreamingLayer
+    NginxContainer -- "WS proxy\n(host port range)" --> StreamingLayer
 
-    note1["⚠️ Docker uses host networking mode\nor explicit port mapping so Caddy\ncan proxy to dynamically allocated\nhost-side websockify/scrcpy ports"]
+    note1["⚠️ Docker uses host networking mode\nor explicit port mapping so nginx\ncan proxy to dynamically allocated\nhost-side websockify/scrcpy ports"]
     style note1 fill:#fffbe6,stroke:#f0c040,color:#333
 ```
 
@@ -338,9 +338,9 @@ flowchart TB
 
 | Service | Image Base | Mounts | Network Mode | Notes |
 |---|---|---|---|---|
-| `caddy` | `caddy:2-alpine` | Angular `/dist` (build artifact); `Caddyfile` | Bridge + host port range | Angular static files are `COPY`'d into the image at build time |
+| `nginx` | `nginx:alpine` | Angular `/dist` (build artifact); `nginx.conf` | Bridge + host port range | Angular static files are `COPY`'d into the image at build time |
 | `api` | `node:22-alpine` | `db-data` volume; optional host socket | Bridge (internal) | Communicates with host macOS via TCP (host networking) to reach simulators |
-| *(Angular)* | — | — | — | No separate container; built as static files during `caddy` image build |
+| *(Angular)* | — | — | — | No separate container; built as static files during `nginx` image build |
 
 ---
 
@@ -361,7 +361,7 @@ flowchart TB
 **Context**: The iOS Simulator exposes its display via VNC on loopback. Browsers cannot connect to raw TCP VNC.  
 **Decision**: Use websockify to bridge VNC TCP → WebSocket, consumed by noVNC in the Angular SPA.  
 **Alternatives Considered**: Direct screen capture via `xcrun simctl io` → MJPEG stream (higher latency, lower interactivity). WebRTC (more complex, no native simulator support).  
-**Consequences**: Each active iOS session spawns one websockify process. Port range must be managed and proxied through Caddy.
+**Consequences**: Each active iOS session spawns one websockify process. Port range must be managed and proxied through nginx.
 
 ---
 
@@ -384,13 +384,13 @@ flowchart TB
 
 ---
 
-### ADR-005: Caddy as Reverse Proxy
+### ADR-005: nginx as Reverse Proxy
 
 **Status**: Accepted  
-**Context**: The platform needs TLS termination, static file serving, API proxying, and WebSocket proxying in a single layer.  
-**Decision**: Use Caddy v2 for its automatic HTTPS, simple Caddyfile DSL, and first-class WebSocket proxy support.  
-**Alternatives Considered**: nginx (no automatic HTTPS, verbose config). Traefik (more suited to dynamic container routing than static site serving).  
-**Consequences**: Caddyfile must enumerate the dynamic websockify port range or use a wildcard upstream resolver pattern.
+**Context**: The platform needs static file serving, API proxying, WebSocket proxying, and gzip compression in a single layer.  
+**Decision**: Use nginx for its widespread enterprise adoption, high-performance static file serving, comprehensive WebSocket proxy support, and gzip compression.  
+**Alternatives Considered**: Auto-HTTPS reverse proxies (simpler DSL, but less battle-tested for high-concurrency static serving). Traefik (more suited to dynamic container routing than static site serving).  
+**Consequences**: `nginx.conf` and `nginx.dev.conf` must be maintained separately for production and development environments. Dynamic upstream port ranges for websockify must be configured via nginx upstream blocks or `proxy_pass` directives.
 
 ---
 

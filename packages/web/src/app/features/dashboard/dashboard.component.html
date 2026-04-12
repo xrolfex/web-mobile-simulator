@@ -24,6 +24,42 @@
     }
   </div>
 
+  <!-- ── Capacity info ─────────────────────────────────────────────────── -->
+  @if (capacity()) {
+    <div class="capacity-bar">
+      <div class="capacity-bar__info">
+        <span class="capacity-bar__label">Active Sessions</span>
+        <span class="capacity-bar__count">
+          {{ capacity()!.activeSessions }}
+          @if (capacity()!.maxConcurrentSessions > 0) {
+            <span class="capacity-bar__max">/ {{ capacity()!.maxConcurrentSessions }}</span>
+          }
+        </span>
+      </div>
+      @if (capacity()!.maxConcurrentSessions > 0) {
+        <div class="capacity-bar__progress-track">
+          <div
+            class="capacity-bar__progress-fill"
+            [style.width.%]="(capacity()!.activeSessions / capacity()!.maxConcurrentSessions) * 100"
+            [class.capacity-bar__progress-fill--warning]="capacity()!.activeSessions >= capacity()!.maxConcurrentSessions * 0.8"
+            [class.capacity-bar__progress-fill--full]="capacity()!.activeSessions >= capacity()!.maxConcurrentSessions"
+          ></div>
+        </div>
+      }
+      <div class="capacity-bar__platforms">
+        @for (entry of capacity()!.perPlatform | keyvalue; track entry.key) {
+          <span class="capacity-bar__platform-tag">
+            {{ entry.key === 'ios' ? '🍎' : '🤖' }}
+            {{ entry.value.active }}
+            @if (entry.value.max > 0) {
+              /{{ entry.value.max }}
+            }
+          </span>
+        }
+      </div>
+    </div>
+  }
+
   <!-- ── Active sessions ─────────────────────────────────────────────────── -->
   <section class="active-sessions" aria-labelledby="active-sessions-heading">
     <h3 id="active-sessions-heading" class="active-sessions__heading">
@@ -107,6 +143,54 @@
           </li>
         }
       </ul>
+    }
+  </section>
+
+  <!-- ── Session history ───────────────────────────────────────────────── -->
+  <section class="session-history" aria-labelledby="session-history-heading">
+    <button
+      class="session-history__toggle"
+      (click)="toggleHistory()"
+      [attr.aria-expanded]="showHistory()"
+      aria-controls="session-history-list"
+    >
+      <span class="session-history__toggle-icon" [class.session-history__toggle-icon--open]="showHistory()">▶</span>
+      Session History
+      <span class="session-history__count">({{ historySessions().length }})</span>
+    </button>
+
+    @if (showHistory()) {
+      @if (historySessions().length === 0) {
+        <p class="session-history__empty">No completed sessions yet.</p>
+      } @else {
+        <ul class="session-history__list" id="session-history-list" aria-label="Session history">
+          @for (session of historySessions(); track session.id) {
+            <li class="session-row session-row--history">
+              <span class="session-row__icon" aria-hidden="true">
+                {{ platformIcon(session.device.platform) }}
+              </span>
+              <div class="session-row__info">
+                <span class="session-row__device-name">
+                  {{ session.device.deviceType.modelName }}
+                </span>
+                <span class="session-row__runtime">
+                  {{ session.device.runtime.version }}
+                </span>
+              </div>
+              <span
+                class="status-badge"
+                [class.status-badge--error]="session.status === 'error'"
+                [class.status-badge--terminated]="session.status === 'terminated'"
+              >
+                {{ session.status }}
+              </span>
+              <span class="session-row__duration" aria-label="Session duration">
+                {{ sessionDuration(session.createdAt) }}
+              </span>
+            </li>
+          }
+        </ul>
+      }
     }
   </section>
 </section>

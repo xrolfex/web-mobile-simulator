@@ -14,6 +14,7 @@ import { Router, RouterLink } from '@angular/router';
 import { HttpErrorResponse } from '@angular/common/http';
 
 import { ApiService } from '../../core/services/api.service';
+import { ToastService } from '../../core/services/toast.service';
 import type { DeviceType, Platform, Runtime } from '../../core/types/api.types';
 
 /**
@@ -87,6 +88,7 @@ export class LaunchDialogComponent implements OnInit {
 
   private readonly api = inject(ApiService);
   private readonly router = inject(Router);
+  private readonly toast = inject(ToastService);
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
 
@@ -128,6 +130,7 @@ export class LaunchDialogComponent implements OnInit {
             const msg =
               response.error?.message ?? 'Failed to create session.';
             this.errorMessage.set(msg);
+            this.toast.error(msg);
             this.launching.set(false);
             return;
           }
@@ -135,6 +138,7 @@ export class LaunchDialogComponent implements OnInit {
         },
         error: (err: unknown) => {
           this.errorMessage.set(this.extractErrorMessage(err));
+          this.toast.error(this.errorMessage());
           this.launching.set(false);
         },
       });
@@ -163,6 +167,7 @@ export class LaunchDialogComponent implements OnInit {
       },
       error: (err: unknown) => {
         this.errorMessage.set(this.extractErrorMessage(err));
+        this.toast.error('Failed to load device types.');
         this.loadingDevices.set(false);
       },
     });
@@ -209,6 +214,7 @@ export class LaunchDialogComponent implements OnInit {
       },
       error: (err: unknown) => {
         this.errorMessage.set(this.extractErrorMessage(err));
+        this.toast.error('Failed to load runtimes.');
         this.loadingRuntimes.set(false);
       },
     });

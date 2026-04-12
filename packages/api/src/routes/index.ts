@@ -4,6 +4,7 @@ import sessionRoutes from './sessions.js';
 import deviceRoutes from './devices.js';
 import runtimeRoutes from './runtimes.js';
 import wsEventsRoutes from './ws-events.js';
+import wsVncRoutes from './ws-vnc.js';
 import appRoutes from './apps.js';
 
 /**
@@ -17,5 +18,6 @@ export async function registerRoutes(fastify: FastifyInstance): Promise<void> {
   await fastify.register(deviceRoutes);
   await fastify.register(runtimeRoutes);
   await fastify.register(wsEventsRoutes);
+  await fastify.register(wsVncRoutes);
   await fastify.register(appRoutes);
 }

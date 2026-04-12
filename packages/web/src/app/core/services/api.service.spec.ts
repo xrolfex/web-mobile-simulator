@@ -21,11 +21,12 @@ import type {
   DownloadRuntimeRequest,
   RuntimeListResponse,
   Session,
+  SessionListResponse,
 } from '../types/api.types';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
-const BASE = 'http://localhost:3000';
+const BASE = '';
 
 /** Minimal valid Session fixture. */
 const mockSession: Session = {
@@ -101,11 +102,14 @@ describe('ApiService', () => {
   describe('getSessions()', () => {
     it('should make a GET request to /api/sessions', () => {
       // Arrange
-      const mockResponse: ApiResponse<Session[]> = {
+      const mockResponse: ApiResponse<SessionListResponse> = {
         success: true,
-        data: [mockSession],
+        data: {
+          sessions: [mockSession],
+          capacity: { activeSessions: 1, maxConcurrentSessions: 5, perPlatform: {} },
+        },
       };
-      let result: ApiResponse<Session[]> | undefined;
+      let result: ApiResponse<SessionListResponse> | undefined;
 
       // Act
       service.getSessions().subscribe((r) => (result = r));
@@ -119,11 +123,14 @@ describe('ApiService', () => {
 
     it('should forward an empty data array when no sessions exist', () => {
       // Arrange
-      const mockResponse: ApiResponse<Session[]> = {
+      const mockResponse: ApiResponse<SessionListResponse> = {
         success: true,
-        data: [],
+        data: {
+          sessions: [],
+          capacity: { activeSessions: 0, maxConcurrentSessions: 5, perPlatform: {} },
+        },
       };
-      let result: ApiResponse<Session[]> | undefined;
+      let result: ApiResponse<SessionListResponse> | undefined;
 
       // Act
       service.getSessions().subscribe((r) => (result = r));
@@ -131,16 +138,16 @@ describe('ApiService', () => {
       req.flush(mockResponse);
 
       // Assert
-      expect(result?.data).toEqual([]);
+      expect(result?.data?.sessions).toEqual([]);
     });
 
     it('should forward an error response from the server', () => {
       // Arrange
-      const errorResponse: ApiResponse<Session[]> = {
+      const errorResponse: ApiResponse<SessionListResponse> = {
         success: false,
         error: { code: 'INTERNAL_ERROR', message: 'Something went wrong' },
       };
-      let result: ApiResponse<Session[]> | undefined;
+      let result: ApiResponse<SessionListResponse> | undefined;
 
       // Act
       service.getSessions().subscribe((r) => (result = r));
@@ -157,11 +164,11 @@ describe('ApiService', () => {
     it('should make a GET request to /api/sessions/:id', () => {
       // Arrange
       const id = 'session-1';
-      const mockResponse: ApiResponse<Session> = {
+      const mockResponse: ApiResponse<{ session: Session }> = {
         success: true,
-        data: mockSession,
+        data: { session: mockSession },
       };
-      let result: ApiResponse<Session> | undefined;
+      let result: ApiResponse<{ session: Session }> | undefined;
 
       // Act
       service.getSession(id).subscribe((r) => (result = r));
@@ -170,7 +177,7 @@ describe('ApiService', () => {
       // Assert
       expect(req.request.method).toBe('GET');
       req.flush(mockResponse);
-      expect(result?.data?.id).toBe(id);
+      expect(result?.data?.session.id).toBe(id);
     });
 
     it('should encode the session id in the URL', () => {

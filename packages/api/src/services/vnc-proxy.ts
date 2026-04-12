@@ -94,7 +94,7 @@ export class VNCProxyService {
       log(`Proxy already running for session ${sessionId} on port ${existing.wsPort}`);
       return {
         wsPort: existing.wsPort,
-        wsUrl: `ws://localhost:${existing.wsPort}`,
+        wsUrl: `/ws/vnc/${sessionId}`,
       };
     }
 
@@ -133,10 +133,10 @@ export class VNCProxyService {
 
     log(
       `Started proxy for session ${sessionId}: ` +
-        `ws://localhost:${wsPort} → ${vncHost}:${vncPort}`,
+        `/ws/vnc/${sessionId} → ${vncHost}:${vncPort} (internal wsPort ${wsPort})`,
     );
 
-    return { wsPort, wsUrl: `ws://localhost:${wsPort}` };
+    return { wsPort, wsUrl: `/ws/vnc/${sessionId}` };
   }
 
   /**
@@ -194,7 +194,22 @@ export class VNCProxyService {
   getProxy(sessionId: string): { wsPort: number; wsUrl: string } | null {
     const proxy = this.proxies.get(sessionId);
     if (!proxy) return null;
-    return { wsPort: proxy.wsPort, wsUrl: `ws://localhost:${proxy.wsPort}` };
+    return { wsPort: proxy.wsPort, wsUrl: `/ws/vnc/${sessionId}` };
+  }
+
+  /**
+   * Return the VNC TCP target host and port for a running proxy, or `null` if
+   * no proxy exists for `sessionId`.
+   *
+   * Used by the `/ws/vnc/:sessionId` HTTP route so it can bridge a browser
+   * WebSocket directly to the VNC server without needing internal proxy details.
+   *
+   * @param sessionId - Session to look up.
+   */
+  getProxyTarget(sessionId: string): { host: string; port: number } | null {
+    const proxy = this.proxies.get(sessionId);
+    if (!proxy) return null;
+    return { host: proxy.targetHost, port: proxy.targetPort };
   }
 
   /**

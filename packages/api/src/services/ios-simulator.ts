@@ -124,7 +124,7 @@ export class IOSSimulatorService {
    */
   async listDeviceTypes(): Promise<DeviceType[]> {
     log('Listing device types…');
-    this.assertSimctlAvailable();
+    await this.assertSimctlAvailable();
 
     const output = await execJSON<Pick<SimctlListOutput, 'devicetypes'>>(
       SIMCTL,
@@ -154,7 +154,7 @@ export class IOSSimulatorService {
    */
   async listRuntimes(): Promise<Runtime[]> {
     log('Listing runtimes…');
-    this.assertSimctlAvailable();
+    await this.assertSimctlAvailable();
 
     const output = await execJSON<Pick<SimctlListOutput, 'runtimes'>>(
       SIMCTL,
@@ -188,7 +188,7 @@ export class IOSSimulatorService {
    */
   async listDevices(): Promise<SimulatorDevice[]> {
     log('Listing devices…');
-    this.assertSimctlAvailable();
+    await this.assertSimctlAvailable();
 
     // Fetch everything in one call so we can resolve references cheaply.
     const output = await execJSON<SimctlListOutput>(SIMCTL, [
@@ -286,7 +286,7 @@ export class IOSSimulatorService {
     runtimeId: string,
   ): Promise<string> {
     log(`Creating device: name="${name}" deviceType="${deviceTypeId}" runtime="${runtimeId}"`);
-    this.assertSimctlAvailable();
+    await this.assertSimctlAvailable();
 
     const { stdout } = await exec(SIMCTL, [
       'simctl',
@@ -315,7 +315,7 @@ export class IOSSimulatorService {
    */
   async bootDevice(udid: string): Promise<void> {
     log(`Booting device: ${udid}`);
-    this.assertSimctlAvailable();
+    await this.assertSimctlAvailable();
 
     // Issue the boot command — simctl exits as soon as the boot is initiated,
     // not when it is complete, so we poll afterwards.
@@ -350,7 +350,7 @@ export class IOSSimulatorService {
    */
   async shutdownDevice(udid: string): Promise<void> {
     log(`Shutting down device: ${udid}`);
-    this.assertSimctlAvailable();
+    await this.assertSimctlAvailable();
     await exec(SIMCTL, ['simctl', 'shutdown', udid]);
     log(`Shutdown command sent for device: ${udid}`);
   }
@@ -363,7 +363,7 @@ export class IOSSimulatorService {
    */
   async deleteDevice(udid: string): Promise<void> {
     log(`Deleting device: ${udid}`);
-    this.assertSimctlAvailable();
+    await this.assertSimctlAvailable();
     await exec(SIMCTL, ['simctl', 'delete', udid]);
     log(`Deleted device: ${udid}`);
   }
@@ -457,9 +457,9 @@ export class IOSSimulatorService {
         }
       }
 
-      // No listener found in the VNC range — fall back to the standard port.
-      log(`No VNC listener detected in range ${vncRangeMin}–${vncRangeMax}; defaulting to 5900`);
-      return 5900;
+      // No listener found in the VNC range.
+      log(`No VNC listener detected in range ${vncRangeMin}–${vncRangeMax} — returning null`);
+      return null;
     } catch (error: unknown) {
       warn(`getVNCPort: lsof failed — ${String(error)}`);
       return null;
@@ -486,7 +486,7 @@ export class IOSSimulatorService {
    */
   async downloadRuntime(identifier: string): Promise<void> {
     log(`Initiating runtime download: ${identifier}`);
-    this.assertSimctlAvailable();
+    await this.assertSimctlAvailable();
 
     // `xcrun simctl runtime add` was added in Xcode 14 / simctl 800.
     // We attempt it first and fall back to xcodebuild on failure.
@@ -520,7 +520,7 @@ export class IOSSimulatorService {
    * Verify that `xcrun` is accessible on `PATH`.
    * Throws a clear, actionable error if Xcode Command Line Tools are absent.
    */
-  private assertSimctlAvailable(): void {
+  private async assertSimctlAvailable(): Promise<void> {
     // We perform this check lazily (not in the constructor) so the service can
     // be imported on non-macOS hosts without throwing at module load time.
     // The actual execution will fail with a clear OS-level error anyway, but
@@ -529,6 +529,16 @@ export class IOSSimulatorService {
       throw new Error(
         'IOSSimulatorService requires macOS. ' +
           `Current platform: ${process.platform}`,
+      );
+    }
+
+    // Verify xcrun is actually available on PATH.
+    try {
+      await exec('xcrun', ['--version']);
+    } catch {
+      throw new Error(
+        'xcrun is not available on PATH. Install Xcode Command Line Tools: ' +
+        'xcode-select --install',
       );
     }
   }

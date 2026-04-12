@@ -11,6 +11,7 @@ import {
   Platform,
   RuntimeListResponse,
   Session,
+  SessionListResponse,
 } from '../types/api.types';
 
 /**
@@ -33,11 +34,11 @@ export class ApiService {
   // ── Sessions ──────────────────────────────────────────────────────────────
 
   /**
-   * Retrieve all active and recent sessions.
+   * Retrieve all active and recent sessions, including capacity info.
    * GET /api/sessions
    */
   getSessions() {
-    return this.http.get<ApiResponse<Session[]>>(
+    return this.http.get<ApiResponse<SessionListResponse>>(
       `${this.baseUrl}/api/sessions`,
     );
   }
@@ -48,7 +49,7 @@ export class ApiService {
    * @param id The session UUID.
    */
   getSession(id: string) {
-    return this.http.get<ApiResponse<Session>>(
+    return this.http.get<ApiResponse<{ session: Session }>>(
       `${this.baseUrl}/api/sessions/${id}`,
     );
   }

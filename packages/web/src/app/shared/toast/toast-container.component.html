@@ -1,0 +1,35 @@
+<div class="toast-container" aria-live="polite" aria-label="Notifications">
+  @for (toast of toasts(); track toast.id) {
+    <div
+      class="toast"
+      [class.toast--success]="toast.type === 'success'"
+      [class.toast--error]="toast.type === 'error'"
+      [class.toast--info]="toast.type === 'info'"
+      [class.toast--warning]="toast.type === 'warning'"
+      role="alert"
+    >
+      <span class="toast__icon" aria-hidden="true">
+        @if (toast.type === 'success') {
+          ✅
+        } @else if (toast.type === 'error') {
+          ❌
+        } @else if (toast.type === 'info') {
+          ℹ️
+        } @else if (toast.type === 'warning') {
+          ⚠️
+        }
+      </span>
+
+      <p class="toast__message">{{ toast.message }}</p>
+
+      <button
+        class="toast__dismiss"
+        type="button"
+        aria-label="Dismiss notification"
+        (click)="dismiss(toast.id)"
+      >
+        ✕
+      </button>
+    </div>
+  }
+</div>

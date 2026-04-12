@@ -1,7 +1,5 @@
-version: '3.8'
-
 services:
-  web:
+  nginx:
     build:
       context: .
       dockerfile: Dockerfile.web
@@ -25,12 +23,6 @@ services:
       - ANDROID_SDK_ROOT=/Users/shared/Library/Android/sdk
     volumes:
       - api-data:/app/data
-      # Mount host paths for simulator/emulator access (macOS specific)
-      # These will be needed when implementing actual simulator control
-      # - /var/run/docker.sock:/var/run/docker.sock
-    # Use host networking on macOS for access to simulators/emulators
-    # Uncomment when ready to integrate with host simulators:
-    # network_mode: host
     restart: unless-stopped
 
 volumes:

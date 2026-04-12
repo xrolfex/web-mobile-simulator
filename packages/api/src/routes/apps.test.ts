@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
+import type { Session, AppInstallResult } from '@web-mobile-simulator/shared';
 
 // ---------------------------------------------------------------------------
 // Mock services BEFORE importing the route module.
@@ -88,7 +89,7 @@ function buildMultipartPayload(
  * Create a realistic mock session, with optional overrides applied last.
  * The default is an active iOS session.
  */
-function createMockSession(overrides: Record<string, unknown> = {}) {
+function createMockSession(overrides: Record<string, unknown> = {}): Session {
   return {
     id: 'test-session-id',
     status: 'active',
@@ -117,7 +118,7 @@ function createMockSession(overrides: Record<string, unknown> = {}) {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     ...overrides,
-  };
+  } as Session;
 }
 
 // ---------------------------------------------------------------------------
@@ -847,7 +848,7 @@ describe('POST /api/sessions/:id/apps — response shape', () => {
     // Arrange
     mockGetSession.mockReturnValue(createMockSession());
     mockValidateExtension.mockReturnValue(true);
-    const failedResult = {
+    const failedResult: AppInstallResult = {
       success: false,
       fileName: 'MyApp.ipa',
       platform: 'ios',

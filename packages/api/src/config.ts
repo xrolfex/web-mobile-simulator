@@ -1,4 +1,5 @@
 import dotenv from 'dotenv';
+import { homedir } from 'node:os';
 import {
   DEFAULT_API_PORT,
   DEFAULT_MAX_CONCURRENT_SESSIONS,
@@ -14,7 +15,7 @@ export const config = {
   host: process.env.API_HOST || '0.0.0.0',
   xcodePath: process.env.XCODE_PATH || '/Applications/Xcode.app',
   androidSdkRoot:
-    process.env.ANDROID_SDK_ROOT || `${process.env.HOME}/Library/Android/sdk`,
+    process.env.ANDROID_SDK_ROOT || `${homedir()}/Library/Android/sdk`,
   databaseUrl: process.env.DATABASE_URL || 'file:./data/simulator.db',
   vncProxyPortRange: {
     start: parseInt(process.env.VNC_PROXY_PORT_RANGE_START || '6900', 10),

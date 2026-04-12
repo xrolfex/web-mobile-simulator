@@ -9,11 +9,13 @@ import {
 import { Router } from '@angular/router';
 import { Subscription } from 'rxjs';
 import { HttpErrorResponse } from '@angular/common/http';
+import { KeyValuePipe } from '@angular/common';
 
 import { ApiService } from '../../core/services/api.service';
 import { WebSocketService } from '../../core/services/websocket.service';
+import { ToastService } from '../../core/services/toast.service';
 import { LaunchDialogComponent } from './launch-dialog.component';
-import type { Platform, Session } from '../../core/types/api.types';
+import type { Platform, Session, SessionCapacityInfo } from '../../core/types/api.types';
 
 /**
  * How often (ms) to auto-refresh the active sessions list via polling.
@@ -43,7 +45,7 @@ interface PlatformCard {
 @Component({
   selector: 'app-dashboard',
   standalone: true,
-  imports: [LaunchDialogComponent],
+  imports: [LaunchDialogComponent, KeyValuePipe],
   templateUrl: './dashboard.component.html',
   styleUrl: './dashboard.component.scss',
 })
@@ -84,9 +86,26 @@ export class DashboardComponent implements OnInit, OnDestroy {
   /** IDs of sessions whose stop request is in-flight. */
   protected readonly stoppingSessions = signal<Set<string>>(new Set());
 
+  /** Capacity info from the API. */
+  protected readonly capacity = signal<SessionCapacityInfo | null>(null);
+
+  /** Whether to show terminated/error sessions (history). */
+  protected readonly showHistory = signal<boolean>(false);
+
+  /** All sessions including terminated ones. */
+  protected readonly allSessions = signal<Session[]>([]);
+
+  /** Terminated/error sessions for the history view. */
+  protected readonly historySessions = computed(() =>
+    this.allSessions().filter(
+      (s) => s.status === 'terminated' || s.status === 'error',
+    ),
+  );
+
   private readonly api = inject(ApiService);
   private readonly router = inject(Router);
   private readonly websocketService = inject(WebSocketService);
+  private readonly toast = inject(ToastService);
 
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
   /** Subscription to WebSocket session-status events; cleaned up on destroy. */
@@ -106,7 +125,17 @@ export class DashboardComponent implements OnInit, OnDestroy {
 
     // Refresh the sessions list immediately whenever a session status changes.
     this.wsSessionSub = this.websocketService.sessionStatusChanges$.subscribe(
-      () => this.loadSessions(),
+      (msg) => {
+        this.loadSessions();
+        const status = msg.payload.status;
+        if (status === 'active') {
+          this.toast.info('A session is now active.');
+        } else if (status === 'error') {
+          this.toast.warning('A session encountered an error.');
+        } else if (status === 'terminated') {
+          this.toast.info('A session has been terminated.');
+        }
+      },
     );
   }
 
@@ -156,12 +185,14 @@ export class DashboardComponent implements OnInit, OnDestroy {
         const updated = new Set(this.stoppingSessions());
         updated.delete(sessionId);
         this.stoppingSessions.set(updated);
+        this.toast.success('Session stopped successfully.');
         this.loadSessions();
       },
       error: () => {
         const updated = new Set(this.stoppingSessions());
         updated.delete(sessionId);
         this.stoppingSessions.set(updated);
+        this.toast.error('Failed to stop session. Please try again.');
       },
     });
   }
@@ -172,6 +203,11 @@ export class DashboardComponent implements OnInit, OnDestroy {
    */
   protected isStopping(sessionId: string): boolean {
     return this.stoppingSessions().has(sessionId);
+  }
+
+  /** Toggle the session history panel open/closed. */
+  protected toggleHistory(): void {
+    this.showHistory.update((v) => !v);
   }
 
   /**
@@ -202,11 +238,14 @@ export class DashboardComponent implements OnInit, OnDestroy {
     this.api.getSessions().subscribe({
       next: (response) => {
         if (response.success && response.data) {
-          // Show all non-terminated sessions
-          const nonTerminated = response.data.filter(
+          const { sessions, capacity } = response.data;
+          this.allSessions.set(sessions);
+          // Show all non-terminated sessions as "active"
+          const nonTerminated = sessions.filter(
             (s) => s.status !== 'terminated',
           );
           this.activeSessions.set(nonTerminated);
+          this.capacity.set(capacity);
           this.sessionsError.set('');
         } else {
           this.sessionsError.set(
@@ -227,8 +266,10 @@ export class DashboardComponent implements OnInit, OnDestroy {
           this.sessionsError.set(
             body?.error?.message ?? `Server error (${err.status})`,
           );
+          this.toast.error(this.sessionsError());
         } else {
           this.sessionsError.set('Failed to load sessions.');
+          this.toast.error(this.sessionsError());
         }
       },
     });

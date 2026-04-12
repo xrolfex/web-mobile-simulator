@@ -40,7 +40,7 @@ export type ScaleMode = 'auto' | '1x' | '0.75x' | '0.5x';
   styleUrl: './simulator-viewer.component.scss',
 })
 export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
-  /** WebSocket URL to connect to (e.g. ws://localhost:6900). */
+  /** WebSocket URL to connect to (e.g. /ws/vnc/<sessionId> or ws://localhost:6900). */
   @Input({ required: true }) wsUrl!: string;
 
   /** Platform being displayed — affects UI chrome (device frame styles). */
@@ -119,7 +119,7 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
 
     this.ngZone.runOutsideAngular(() => {
       try {
-        this.rfb = new RFB(container, this.wsUrl, {
+        this.rfb = new RFB(container, this.resolveWsUrl(), {
           scaleViewport: this.scaleMode() === 'auto',
           resizeSession: false,
           credentials: { password: '' },
@@ -168,6 +168,27 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
         });
       }
     });
+  }
+
+  /**
+   * Resolve `wsUrl` to a fully-qualified WebSocket URL.
+   *
+   * If `wsUrl` is already an absolute WebSocket URL (`ws://` or `wss://`) it
+   * is returned unchanged.  Otherwise it is treated as a path relative to the
+   * current page origin and expanded using the appropriate protocol:
+   * - `https:` pages → `wss:`
+   * - `http:` pages  → `ws:`
+   *
+   * This allows the server to return a compact path like `/ws/vnc/<sessionId>`
+   * that the browser resolves against its own origin, so the connection is
+   * automatically routed through the same nginx proxy that serves the app.
+   */
+  private resolveWsUrl(): string {
+    if (this.wsUrl.startsWith('ws://') || this.wsUrl.startsWith('wss://')) {
+      return this.wsUrl;
+    }
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${protocol}//${window.location.host}${this.wsUrl}`;
   }
 
   /**
