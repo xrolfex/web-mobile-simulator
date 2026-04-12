@@ -1,0 +1,22 @@
+:8080 {
+    # API reverse proxy
+    handle /api/* {
+        reverse_proxy api:3000
+    }
+
+    # WebSocket proxy for real-time events
+    handle /ws/* {
+        reverse_proxy api:3000
+    }
+
+    # Everything else goes to the Angular dev server.
+    # Angular's dev server handles SPA routing and hot-module replacement.
+    handle {
+        reverse_proxy web:4200
+    }
+
+    log {
+        output stdout
+        format console
+    }
+}

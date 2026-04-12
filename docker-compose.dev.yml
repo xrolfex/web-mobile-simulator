@@ -1,0 +1,65 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      # Bind-mount source for hot reload (read-only — edits happen on host)
+      - ./packages/shared/src:/app/packages/shared/src:ro
+      - ./packages/api/src:/app/packages/api/src:ro
+      - ./tsconfig.base.json:/app/tsconfig.base.json:ro
+      - ./packages/shared/tsconfig.json:/app/packages/shared/tsconfig.json:ro
+      - ./packages/api/tsconfig.json:/app/packages/api/tsconfig.json:ro
+      # Persist SQLite database across container restarts
+      - api-data:/app/data
+    environment:
+      - API_PORT=3000
+      - API_HOST=0.0.0.0
+      - DATABASE_URL=file:/app/data/simulator.db
+      - NODE_ENV=development
+    # Build shared types first, then start API with tsx file watcher
+    command: sh -c "pnpm --filter @web-mobile-simulator/shared build && pnpm --filter @web-mobile-simulator/api run dev"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:3000/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      # Bind-mount source for hot reload (read-only — edits happen on host)
+      - ./packages/shared/src:/app/packages/shared/src:ro
+      - ./packages/shared/tsconfig.json:/app/packages/shared/tsconfig.json:ro
+      - ./packages/web/src:/app/packages/web/src:ro
+      - ./packages/web/public:/app/packages/web/public:ro
+      - ./tsconfig.base.json:/app/tsconfig.base.json:ro
+      - ./packages/web/tsconfig.json:/app/packages/web/tsconfig.json:ro
+      - ./packages/web/tsconfig.app.json:/app/packages/web/tsconfig.app.json:ro
+      - ./packages/web/angular.json:/app/packages/web/angular.json:ro
+      - ./packages/web/proxy.conf.json:/app/packages/web/proxy.conf.json:ro
+    environment:
+      - NODE_ENV=development
+    # Build shared types first, then start Angular dev server (allowedHosts configured in angular.json)
+    command: sh -c "pnpm --filter @web-mobile-simulator/shared build && pnpm --filter @web-mobile-simulator/web exec ng serve --host 0.0.0.0 --port 4200"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./Caddyfile.dev:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - api
+      - web
+    restart: unless-stopped
+
+volumes:
+  # Named volume preserves the API's SQLite database across `docker compose down`
+  api-data:

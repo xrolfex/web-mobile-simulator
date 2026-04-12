@@ -11,6 +11,8 @@ import {
 import { FormsModule } from '@angular/forms';
 import { Router, RouterLink } from '@angular/router';
 
+import { HttpErrorResponse } from '@angular/common/http';
+
 import { ApiService } from '../../core/services/api.service';
 import type { DeviceType, Platform, Runtime } from '../../core/types/api.types';
 
@@ -132,11 +134,7 @@ export class LaunchDialogComponent implements OnInit {
           void this.router.navigate(['/session', response.data.session.id]);
         },
         error: (err: unknown) => {
-          const msg =
-            err instanceof Error
-              ? err.message
-              : 'Unable to reach the backend. Is the API server running?';
-          this.errorMessage.set(msg);
+          this.errorMessage.set(this.extractErrorMessage(err));
           this.launching.set(false);
         },
       });
@@ -164,14 +162,32 @@ export class LaunchDialogComponent implements OnInit {
         this.loadingDevices.set(false);
       },
       error: (err: unknown) => {
-        const msg =
-          err instanceof Error
-            ? err.message
-            : 'Unable to reach the backend. Is the API server running?';
-        this.errorMessage.set(msg);
+        this.errorMessage.set(this.extractErrorMessage(err));
         this.loadingDevices.set(false);
       },
     });
+  }
+
+  /**
+   * Extract a user-friendly error message from an HTTP error.
+   * Handles HttpErrorResponse (Angular), Error, and unknown types.
+   */
+  private extractErrorMessage(err: unknown): string {
+    if (err instanceof HttpErrorResponse) {
+      if (err.status === 0) {
+        return 'Unable to reach the backend. Is the API server running?';
+      }
+      // Check if the response body has our ApiResponse error envelope
+      const body = err.error as { error?: { message?: string } } | null;
+      if (body?.error?.message) {
+        return body.error.message;
+      }
+      return `Server error (${err.status}): ${err.statusText}`;
+    }
+    if (err instanceof Error) {
+      return err.message;
+    }
+    return 'An unexpected error occurred.';
   }
 
   /** Fetch installed runtimes for the current platform. */
@@ -192,11 +208,7 @@ export class LaunchDialogComponent implements OnInit {
         this.loadingRuntimes.set(false);
       },
       error: (err: unknown) => {
-        const msg =
-          err instanceof Error
-            ? err.message
-            : 'Unable to reach the backend. Is the API server running?';
-        this.errorMessage.set(msg);
+        this.errorMessage.set(this.extractErrorMessage(err));
         this.loadingRuntimes.set(false);
       },
     });

@@ -10,3 +10,9 @@ dist
 coverage
 .pnpm-store
 docs
+.pids
+.logs
+data
+*.db
+*.db-wal
+*.db-shm

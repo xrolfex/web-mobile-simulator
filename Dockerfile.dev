@@ -1,0 +1,29 @@
+FROM node:20-alpine
+
+# Install pnpm via corepack
+RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
+
+# Install native build tools required by better-sqlite3 (node-gyp)
+RUN apk add --no-cache python3 make g++ linux-headers
+
+WORKDIR /app
+
+# Copy workspace manifests and lockfile first for optimal layer caching.
+# Source code is intentionally NOT copied here — it will be bind-mounted
+# at runtime via docker-compose volumes so that host edits trigger hot reload.
+COPY pnpm-workspace.yaml package.json pnpm-lock.yaml .npmrc tsconfig.base.json ./
+COPY packages/shared/package.json packages/shared/
+COPY packages/api/package.json packages/api/
+COPY packages/web/package.json packages/web/
+
+# Install all dependencies (dev + prod) inside the image.
+# allowBuilds for better-sqlite3 and esbuild is declared in pnpm-workspace.yaml,
+# so no extra flags are needed here.
+RUN pnpm install --frozen-lockfile
+
+# node_modules now live inside the image layer and will NOT be shadowed by
+# host bind-mounts — docker-compose uses named volumes to preserve them.
+# See docker-compose.dev.yml for the full runtime configuration.
+
+# Default command is overridden per-service in docker-compose.dev.yml
+CMD ["sh"]

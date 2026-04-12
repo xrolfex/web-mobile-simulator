@@ -8,6 +8,7 @@ import {
 } from '@angular/core';
 import { Router } from '@angular/router';
 import { Subscription } from 'rxjs';
+import { HttpErrorResponse } from '@angular/common/http';
 
 import { ApiService } from '../../core/services/api.service';
 import { WebSocketService } from '../../core/services/websocket.service';
@@ -214,10 +215,21 @@ export class DashboardComponent implements OnInit, OnDestroy {
         }
         this.sessionsLoading.set(false);
       },
-      error: () => {
-        // Backend not running — silently show empty list after first attempt
+      error: (err: unknown) => {
         this.sessionsLoading.set(false);
-        this.sessionsError.set('');
+        // Only show errors for non-network failures (server returned an error).
+        // Network errors (status 0) are silently handled since the backend
+        // may not be running yet.
+        if (err instanceof HttpErrorResponse && err.status === 0) {
+          this.sessionsError.set('');
+        } else if (err instanceof HttpErrorResponse) {
+          const body = err.error as { error?: { message?: string } } | null;
+          this.sessionsError.set(
+            body?.error?.message ?? `Server error (${err.status})`,
+          );
+        } else {
+          this.sessionsError.set('Failed to load sessions.');
+        }
       },
     });
   }
