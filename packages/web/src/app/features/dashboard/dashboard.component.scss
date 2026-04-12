@@ -1,0 +1,313 @@
+.dashboard {
+  padding: 2rem;
+  max-width: 900px;
+  margin: 0 auto;
+
+  &__header {
+    margin-bottom: 2rem;
+  }
+
+  &__title {
+    font-size: 1.75rem;
+    font-weight: 700;
+    color: var(--color-text-primary);
+    margin: 0 0 0.5rem;
+  }
+
+  &__subtitle {
+    font-size: 1rem;
+    color: var(--color-text-muted);
+    margin: 0;
+  }
+}
+
+// ── Simulator cards grid ──────────────────────────────────────────────────────
+
+.simulator-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1.5rem;
+  margin-bottom: 3rem;
+}
+
+.simulator-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 2rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+
+  &:hover {
+    border-color: var(--color-accent);
+    box-shadow: 0 0 0 1px var(--color-accent), 0 4px 20px rgba(0, 0, 0, 0.3);
+  }
+
+  &__icon {
+    font-size: 3.5rem;
+    line-height: 1;
+    margin-bottom: 1rem;
+    filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.4));
+  }
+
+  &__title {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    margin: 0 0 0.75rem;
+  }
+
+  &__description {
+    font-size: 0.9rem;
+    color: var(--color-text-muted);
+    line-height: 1.6;
+    margin: 0 0 1.5rem;
+    flex: 1;
+  }
+
+  &__launch-btn {
+    width: 100%;
+    padding: 0.75rem 1.5rem;
+    border: none;
+    border-radius: 8px;
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s ease, opacity 0.2s ease;
+    background: var(--color-accent);
+    color: #fff;
+    font-family: var(--font-sans);
+
+    &:hover {
+      background: var(--color-accent-hover);
+    }
+
+    &:active {
+      opacity: 0.9;
+    }
+  }
+}
+
+// ── Active sessions ───────────────────────────────────────────────────────────
+
+.active-sessions {
+  &__heading {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    margin: 0 0 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  &__loading {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 1.5rem 0;
+    color: var(--color-text-muted);
+    font-size: 0.9rem;
+  }
+
+  &__empty {
+    text-align: center;
+    padding: 3rem 2rem;
+    background: var(--color-surface);
+    border: 1px dashed var(--color-border);
+    border-radius: 10px;
+
+    p {
+      margin: 0.25rem 0;
+      color: var(--color-text-muted);
+    }
+  }
+
+  &__empty-icon {
+    display: block;
+    font-size: 2.5rem;
+    margin-bottom: 0.75rem;
+  }
+
+  &__empty-hint {
+    font-size: 0.85rem;
+    opacity: 0.7;
+  }
+
+  &__list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+}
+
+// ── Session row ───────────────────────────────────────────────────────────────
+
+.session-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.875rem 1.25rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  transition: border-color 0.15s ease;
+
+  &:hover {
+    border-color: rgba(99, 102, 241, 0.35);
+  }
+
+  &__icon {
+    font-size: 1.75rem;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+
+  &__info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    flex: 1;
+    min-width: 0;
+  }
+
+  &__device-name {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  &__runtime {
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+  }
+
+  &__duration {
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+    min-width: 4rem;
+    text-align: right;
+  }
+
+  &__actions {
+    display: flex;
+    gap: 0.4rem;
+    flex-shrink: 0;
+  }
+}
+
+// ── Status badge ──────────────────────────────────────────────────────────────
+
+.status-badge {
+  display: inline-block;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: capitalize;
+  flex-shrink: 0;
+  background: var(--color-surface-raised);
+  color: var(--color-text-muted);
+
+  &--active {
+    background: rgba(34, 197, 94, 0.15);
+    color: #4ade80;
+  }
+
+  &--creating {
+    background: rgba(245, 158, 11, 0.15);
+    color: #fbbf24;
+    animation: pulse-badge 1.5s ease-in-out infinite;
+  }
+
+  &--error {
+    background: rgba(239, 68, 68, 0.15);
+    color: #f87171;
+  }
+
+  &--terminating {
+    background: var(--color-surface-raised);
+    color: var(--color-text-muted);
+    opacity: 0.7;
+  }
+}
+
+@keyframes pulse-badge {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.5; }
+}
+
+// ── Action buttons ────────────────────────────────────────────────────────────
+
+.action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.3rem 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-primary);
+  font-size: 0.8rem;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  &--connect {
+    border-color: rgba(99, 102, 241, 0.4);
+    color: #818cf8;
+
+    &:hover:not(:disabled) {
+      background: rgba(99, 102, 241, 0.1);
+      border-color: var(--color-accent);
+    }
+  }
+
+  &--stop {
+    border-color: rgba(239, 68, 68, 0.4);
+    color: #f87171;
+
+    &:hover:not(:disabled) {
+      background: rgba(239, 68, 68, 0.1);
+      border-color: #ef4444;
+    }
+  }
+}
+
+// ── Mini spinner ──────────────────────────────────────────────────────────────
+
+.mini-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--color-surface-raised);
+  border-top-color: var(--color-accent);
+  border-radius: 50%;
+  animation: spin 0.65s linear infinite;
+  flex-shrink: 0;
+
+  &--inline {
+    width: 10px;
+    height: 10px;
+    border-width: 1.5px;
+    border-top-color: #f87171;
+  }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}

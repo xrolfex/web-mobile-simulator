@@ -1,0 +1,120 @@
+<section class="dashboard">
+  <header class="dashboard__header">
+    <h2 class="dashboard__title">Start a Simulator Session</h2>
+    <p class="dashboard__subtitle">
+      Choose a platform to launch a new browser-based simulator session.
+    </p>
+  </header>
+
+  <!-- ── Platform cards ──────────────────────────────────────────────────── -->
+  <div class="simulator-cards">
+    @for (card of platformCards; track card.platform) {
+      <div class="simulator-card">
+        <div class="simulator-card__icon" aria-hidden="true">{{ card.icon }}</div>
+        <h3 class="simulator-card__title">{{ card.title }}</h3>
+        <p class="simulator-card__description">{{ card.description }}</p>
+        <button
+          class="simulator-card__launch-btn"
+          (click)="openDialog(card.platform)"
+          [attr.aria-label]="'Launch ' + card.title"
+        >
+          Launch
+        </button>
+      </div>
+    }
+  </div>
+
+  <!-- ── Active sessions ─────────────────────────────────────────────────── -->
+  <section class="active-sessions" aria-labelledby="active-sessions-heading">
+    <h3 id="active-sessions-heading" class="active-sessions__heading">
+      Active Sessions
+    </h3>
+
+    @if (sessionsLoading()) {
+      <div class="active-sessions__loading" role="status" aria-live="polite">
+        <div class="mini-spinner" aria-hidden="true"></div>
+        <span>Loading sessions…</span>
+      </div>
+    } @else if (activeSessions().length === 0) {
+      <div class="active-sessions__empty" role="status">
+        <span class="active-sessions__empty-icon" aria-hidden="true">💤</span>
+        <p>No active sessions.</p>
+        <p class="active-sessions__empty-hint">
+          Launch a simulator above to start a session.
+        </p>
+      </div>
+    } @else {
+      <ul class="active-sessions__list" aria-label="Active simulator sessions">
+        @for (session of activeSessions(); track session.id) {
+          <li class="session-row">
+            <!-- Platform icon -->
+            <span class="session-row__icon" aria-hidden="true">
+              {{ platformIcon(session.device.platform) }}
+            </span>
+
+            <!-- Info column -->
+            <div class="session-row__info">
+              <span class="session-row__device-name">
+                {{ session.device.deviceType.modelName }}
+              </span>
+              <span class="session-row__runtime">
+                {{ session.device.runtime.version }}
+              </span>
+            </div>
+
+            <!-- Status badge -->
+            <span
+              class="status-badge"
+              [class.status-badge--active]="session.status === 'active'"
+              [class.status-badge--creating]="session.status === 'creating'"
+              [class.status-badge--error]="session.status === 'error'"
+              [class.status-badge--terminating]="session.status === 'terminating'"
+            >
+              {{ session.status }}
+            </span>
+
+            <!-- Duration -->
+            <span class="session-row__duration" aria-label="Session duration">
+              {{ sessionDuration(session.createdAt) }}
+            </span>
+
+            <!-- Actions -->
+            <div class="session-row__actions">
+              <button
+                class="action-btn action-btn--connect"
+                (click)="connectToSession(session.id)"
+                [disabled]="session.status !== 'active'"
+                [title]="session.status === 'active' ? 'Connect to session' : 'Session is not yet active'"
+                aria-label="Connect to session"
+              >
+                Connect
+              </button>
+              <button
+                class="action-btn action-btn--stop"
+                (click)="stopSession(session.id)"
+                [disabled]="isStopping(session.id)"
+                aria-label="Stop session"
+                title="Stop and terminate this session"
+              >
+                @if (isStopping(session.id)) {
+                  <span class="mini-spinner mini-spinner--inline" aria-hidden="true"></span>
+                  Stopping…
+                } @else {
+                  Stop
+                }
+              </button>
+            </div>
+          </li>
+        }
+      </ul>
+    }
+  </section>
+</section>
+
+<!-- ── Launch dialog overlay ────────────────────────────────────────────── -->
+@if (dialogOpen()) {
+  <app-launch-dialog
+    [platform]="dialogPlatform()!"
+    (closeDialog)="closeDialog()"
+  />
+}

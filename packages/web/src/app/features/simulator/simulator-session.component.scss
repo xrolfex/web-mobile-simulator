@@ -1,0 +1,339 @@
+// ── Layout ────────────────────────────────────────────────────────────────────
+
+:host {
+  display: block;
+  height: 100%;
+}
+
+.session-layout {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  height: 100%;
+  min-height: 0;
+  background: var(--color-bg);
+}
+
+// ── Sidebar ───────────────────────────────────────────────────────────────────
+
+.session-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  padding: 1.5rem 1rem;
+  background: var(--color-surface);
+  border-right: 1px solid var(--color-border);
+  overflow-y: auto;
+
+  &__actions {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: auto;
+  }
+}
+
+// ── Session info card ─────────────────────────────────────────────────────────
+
+.session-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+
+  &__platform-icon {
+    font-size: 3rem;
+    line-height: 1;
+    text-align: center;
+  }
+
+  &__details {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  &__device-name {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    margin: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  &__runtime {
+    font-size: 0.85rem;
+    color: var(--color-text-muted);
+    margin: 0;
+  }
+
+  &__id {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    color: var(--color-text-muted);
+    margin: 0;
+    opacity: 0.6;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &__status {
+    display: flex;
+    align-items: center;
+  }
+}
+
+// ── Status badge ──────────────────────────────────────────────────────────────
+
+.status-badge {
+  display: inline-block;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  background: var(--color-surface-raised);
+  color: var(--color-text-muted);
+
+  &--active {
+    background: rgba(34, 197, 94, 0.15);
+    color: #4ade80;
+  }
+
+  &--creating {
+    background: rgba(245, 158, 11, 0.15);
+    color: #fbbf24;
+    animation: pulse-badge 1.5s ease-in-out infinite;
+  }
+
+  &--error {
+    background: rgba(239, 68, 68, 0.15);
+    color: #f87171;
+  }
+
+  &--terminated {
+    background: var(--color-surface-raised);
+    color: var(--color-text-muted);
+    opacity: 0.7;
+  }
+}
+
+@keyframes pulse-badge {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.5; }
+}
+
+// ── Skeleton loading ──────────────────────────────────────────────────────────
+
+.session-info--skeleton {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--color-surface-raised) 25%,
+    rgba(255, 255, 255, 0.06) 50%,
+    var(--color-surface-raised) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: 4px;
+
+  &--icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 8px;
+    flex-shrink: 0;
+  }
+
+  &--title {
+    width: 120px;
+    height: 14px;
+    margin-bottom: 0.5rem;
+  }
+
+  &--subtitle {
+    width: 80px;
+    height: 12px;
+  }
+}
+
+.skeleton-lines {
+  display: flex;
+  flex-direction: column;
+}
+
+@keyframes shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+// ── Buttons ───────────────────────────────────────────────────────────────────
+
+.btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  width: 100%;
+  padding: 0.6rem 1rem;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s ease, opacity 0.15s ease;
+  font-family: var(--font-sans);
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  &--stop {
+    background: rgba(239, 68, 68, 0.15);
+    color: #f87171;
+    border: 1px solid rgba(239, 68, 68, 0.3);
+
+    &:hover:not(:disabled) {
+      background: rgba(239, 68, 68, 0.25);
+      border-color: #ef4444;
+    }
+  }
+
+  &--back {
+    background: var(--color-surface-raised);
+    color: var(--color-text-muted);
+    border: 1px solid var(--color-border);
+
+    &:hover {
+      color: var(--color-text-primary);
+      border-color: var(--color-accent);
+    }
+  }
+
+  &--primary {
+    background: var(--color-accent);
+    color: #fff;
+
+    &:hover {
+      background: var(--color-accent-hover);
+    }
+  }
+}
+
+// ── Button spinner ────────────────────────────────────────────────────────────
+
+.btn-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+// ── Main content area ─────────────────────────────────────────────────────────
+
+.session-main {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  overflow: hidden;
+  padding: 1.5rem;
+}
+
+// ── Viewer host ───────────────────────────────────────────────────────────────
+
+.viewer-host {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+// ── Loading / waiting states ──────────────────────────────────────────────────
+
+.loading-state,
+.waiting-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  color: var(--color-text-muted);
+  text-align: center;
+
+  p {
+    margin: 0;
+  }
+}
+
+.loading-state {
+  &__message {
+    font-size: 1.1rem;
+    font-weight: 500;
+    color: var(--color-text-primary);
+  }
+
+  &__hint {
+    font-size: 0.85rem;
+    opacity: 0.7;
+  }
+}
+
+.loading-spinner {
+  width: 48px;
+  height: 48px;
+  border: 3px solid var(--color-surface-raised);
+  border-top-color: var(--color-accent);
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+}
+
+// ── Error state ───────────────────────────────────────────────────────────────
+
+.error-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  text-align: center;
+  max-width: 400px;
+
+  &__icon {
+    font-size: 3rem;
+    line-height: 1;
+  }
+
+  &__title {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    margin: 0;
+  }
+
+  &__message {
+    font-size: 0.9rem;
+    color: var(--color-text-muted);
+    margin: 0;
+    line-height: 1.6;
+  }
+
+  .btn--primary {
+    width: auto;
+    margin-top: 0.5rem;
+    padding: 0.6rem 1.5rem;
+  }
+}

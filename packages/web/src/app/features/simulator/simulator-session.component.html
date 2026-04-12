@@ -1,0 +1,111 @@
+<div class="session-layout">
+
+  <!-- ── Sidebar / Session Info ─────────────────────────────────────────── -->
+  <aside class="session-sidebar">
+    @if (session()) {
+      <div class="session-info">
+        <div class="session-info__platform-icon" aria-hidden="true">
+          {{ platformIcon() }}
+        </div>
+
+        <div class="session-info__details">
+          <h2 class="session-info__device-name">
+            {{ session()!.device.deviceType.modelName }}
+          </h2>
+          <p class="session-info__runtime">
+            {{ session()!.device.runtime.version }}
+          </p>
+          <p class="session-info__id" title="Session ID">
+            {{ session()!.id }}
+          </p>
+        </div>
+
+        <div class="session-info__status">
+          <span
+            class="status-badge"
+            [class.status-badge--active]="session()!.status === 'active'"
+            [class.status-badge--creating]="session()!.status === 'creating'"
+            [class.status-badge--error]="session()!.status === 'error'"
+            [class.status-badge--terminated]="session()!.status === 'terminated' || session()!.status === 'terminating'"
+          >
+            {{ session()!.status }}
+          </span>
+        </div>
+      </div>
+    } @else {
+      <div class="session-info session-info--skeleton">
+        <div class="skeleton skeleton--icon"></div>
+        <div class="skeleton-lines">
+          <div class="skeleton skeleton--title"></div>
+          <div class="skeleton skeleton--subtitle"></div>
+        </div>
+      </div>
+    }
+
+    <!-- Stop session button -->
+    <div class="session-sidebar__actions">
+      <button
+        class="btn btn--stop"
+        (click)="stopSession()"
+        [disabled]="stopping() || !session()"
+        aria-label="Stop and terminate the simulator session"
+      >
+        @if (stopping()) {
+          <span class="btn-spinner" aria-hidden="true"></span>
+          Stopping…
+        } @else {
+          Stop Session
+        }
+      </button>
+
+      <button
+        class="btn btn--back"
+        (click)="goToDashboard()"
+        aria-label="Go back to dashboard"
+      >
+        ← Dashboard
+      </button>
+    </div>
+  </aside>
+
+  <!-- ── Main Content ───────────────────────────────────────────────────── -->
+  <main class="session-main" aria-label="Simulator display area">
+
+    @if (loading()) {
+      <div class="loading-state" role="status" aria-live="polite">
+        <div class="loading-spinner" aria-hidden="true"></div>
+        <p class="loading-state__message">Starting simulator…</p>
+        <p class="loading-state__hint">This may take up to a minute.</p>
+      </div>
+    }
+
+    @if (!loading() && errorMessage()) {
+      <div class="error-state" role="alert">
+        <span class="error-state__icon" aria-hidden="true">⚠️</span>
+        <h3 class="error-state__title">Session Error</h3>
+        <p class="error-state__message">{{ errorMessage() }}</p>
+        <button class="btn btn--primary" (click)="goToDashboard()">
+          Back to Dashboard
+        </button>
+      </div>
+    }
+
+    @if (!loading() && !errorMessage() && isReady()) {
+      <app-simulator-viewer
+        [wsUrl]="session()!.streamUrl!"
+        [platform]="session()!.device.platform"
+        (connectionStateChange)="onVncStateChange($event)"
+        (disconnectRequest)="onViewerDisconnect()"
+        class="viewer-host"
+      />
+    }
+
+    @if (!loading() && !errorMessage() && !isReady() && session()) {
+      <div class="waiting-state" role="status" aria-live="polite">
+        <div class="loading-spinner" aria-hidden="true"></div>
+        <p>Waiting for stream to become available…</p>
+      </div>
+    }
+
+  </main>
+</div>

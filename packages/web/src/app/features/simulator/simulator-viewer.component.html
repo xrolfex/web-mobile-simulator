@@ -1,0 +1,77 @@
+<div class="simulator-viewer" [class]="'platform-' + platform">
+
+  <!-- ── Toolbar ─────────────────────────────────────────────────────────── -->
+  <div class="viewer-toolbar" role="toolbar" aria-label="VNC viewer controls">
+    <div class="viewer-toolbar__status">
+      <span
+        class="status-dot"
+        [class.status-dot--connecting]="connectionState() === 'connecting'"
+        [class.status-dot--connected]="connectionState() === 'connected'"
+        [class.status-dot--disconnected]="connectionState() === 'disconnected'"
+        [class.status-dot--error]="connectionState() === 'error'"
+        aria-hidden="true"
+      ></span>
+      <span class="status-label">{{ connectionState() | titlecase }}</span>
+      @if (desktopName()) {
+        <span class="desktop-name" title="Remote desktop name">
+          — {{ desktopName() }}
+        </span>
+      }
+    </div>
+
+    <div class="viewer-toolbar__actions">
+      <label for="scale-select" class="sr-only">Display scale</label>
+      <select
+        id="scale-select"
+        class="scale-select"
+        [value]="scaleMode()"
+        (change)="onScaleModeChange($event)"
+        [disabled]="connectionState() !== 'connected'"
+        aria-label="Display scale mode"
+      >
+        <option value="auto">Auto Scale</option>
+        <option value="1x">100%</option>
+        <option value="0.75x">75%</option>
+        <option value="0.5x">50%</option>
+      </select>
+
+      <button
+        class="btn btn--disconnect"
+        (click)="onDisconnect()"
+        [disabled]="connectionState() === 'disconnected'"
+        aria-label="Disconnect from simulator"
+      >
+        Disconnect
+      </button>
+    </div>
+  </div>
+
+  <!-- ── VNC Canvas Container ──────────────────────────────────────────── -->
+  <div class="vnc-container" #vncContainer aria-label="Simulator display">
+
+    @if (connectionState() === 'connecting') {
+      <div class="overlay overlay--connecting" role="status" aria-live="polite">
+        <div class="spinner" aria-hidden="true"></div>
+        <p class="overlay__message">Connecting to simulator…</p>
+      </div>
+    }
+
+    @if (connectionState() === 'error') {
+      <div class="overlay overlay--error" role="alert">
+        <span class="overlay__icon" aria-hidden="true">⚠️</span>
+        <p class="overlay__message">Connection Error</p>
+        <p class="overlay__detail">{{ errorMessage() }}</p>
+        <button class="btn btn--retry" (click)="reconnect()">Retry</button>
+      </div>
+    }
+
+    @if (connectionState() === 'disconnected') {
+      <div class="overlay overlay--disconnected" role="status">
+        <span class="overlay__icon" aria-hidden="true">🔌</span>
+        <p class="overlay__message">Disconnected</p>
+        <button class="btn btn--retry" (click)="reconnect()">Reconnect</button>
+      </div>
+    }
+
+  </div>
+</div>

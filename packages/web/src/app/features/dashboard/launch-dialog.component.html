@@ -1,0 +1,121 @@
+<div class="dialog-backdrop" (click)="cancel()" role="presentation">
+  <div
+    class="dialog"
+    role="dialog"
+    aria-modal="true"
+    [attr.aria-label]="'Launch ' + platformLabel()"
+    (click)="$event.stopPropagation()"
+  >
+    <!-- Header -->
+    <header class="dialog__header">
+      <span class="dialog__platform-icon" aria-hidden="true">{{ platformIcon() }}</span>
+      <h2 class="dialog__title">Launch {{ platformLabel() }}</h2>
+      <button
+        class="dialog__close-btn"
+        (click)="cancel()"
+        aria-label="Close dialog"
+        title="Close"
+      >
+        ✕
+      </button>
+    </header>
+
+    <!-- Body -->
+    <div class="dialog__body">
+
+      @if (isLoading()) {
+        <div class="dialog__loading" role="status" aria-live="polite">
+          <div class="spinner" aria-hidden="true"></div>
+          <p>Loading available devices and runtimes…</p>
+        </div>
+      } @else if (errorMessage() && deviceTypes().length === 0 && runtimes().length === 0) {
+        <!-- Full error state when data couldn't load at all -->
+        <div class="dialog__error" role="alert">
+          <span aria-hidden="true">⚠️</span>
+          <p>{{ errorMessage() }}</p>
+          <p class="dialog__error-hint">
+            Make sure the API backend is running and try again.
+          </p>
+        </div>
+      } @else {
+        <!-- Device model dropdown -->
+        <div class="form-field">
+          <label class="form-field__label" for="device-select">Device Model</label>
+          @if (deviceTypes().length === 0) {
+            <p class="form-field__empty-hint">No device types available.</p>
+          } @else {
+            <select
+              id="device-select"
+              class="form-field__select"
+              [value]="selectedDeviceTypeId()"
+              (change)="onDeviceChange($event)"
+              aria-label="Select device model"
+            >
+              <option value="" disabled>— Select a device —</option>
+              @for (device of deviceTypes(); track device.id) {
+                <option [value]="device.id">{{ device.modelName }}</option>
+              }
+            </select>
+          }
+        </div>
+
+        <!-- OS version dropdown -->
+        <div class="form-field">
+          <label class="form-field__label" for="runtime-select">OS Version</label>
+          @if (runtimes().length === 0) {
+            <p class="form-field__empty-hint">
+              No installed runtimes found.
+              Visit the
+              <a routerLink="/runtimes" (click)="cancel()">Runtimes</a>
+              page to download one.
+            </p>
+          } @else {
+            <select
+              id="runtime-select"
+              class="form-field__select"
+              [value]="selectedRuntimeId()"
+              (change)="onRuntimeChange($event)"
+              aria-label="Select OS version"
+            >
+              <option value="" disabled>— Select an OS version —</option>
+              @for (runtime of runtimes(); track runtime.id) {
+                <option [value]="runtime.id">{{ runtime.version }}</option>
+              }
+            </select>
+          }
+        </div>
+
+        <!-- Inline launch error (distinct from load error) -->
+        @if (errorMessage() && !isLoading()) {
+          <div class="dialog__inline-error" role="alert">
+            ⚠️ {{ errorMessage() }}
+          </div>
+        }
+      }
+    </div>
+
+    <!-- Footer actions -->
+    <footer class="dialog__footer">
+      <button
+        class="btn btn--cancel"
+        (click)="cancel()"
+        [disabled]="launching()"
+      >
+        Cancel
+      </button>
+      <button
+        class="btn btn--launch"
+        (click)="launch()"
+        [disabled]="!canLaunch()"
+        aria-label="Launch simulator session"
+      >
+        @if (launching()) {
+          <span class="btn-spinner" aria-hidden="true"></span>
+          Launching…
+        } @else {
+          Launch
+        }
+      </button>
+    </footer>
+  </div>
+</div>

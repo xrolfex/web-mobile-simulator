@@ -1,0 +1,12 @@
+node_modules
+dist
+.angular
+.git
+.opencode
+*.log
+.env
+.env.local
+.DS_Store
+coverage
+.pnpm-store
+docs

@@ -1,0 +1,28 @@
+<div class="app-shell">
+  <header class="app-header">
+    <div class="app-header__brand">
+      <h1 class="app-header__title">📱 Web Mobile Simulator</h1>
+    </div>
+    <nav class="app-header__nav" aria-label="Main navigation">
+      <a
+        routerLink="/"
+        routerLinkActive="active"
+        [routerLinkActiveOptions]="{ exact: true }"
+        class="app-header__nav-link"
+      >
+        Dashboard
+      </a>
+      <a
+        routerLink="/runtimes"
+        routerLinkActive="active"
+        class="app-header__nav-link"
+      >
+        Runtimes
+      </a>
+    </nav>
+  </header>
+
+  <main class="app-content">
+    <router-outlet />
+  </main>
+</div>

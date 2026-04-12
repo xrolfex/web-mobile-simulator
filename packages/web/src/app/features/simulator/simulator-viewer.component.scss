@@ -1,0 +1,258 @@
+// ── Host layout ───────────────────────────────────────────────────────────────
+
+:host {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+// ── Viewer shell ──────────────────────────────────────────────────────────────
+
+.simulator-viewer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  overflow: hidden;
+
+  // Platform-specific accent on the border
+  &.platform-ios {
+    --platform-accent: #6366f1; // indigo
+  }
+
+  &.platform-android {
+    --platform-accent: #22c55e; // green
+  }
+}
+
+// ── Toolbar ───────────────────────────────────────────────────────────────────
+
+.viewer-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0 1rem;
+  height: 48px;
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+
+  &__status {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+    color: var(--color-text-muted);
+  }
+
+  &__actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+}
+
+// ── Status dot ────────────────────────────────────────────────────────────────
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--color-text-muted);
+  transition: background 0.25s ease;
+
+  &--connecting {
+    background: #f59e0b; // amber
+    animation: pulse-connecting 1.2s ease-in-out infinite;
+  }
+
+  &--connected {
+    background: #22c55e; // green
+  }
+
+  &--disconnected {
+    background: var(--color-text-muted);
+  }
+
+  &--error {
+    background: #ef4444; // red
+  }
+}
+
+@keyframes pulse-connecting {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.3; }
+}
+
+.status-label {
+  color: var(--color-text-primary);
+  font-weight: 500;
+}
+
+.desktop-name {
+  color: var(--color-text-muted);
+  font-size: 0.8rem;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+// ── Toolbar controls ──────────────────────────────────────────────────────────
+
+.scale-select {
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  color: var(--color-text-primary);
+  font-size: 0.8rem;
+  padding: 0.3rem 0.6rem;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+  font-family: var(--font-sans);
+
+  &:hover:not(:disabled) {
+    border-color: var(--color-accent);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  option {
+    background: var(--color-surface-raised);
+  }
+}
+
+// ── Buttons ───────────────────────────────────────────────────────────────────
+
+.btn {
+  border: none;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  padding: 0.35rem 0.9rem;
+  cursor: pointer;
+  transition: background 0.15s ease, opacity 0.15s ease;
+  font-family: var(--font-sans);
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  &--disconnect {
+    background: rgba(239, 68, 68, 0.15);
+    color: #f87171;
+    border: 1px solid rgba(239, 68, 68, 0.3);
+
+    &:hover:not(:disabled) {
+      background: rgba(239, 68, 68, 0.25);
+      border-color: #ef4444;
+    }
+  }
+
+  &--retry {
+    background: var(--color-accent);
+    color: #fff;
+    padding: 0.5rem 1.25rem;
+    font-size: 0.9rem;
+    border-radius: 8px;
+    margin-top: 0.5rem;
+
+    &:hover {
+      background: var(--color-accent-hover);
+    }
+  }
+}
+
+// ── Screen-reader-only utility ────────────────────────────────────────────────
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+// ── VNC container ─────────────────────────────────────────────────────────────
+
+.vnc-container {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  background: #282828; // noVNC default background
+
+  // noVNC injects a div > canvas; ensure it fills the container
+  > div {
+    width: 100%;
+    height: 100%;
+
+    canvas {
+      display: block;
+    }
+  }
+}
+
+// ── Overlay states ────────────────────────────────────────────────────────────
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  background: rgba(15, 15, 26, 0.88);
+  backdrop-filter: blur(4px);
+  z-index: 10;
+  text-align: center;
+  padding: 2rem;
+
+  &__icon {
+    font-size: 2.5rem;
+    line-height: 1;
+  }
+
+  &__message {
+    margin: 0;
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+
+  &__detail {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--color-text-muted);
+    max-width: 340px;
+    line-height: 1.5;
+  }
+}
+
+// ── Spinner ───────────────────────────────────────────────────────────────────
+
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid var(--color-surface-raised);
+  border-top-color: var(--color-accent);
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}

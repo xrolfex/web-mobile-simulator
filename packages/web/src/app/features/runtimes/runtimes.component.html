@@ -1,0 +1,117 @@
+<section class="runtimes">
+  <header class="runtimes__header">
+    <h2 class="runtimes__title">Manage OS Runtimes</h2>
+    <p class="runtimes__subtitle">
+      View, download, and manage simulator runtimes for iOS and Android platforms.
+    </p>
+  </header>
+
+  <!-- Platform tabs -->
+  <div class="runtimes__tabs" role="tablist" aria-label="Platform">
+    <button
+      class="runtimes__tab"
+      role="tab"
+      [class.runtimes__tab--active]="activeTab() === 'ios'"
+      [attr.aria-selected]="activeTab() === 'ios'"
+      aria-controls="runtimes-panel"
+      (click)="selectTab('ios')"
+    >
+      🍎 iOS
+    </button>
+    <button
+      class="runtimes__tab"
+      role="tab"
+      [class.runtimes__tab--active]="activeTab() === 'android'"
+      [attr.aria-selected]="activeTab() === 'android'"
+      aria-controls="runtimes-panel"
+      (click)="selectTab('android')"
+    >
+      🤖 Android
+    </button>
+  </div>
+
+  <!-- Runtimes panel -->
+  <div id="runtimes-panel" class="runtimes__panel" role="tabpanel">
+
+    @if (loading()) {
+      <div class="runtimes__loading" role="status" aria-live="polite">
+        <div class="spinner" aria-hidden="true"></div>
+        <p>Loading runtimes…</p>
+      </div>
+    } @else if (errorMessage()) {
+      <div class="runtimes__error" role="alert">
+        <span class="runtimes__error-icon" aria-hidden="true">⚠️</span>
+        <p>{{ errorMessage() }}</p>
+        <p class="runtimes__error-hint">
+          Make sure the API backend is running and reload the page.
+        </p>
+      </div>
+    } @else if (currentRuntimes().length === 0) {
+      <div class="runtimes__empty" role="status">
+        <span class="runtimes__empty-icon" aria-hidden="true">🔌</span>
+        <p>No runtimes found.</p>
+        <p class="runtimes__empty-hint">
+          No
+          @if (activeTab() === 'ios') { iOS } @else { Android }
+          runtimes are registered with the backend.
+        </p>
+      </div>
+    } @else {
+      <table class="runtimes__table" aria-label="Runtime list">
+        <thead>
+          <tr>
+            <th scope="col">Version</th>
+            <th scope="col">Identifier</th>
+            <th scope="col">Status</th>
+            <th scope="col">Size</th>
+            <th scope="col">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (runtime of currentRuntimes(); track runtime.id) {
+            <tr>
+              <td class="runtimes__col-version">{{ runtime.version }}</td>
+              <td class="runtimes__col-identifier">{{ runtime.identifier }}</td>
+              <td>
+                <span class="status-badge status-badge--{{ runtime.status }}">
+                  @switch (runtime.status) {
+                    @case ('installed') { ✓ Installed }
+                    @case ('downloading') { ⟳ Downloading }
+                    @case ('available') { ↓ Available }
+                    @case ('error') { ✕ Error }
+                    @default { {{ runtime.status }} }
+                  }
+                </span>
+              </td>
+              <td>{{ formatSize(runtime.sizeBytes) }}</td>
+              <td>
+                @if (runtime.status === 'available') {
+                  <button
+                    class="action-btn"
+                    (click)="downloadRuntime(runtime)"
+                    [disabled]="isDownloading(runtime.identifier)"
+                    [attr.aria-label]="'Download ' + runtime.version"
+                    title="Download this runtime"
+                  >
+                    @if (isDownloading(runtime.identifier)) {
+                      <span class="btn-spinner" aria-hidden="true"></span>
+                      Starting…
+                    } @else {
+                      Download
+                    }
+                  </button>
+                } @else if (runtime.status === 'downloading') {
+                  <span class="runtimes__progress-label">In progress…</span>
+                } @else if (runtime.status === 'installed') {
+                  <span class="runtimes__installed-label">Ready</span>
+                } @else {
+                  <span class="runtimes__na-label">—</span>
+                }
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    }
+  </div>
+</section>
