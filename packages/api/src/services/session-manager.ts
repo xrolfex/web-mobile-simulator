@@ -840,7 +840,12 @@ export class SessionManagerService {
           string,
           Array<{ udid: string; name: string; state: string; isAvailable: boolean }>
         >;
-      }>('xcrun', ['simctl', 'list', 'devices', '-j']);
+      }>('xcrun', ['simctl', 'list', 'devices', '-j'], {
+        env: {
+          ...process.env,
+          DEVELOPER_DIR: `${config.xcodePath}/Contents/Developer`,
+        },
+      });
 
       const trackedUdids = new Set(
         [...this.sessions.values()]

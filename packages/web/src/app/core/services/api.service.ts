@@ -228,9 +228,9 @@ export class ApiService {
   }
 
   /**
-   * Trigger a runtime download by identifier.
+   * Trigger a runtime download by platform and identifier.
    * POST /api/runtimes/download
-   * @param request The runtime identifier to download.
+   * @param request The target platform and runtime identifier to download.
    */
   downloadRuntime(request: DownloadRuntimeRequest) {
     return this.http.post<ApiResponse<void>>(

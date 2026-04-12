@@ -76,7 +76,7 @@ export class RuntimesComponent implements OnInit {
     current.add(runtime.identifier);
     this.downloadingIds.set(current);
 
-    this.api.downloadRuntime({ identifier: runtime.identifier }).subscribe({
+    this.api.downloadRuntime({ platform: runtime.platform, identifier: runtime.identifier }).subscribe({
       next: () => {
         // Mark runtime as downloading in the local list
         this.updateRuntimeStatus(runtime.identifier, 'downloading');

@@ -183,6 +183,7 @@ export interface ApiResponse<T> {
 // === WebSocket Message Types ===
 
 export type WebSocketMessageType =
+  | 'connected'
   | 'session_status_changed'
   | 'runtime_download_progress'
   | 'device_state_changed'

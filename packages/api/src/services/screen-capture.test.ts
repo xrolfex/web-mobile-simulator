@@ -42,9 +42,9 @@ import { ScreenCaptureService } from './screen-capture.js';
 // Typed mock helpers
 // ---------------------------------------------------------------------------
 
-const mockExecFile = execFile as ReturnType<typeof vi.fn>;
-const mockReadFile = readFile as ReturnType<typeof vi.fn>;
-const mockUnlink = unlink as ReturnType<typeof vi.fn>;
+const mockExecFile = execFile as unknown as ReturnType<typeof vi.fn>;
+const mockReadFile = readFile as unknown as ReturnType<typeof vi.fn>;
+const mockUnlink = unlink as unknown as ReturnType<typeof vi.fn>;
 
 // ---------------------------------------------------------------------------
 // Utility — wait for an event on an EventEmitter with a safety timeout.

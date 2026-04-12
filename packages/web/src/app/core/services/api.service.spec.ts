@@ -363,6 +363,7 @@ describe('ApiService', () => {
     it('should make a POST request to /api/runtimes/download with the identifier body', () => {
       // Arrange
       const request: DownloadRuntimeRequest = {
+        platform: 'ios',
         identifier: 'com.apple.CoreSimulator.SimRuntime.iOS-17-5',
       };
 

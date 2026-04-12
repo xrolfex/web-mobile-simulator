@@ -196,6 +196,8 @@ export interface DeviceTypeListResponse {
 
 /** Request body for triggering a runtime download. */
 export interface DownloadRuntimeRequest {
+  /** Target platform for the runtime. */
+  platform: Platform;
   /** Platform-specific runtime identifier (e.g. "com.apple.CoreSimulator.SimRuntime.iOS-17-5"). */
   identifier: string;
 }
