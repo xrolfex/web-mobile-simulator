@@ -8,3 +8,7 @@ dist/
 coverage/
 .pnpm-store/
 .turbo/
+data/
+*.db
+*.db-wal
+*.db-shm

@@ -16,13 +16,17 @@
     "@fastify/cors": "^10.0.0",
     "@fastify/websocket": "^11.0.0",
     "@web-mobile-simulator/shared": "workspace:*",
+    "better-sqlite3": "^12.8.0",
     "dotenv": "^16.4.0",
+    "drizzle-orm": "^0.45.2",
     "fastify": "^5.0.0",
     "ws": "^8.20.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20.0.0",
     "@types/ws": "^8.18.1",
+    "drizzle-kit": "^0.31.10",
     "tsx": "^4.19.0",
     "typescript": "~5.7.0",
     "vitest": "^4.1.4"

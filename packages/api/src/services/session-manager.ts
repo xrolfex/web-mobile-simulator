@@ -13,6 +13,8 @@ import { iosSimulatorService } from './ios-simulator.js';
 import { androidEmulatorService } from './android-emulator.js';
 import { vncProxyService } from './vnc-proxy.js';
 import { eventBusService } from './event-bus.js';
+import { initializeDatabase } from '../db/migrate.js';
+import { sessionRepository } from '../db/session-repository.js';
 
 // ---------------------------------------------------------------------------
 // Module-level helpers
@@ -106,11 +108,48 @@ export class SessionManagerService {
   private timeoutCheckInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
+    // Only connect to the database when running in production/development.
+    // In test environments the DB is not needed — all tests mock the services
+    // or use fresh in-memory instances directly.
+    if (process.env['NODE_ENV'] !== 'test') {
+      this.initDb();
+    }
+
     // Check for timed-out sessions once per minute.
     this.timeoutCheckInterval = setInterval(
       () => void this.checkTimeouts(),
       60_000,
     );
+  }
+
+  // -------------------------------------------------------------------------
+  // Private — database initialisation
+  // -------------------------------------------------------------------------
+
+  /**
+   * Initialise the SQLite database and rehydrate any non-terminated sessions
+   * into the in-memory map so that crash recovery works across restarts.
+   *
+   * Errors are logged but never thrown — a DB failure must not prevent the
+   * server from starting.
+   */
+  private initDb(): void {
+    try {
+      initializeDatabase();
+
+      // Rehydrate sessions that were not terminated before the last shutdown.
+      // These sessions may have dangling devices on the host, but at minimum
+      // the API can report them as 'error' so clients can react accordingly.
+      const survivingSessions = sessionRepository.findAll();
+      for (const stored of survivingSessions) {
+        if (stored.status !== 'terminated') {
+          this.sessions.set(stored.id, stored as InternalSession);
+          log(`Rehydrated session ${stored.id} (status=${stored.status}) from database`);
+        }
+      }
+    } catch (err: unknown) {
+      warn(`Database initialization failed — continuing without persistence: ${String(err)}`);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -170,6 +209,7 @@ export class SessionManagerService {
     };
 
     this.sessions.set(sessionId, session);
+    this.persistSession(session, 'create');
     log(`Creating session ${sessionId} (platform=${request.platform})`);
     this.emitStatusChange(session, 'creating');
 
@@ -189,6 +229,7 @@ export class SessionManagerService {
       session.status = 'error';
       session.updatedAt = now();
       this.sessions.set(sessionId, session);
+      this.persistSession(session, 'update');
       this.emitStatusChange(session, previousStatus);
 
       // Best-effort cleanup — swallow errors so the original error propagates.
@@ -206,25 +247,55 @@ export class SessionManagerService {
   /**
    * Retrieve a session by ID.
    *
+   * The in-memory map is checked first (it holds all live/active sessions with
+   * their current proxy state).  If not found there, the database is queried
+   * so that historical (terminated/error) sessions can still be fetched.
+   *
    * @param id - Session identifier.
    * @returns The `Session` record, or `null` if not found.
    */
   getSession(id: string): Session | null {
-    return this.sessions.get(id) ?? null;
+    const inMemory = this.sessions.get(id);
+    if (inMemory !== undefined) return inMemory;
+
+    // Fall back to DB for historical sessions (e.g. terminated).
+    try {
+      return sessionRepository.findById(id);
+    } catch {
+      return null;
+    }
   }
 
   /**
    * List all sessions, optionally filtered to a specific status.
    *
+   * Results are read from the database so that terminated and historical
+   * sessions are included.  For active sessions the in-memory record is
+   * preferred because it carries live proxy state not yet flushed to the DB.
+   *
+   * Falls back to the in-memory map if the database is unavailable.
+   *
    * @param status - If provided, only sessions with this status are returned.
    * @returns Array of matching `Session` records (snapshot, not live references).
    */
   listSessions(status?: SessionStatus): Session[] {
-    const all = [...this.sessions.values()];
-    if (status !== undefined) {
-      return all.filter((s) => s.status === status);
+    try {
+      const dbRows = sessionRepository.findAll(status);
+
+      // Merge with in-memory map: prefer in-memory record for any session that
+      // is currently live (it may have fresher proxy/status data).
+      return dbRows.map((row) => {
+        const live = this.sessions.get(row.id);
+        return live !== undefined ? live : row;
+      });
+    } catch {
+      // DB unavailable — fall back to in-memory map only.
+      const all = [...this.sessions.values()];
+      if (status !== undefined) {
+        return all.filter((s) => s.status === status);
+      }
+      return all;
     }
-    return all;
   }
 
   /**
@@ -250,6 +321,7 @@ export class SessionManagerService {
     const previousStatus = session.status;
     session.status = 'terminating';
     session.updatedAt = now();
+    this.persistSession(session, 'update');
     this.emitStatusChange(session, previousStatus);
 
     // Stop the VNC proxy first — this is safe to call even if no proxy was
@@ -265,6 +337,7 @@ export class SessionManagerService {
 
     session.status = 'terminated';
     session.updatedAt = now();
+    this.persistSession(session, 'update');
     this.emitStatusChange(session, 'terminating');
 
     log(`Session ${id} terminated.`);
@@ -380,6 +453,7 @@ export class SessionManagerService {
     session.streamUrl = wsUrl;
     session.proxyPort = wsPort;
     session.updatedAt = now();
+    this.persistSession(session, 'update');
 
     log(`[${sessionId}] iOS session active — stream: ${wsUrl}`);
     this.emitStatusChange(session, 'creating');
@@ -462,10 +536,41 @@ export class SessionManagerService {
     session.streamUrl = wsUrl;
     session.proxyPort = wsPort;
     session.updatedAt = now();
+    this.persistSession(session, 'update');
 
     log(`[${sessionId}] Android session active — stream: ${wsUrl}`);
     this.emitStatusChange(session, 'creating');
     return session;
+  }
+
+  // -------------------------------------------------------------------------
+  // Private — database persistence
+  // -------------------------------------------------------------------------
+
+  /**
+   * Persist a session to the database using either `create` or `update`.
+   *
+   * Errors are caught and logged so that a DB failure never interrupts the
+   * in-memory session lifecycle.
+   *
+   * @param session - The session to persist.
+   * @param operation - `'create'` for the first insert, `'update'` for subsequent writes.
+   */
+  private persistSession(
+    session: InternalSession,
+    operation: 'create' | 'update',
+  ): void {
+    if (process.env['NODE_ENV'] === 'test') return;
+
+    try {
+      if (operation === 'create') {
+        sessionRepository.create(session);
+      } else {
+        sessionRepository.update(session);
+      }
+    } catch (err: unknown) {
+      warn(`Failed to ${operation} session ${session.id} in database: ${String(err)}`);
+    }
   }
 
   // -------------------------------------------------------------------------

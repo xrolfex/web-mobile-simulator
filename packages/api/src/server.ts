@@ -4,6 +4,7 @@ import websocket from '@fastify/websocket';
 import { config } from './config.js';
 import { registerRoutes } from './routes/index.js';
 import { sessionManagerService, vncProxyService } from './services/index.js';
+import { initializeDatabase } from './db/migrate.js';
 
 /**
  * Builds and configures the Fastify application instance.
@@ -34,6 +35,10 @@ async function buildServer() {
  * SIGTERM and SIGINT signals.
  */
 async function start(): Promise<void> {
+  // Initialise the SQLite database before creating the server so that the
+  // session manager's rehydration (in its constructor) can read from the DB.
+  initializeDatabase();
+
   const fastify = await buildServer();
 
   /** Gracefully close the server, flushing in-flight requests. */
