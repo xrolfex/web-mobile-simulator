@@ -19,6 +19,32 @@ export const WS_ROUTES = {
 export const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 export const DEVICE_BOOT_TIMEOUT_MS = 120 * 1000; // 2 minutes
 
+/**
+ * Default maximum number of concurrent active sessions (across all platforms).
+ * 0 = unlimited.
+ */
+export const DEFAULT_MAX_CONCURRENT_SESSIONS = 6;
+
+/**
+ * Default maximum number of concurrent active sessions per platform.
+ * 0 = unlimited (falls back to the global cap only).
+ */
+export const DEFAULT_MAX_SESSIONS_PER_PLATFORM = 0;
+
+/**
+ * How long (in ms) to keep terminated/error sessions in the in-memory Map
+ * before evicting them.  The database retains them permanently.
+ * Default: 15 minutes.
+ */
+export const DEFAULT_SESSION_MEMORY_EVICTION_MS = 15 * 60 * 1000;
+
+/**
+ * Naming prefixes used for dynamically created simulator/emulator devices.
+ * Used during orphan cleanup to identify stale devices left behind by crashes.
+ */
+export const WMS_IOS_DEVICE_NAME_PREFIX = 'wms-session-';
+export const WMS_ANDROID_AVD_NAME_PREFIX = 'wms_session_';
+
 /** Maximum app upload size in bytes (2 GB). */
 export const MAX_APP_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 

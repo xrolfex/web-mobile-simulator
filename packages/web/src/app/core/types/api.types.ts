@@ -98,6 +98,16 @@ export interface CreateSessionResponse {
   session: Session;
 }
 
+/** Capacity information returned alongside session lists. */
+export interface SessionCapacityInfo {
+  /** Number of currently active (creating + active) sessions. */
+  activeSessions: number;
+  /** Configured maximum concurrent sessions (0 = unlimited). */
+  maxConcurrentSessions: number;
+  /** Per-platform active counts and limits. */
+  perPlatform: Record<string, { active: number; max: number }>;
+}
+
 // ── App Upload/Install Types ──────────────────────────────────────────────────
 
 /** Supported app file extensions by platform. */

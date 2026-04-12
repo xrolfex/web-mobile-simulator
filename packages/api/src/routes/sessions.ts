@@ -8,6 +8,7 @@ import type {
   SessionStatus,
 } from '@web-mobile-simulator/shared';
 import { sessionManagerService } from '../services/index.js';
+import { SessionCapacityError } from '../services/session-manager.js';
 
 // ---------------------------------------------------------------------------
 // Route-local helpers
@@ -45,6 +46,11 @@ function errorResponse(
 function successResponse<T>(data: T): ApiResponse<T> {
   return { success: true, data };
 }
+
+/** Valid values for the `?status` query parameter. */
+const VALID_SESSION_STATUSES = new Set<string>([
+  'creating', 'active', 'terminating', 'terminated', 'error',
+]);
 
 // ---------------------------------------------------------------------------
 // Route types
@@ -137,6 +143,19 @@ const sessionRoutes: FastifyPluginAsync = async (fastify) => {
         const responseData: CreateSessionResponse = { session };
         return reply.code(201).send(successResponse(responseData));
       } catch (error: unknown) {
+        if (error instanceof SessionCapacityError) {
+          return reply.code(409).send(
+            errorResponse(
+              error.code,
+              error.message,
+              {
+                currentCount: error.currentCount,
+                maxCount: error.maxCount,
+              },
+            ),
+          );
+        }
+
         return reply.code(500).send(
           errorResponse(
             'SESSION_CREATE_FAILED',
@@ -163,11 +182,22 @@ const sessionRoutes: FastifyPluginAsync = async (fastify) => {
     async (request: ListSessionsRequest, reply: FastifyReply) => {
       const { status } = request.query;
 
+      if (status !== undefined && !VALID_SESSION_STATUSES.has(status)) {
+        return reply.code(400).send(
+          errorResponse(
+            'INVALID_STATUS',
+            `Invalid status filter "${status}". Must be one of: ${[...VALID_SESSION_STATUSES].join(', ')}.`,
+          ),
+        );
+      }
+
       const sessions: Session[] = status
         ? sessionManagerService.listSessions(status as SessionStatus)
         : sessionManagerService.listSessions();
 
-      return reply.code(200).send(successResponse({ sessions }));
+      const capacity = sessionManagerService.getCapacityInfo();
+
+      return reply.code(200).send(successResponse({ sessions, capacity }));
     },
   );
 

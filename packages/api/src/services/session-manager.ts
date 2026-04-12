@@ -8,13 +8,19 @@ import type {
   Runtime,
   Platform,
 } from '@web-mobile-simulator/shared';
-import { SESSION_TIMEOUT_MS } from '@web-mobile-simulator/shared';
+import {
+  SESSION_TIMEOUT_MS,
+  WMS_IOS_DEVICE_NAME_PREFIX,
+  WMS_ANDROID_AVD_NAME_PREFIX,
+} from '@web-mobile-simulator/shared';
+import { config } from '../config.js';
 import { iosSimulatorService } from './ios-simulator.js';
 import { androidEmulatorService } from './android-emulator.js';
 import { vncProxyService } from './vnc-proxy.js';
 import { eventBusService } from './event-bus.js';
 import { initializeDatabase } from '../db/migrate.js';
 import { sessionRepository } from '../db/session-repository.js';
+import { execJSON } from '../utils/exec.js';
 
 // ---------------------------------------------------------------------------
 // Module-level helpers
@@ -87,6 +93,31 @@ interface InternalSession extends Session {
 }
 
 // ---------------------------------------------------------------------------
+// Capacity error
+// ---------------------------------------------------------------------------
+
+/**
+ * Error thrown when a session creation request is rejected because the server
+ * has reached its configured capacity limit.
+ */
+export class SessionCapacityError extends Error {
+  /** Machine-readable error code: 'CAPACITY_GLOBAL' | 'CAPACITY_PLATFORM'. */
+  readonly code: string;
+  /** Current number of active sessions at the time of rejection. */
+  readonly currentCount: number;
+  /** The configured maximum that was exceeded. */
+  readonly maxCount: number;
+
+  constructor(message: string, code: string, currentCount: number, maxCount: number) {
+    super(message);
+    this.name = 'SessionCapacityError';
+    this.code = code;
+    this.currentCount = currentCount;
+    this.maxCount = maxCount;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Service class
 // ---------------------------------------------------------------------------
 
@@ -107,6 +138,15 @@ export class SessionManagerService {
   /** Handle for the periodic timeout-checker interval. */
   private timeoutCheckInterval: ReturnType<typeof setInterval> | null = null;
 
+  /** Handle for the periodic memory-eviction interval. */
+  private evictionCheckInterval: ReturnType<typeof setInterval> | null = null;
+
+  /**
+   * Mutex promise used to serialise concurrent `createSession()` calls so that
+   * capacity checks are race-free.  Each new call chains onto the previous one.
+   */
+  private _creationLock: Promise<void> = Promise.resolve();
+
   constructor() {
     // Only connect to the database when running in production/development.
     // In test environments the DB is not needed — all tests mock the services
@@ -120,6 +160,12 @@ export class SessionManagerService {
       () => void this.checkTimeouts(),
       60_000,
     );
+
+    // Evict stale sessions from memory every 5 minutes.
+    this.evictionCheckInterval = setInterval(
+      () => void this.evictStaleMemorySessions(),
+      5 * 60_000,
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -130,6 +176,10 @@ export class SessionManagerService {
    * Initialise the SQLite database and rehydrate any non-terminated sessions
    * into the in-memory map so that crash recovery works across restarts.
    *
+   * Sessions that were `'creating'` or `'active'` before the restart have lost
+   * their VNC proxies and device state — these are immediately marked as
+   * `'error'` and persisted so that clients receive accurate status.
+   *
    * Errors are logged but never thrown — a DB failure must not prevent the
    * server from starting.
    */
@@ -138,13 +188,34 @@ export class SessionManagerService {
       initializeDatabase();
 
       // Rehydrate sessions that were not terminated before the last shutdown.
-      // These sessions may have dangling devices on the host, but at minimum
-      // the API can report them as 'error' so clients can react accordingly.
       const survivingSessions = sessionRepository.findAll();
+      const rehydrationNow = now();
+
       for (const stored of survivingSessions) {
         if (stored.status !== 'terminated') {
-          this.sessions.set(stored.id, stored as InternalSession);
-          log(`Rehydrated session ${stored.id} (status=${stored.status}) from database`);
+          const internal = stored as InternalSession;
+
+          // Sessions that were 'creating', 'active', or 'terminating' before
+          // the crash have lost their VNC proxies and device state — mark them
+          // as 'error'.
+          if (
+            internal.status === 'creating' ||
+            internal.status === 'active' ||
+            internal.status === 'terminating'
+          ) {
+            const previousStatus = internal.status;
+            internal.status = 'error';
+            internal.updatedAt = rehydrationNow;
+            this.persistSession(internal, 'update');
+            log(
+              `Rehydrated session ${internal.id} (was ${previousStatus}) — marked as error ` +
+              `(VNC proxy and device state lost after restart)`,
+            );
+          } else {
+            log(`Rehydrated session ${internal.id} (status=${internal.status}) from database`);
+          }
+
+          this.sessions.set(internal.id, internal);
         }
       }
     } catch (err: unknown) {
@@ -159,88 +230,30 @@ export class SessionManagerService {
   /**
    * Create a new simulator session for the requested platform.
    *
-   * The full lifecycle is executed synchronously in sequence:
-   *   1. Generate a session ID and create an initial 'creating' record.
-   *   2. Create the platform device (iOS Simulator / Android AVD).
-   *   3. Boot the device and wait until it is ready.
-   *   4. Discover the VNC port and start the WebSocket proxy.
-   *   5. Update the session to 'active' and return it.
-   *
-   * If any step fails, partial resources are cleaned up and the session is
-   * set to 'error' before re-throwing.
+   * Concurrent calls are serialised through a promise-based mutex so that
+   * capacity checks are race-free.  Each call waits for the previous creation
+   * attempt to complete before proceeding.
    *
    * @param request - Platform, runtime, and device-type selection.
    * @returns The fully initialised `Session` record.
+   * @throws {SessionCapacityError} If the global or per-platform cap is exceeded.
    * @throws If device creation, boot, or proxy startup fails.
    */
   async createSession(request: CreateSessionRequest): Promise<Session> {
-    const sessionId = randomUUID();
-    const sessionNow = now();
+    // Acquire the lock — wait for any in-flight creation to complete.
+    let releaseLock!: () => void;
+    const lockPromise = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    const previousLock = this._creationLock;
+    this._creationLock = lockPromise;
 
-    // Build a minimal placeholder device so the Session shape is always valid.
-    // Both platform branches overwrite this immediately.
-    const placeholderDevice: SimulatorDevice = {
-      id: '',
-      platformDeviceId: '',
-      platform: request.platform,
-      deviceType: {
-        id: request.deviceTypeId,
-        name: request.deviceTypeId,
-        platform: request.platform,
-        modelName: request.deviceTypeId,
-        modelIdentifier: request.deviceTypeId,
-      },
-      runtime: {
-        id: request.runtimeId,
-        platform: request.platform,
-        version: request.runtimeId,
-        identifier: request.runtimeId,
-        status: 'installed',
-      },
-      state: 'shutdown',
-    };
-
-    const session: InternalSession = {
-      id: sessionId,
-      device: placeholderDevice,
-      status: 'creating',
-      createdAt: sessionNow,
-      updatedAt: sessionNow,
-    };
-
-    this.sessions.set(sessionId, session);
-    this.persistSession(session, 'create');
-    log(`Creating session ${sessionId} (platform=${request.platform})`);
-    this.emitStatusChange(session, 'creating');
+    await previousLock; // Wait for prior creation to finish.
 
     try {
-      if (request.platform === 'ios') {
-        return await this.createIOSSession(session, request);
-      } else if (request.platform === 'android') {
-        return await this.createAndroidSession(session, request);
-      } else {
-        // TypeScript narrows Platform to 'ios' | 'android', but guard anyway.
-        throw new Error(
-          `Unsupported platform: ${String((request as CreateSessionRequest).platform)}`,
-        );
-      }
-    } catch (error: unknown) {
-      const previousStatus = session.status;
-      session.status = 'error';
-      session.updatedAt = now();
-      this.sessions.set(sessionId, session);
-      this.persistSession(session, 'update');
-      this.emitStatusChange(session, previousStatus);
-
-      // Best-effort cleanup — swallow errors so the original error propagates.
-      await this.cleanupFailedSession(session).catch((cleanupErr: unknown) => {
-        warn(
-          `Cleanup after failed session ${sessionId} encountered an error: ` +
-            String(cleanupErr),
-        );
-      });
-
-      throw error;
+      return await this._createSessionImpl(request);
+    } finally {
+      releaseLock();
     }
   }
 
@@ -358,6 +371,11 @@ export class SessionManagerService {
       this.timeoutCheckInterval = null;
     }
 
+    if (this.evictionCheckInterval !== null) {
+      clearInterval(this.evictionCheckInterval);
+      this.evictionCheckInterval = null;
+    }
+
     const activeIds = [...this.sessions.values()]
       .filter((s) => s.status !== 'terminated' && s.status !== 'error')
       .map((s) => s.id);
@@ -371,6 +389,173 @@ export class SessionManagerService {
     );
 
     log(`Cleanup complete. Terminated ${activeIds.length} session(s).`);
+  }
+
+  /**
+   * Return current session capacity information for monitoring and API responses.
+   *
+   * @returns Snapshot of active session counts vs. configured maximums.
+   */
+  getCapacityInfo(): {
+    activeSessions: number;
+    maxConcurrentSessions: number;
+    perPlatform: Record<string, { active: number; max: number }>;
+  } {
+    const active = [...this.sessions.values()].filter(
+      (s) => s.status === 'creating' || s.status === 'active',
+    );
+
+    const iosActive = active.filter((s) => s.device.platform === 'ios').length;
+    const androidActive = active.filter((s) => s.device.platform === 'android').length;
+
+    return {
+      activeSessions: active.length,
+      maxConcurrentSessions: config.maxConcurrentSessions,
+      perPlatform: {
+        ios: { active: iosActive, max: config.maxSessionsPerPlatform },
+        android: { active: androidActive, max: config.maxSessionsPerPlatform },
+      },
+    };
+  }
+
+  /**
+   * Scan the host for iOS Simulators and Android AVDs that match the WMS naming
+   * convention but are NOT tracked by any current in-memory session.  These are
+   * orphans left behind by a prior crash.
+   *
+   * This method is safe to call at startup — errors on individual devices are
+   * logged but never thrown.
+   */
+  async cleanupOrphanDevices(): Promise<void> {
+    log('Scanning for orphan devices…');
+    await Promise.allSettled([
+      this.cleanupOrphanIOSDevices(),
+      this.cleanupOrphanAndroidAVDs(),
+    ]);
+    log('Orphan device scan complete.');
+  }
+
+  // -------------------------------------------------------------------------
+  // Private — session creation implementation
+  // -------------------------------------------------------------------------
+
+  /**
+   * Internal implementation of session creation — called by the public
+   * `createSession()` wrapper which serialises concurrent calls via a mutex.
+   *
+   * Checks global and per-platform capacity limits before proceeding.  Throws
+   * {@link SessionCapacityError} if a limit is exceeded.
+   *
+   * @param request - Platform, runtime, and device-type selection.
+   * @returns The fully initialised `Session` record.
+   */
+  private async _createSessionImpl(request: CreateSessionRequest): Promise<Session> {
+    // --- Capacity checks (race-free because we hold the creation mutex) ---
+
+    const activeSessions = [...this.sessions.values()].filter(
+      (s) => s.status === 'creating' || s.status === 'active',
+    );
+
+    // Global cap check.
+    if (
+      config.maxConcurrentSessions > 0 &&
+      activeSessions.length >= config.maxConcurrentSessions
+    ) {
+      throw new SessionCapacityError(
+        `Maximum concurrent sessions reached (${config.maxConcurrentSessions}). ` +
+          `Terminate an existing session before creating a new one.`,
+        'CAPACITY_GLOBAL',
+        activeSessions.length,
+        config.maxConcurrentSessions,
+      );
+    }
+
+    // Per-platform cap check.
+    if (config.maxSessionsPerPlatform > 0) {
+      const platformCount = activeSessions.filter(
+        (s) => s.device.platform === request.platform,
+      ).length;
+      if (platformCount >= config.maxSessionsPerPlatform) {
+        throw new SessionCapacityError(
+          `Maximum ${request.platform} sessions reached (${config.maxSessionsPerPlatform}). ` +
+            `Terminate an existing ${request.platform} session before creating a new one.`,
+          'CAPACITY_PLATFORM',
+          platformCount,
+          config.maxSessionsPerPlatform,
+        );
+      }
+    }
+
+    // --- Session creation ---
+
+    const sessionId = randomUUID();
+    const sessionNow = now();
+
+    // Build a minimal placeholder device so the Session shape is always valid.
+    // Both platform branches overwrite this immediately.
+    const placeholderDevice: SimulatorDevice = {
+      id: '',
+      platformDeviceId: '',
+      platform: request.platform,
+      deviceType: {
+        id: request.deviceTypeId,
+        name: request.deviceTypeId,
+        platform: request.platform,
+        modelName: request.deviceTypeId,
+        modelIdentifier: request.deviceTypeId,
+      },
+      runtime: {
+        id: request.runtimeId,
+        platform: request.platform,
+        version: request.runtimeId,
+        identifier: request.runtimeId,
+        status: 'installed',
+      },
+      state: 'shutdown',
+    };
+
+    const session: InternalSession = {
+      id: sessionId,
+      device: placeholderDevice,
+      status: 'creating',
+      createdAt: sessionNow,
+      updatedAt: sessionNow,
+    };
+
+    this.sessions.set(sessionId, session);
+    this.persistSession(session, 'create');
+    log(`Creating session ${sessionId} (platform=${request.platform})`);
+    this.emitStatusChange(session, 'creating');
+
+    try {
+      if (request.platform === 'ios') {
+        return await this.createIOSSession(session, request);
+      } else if (request.platform === 'android') {
+        return await this.createAndroidSession(session, request);
+      } else {
+        // TypeScript narrows Platform to 'ios' | 'android', but guard anyway.
+        throw new Error(
+          `Unsupported platform: ${String((request as CreateSessionRequest).platform)}`,
+        );
+      }
+    } catch (error: unknown) {
+      const previousStatus = session.status;
+      session.status = 'error';
+      session.updatedAt = now();
+      this.sessions.set(sessionId, session);
+      this.persistSession(session, 'update');
+      this.emitStatusChange(session, previousStatus);
+
+      // Best-effort cleanup — swallow errors so the original error propagates.
+      await this.cleanupFailedSession(session).catch((cleanupErr: unknown) => {
+        warn(
+          `Cleanup after failed session ${sessionId} encountered an error: ` +
+            String(cleanupErr),
+        );
+      });
+
+      throw error;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -389,7 +574,7 @@ export class SessionManagerService {
     request: CreateSessionRequest,
   ): Promise<Session> {
     const { id: sessionId } = session;
-    const deviceName = `wms-session-${shortId(sessionId)}`;
+    const deviceName = `${WMS_IOS_DEVICE_NAME_PREFIX}${shortId(sessionId)}`;
 
     // Step 1 — Create the Simulator device.
     log(`[${sessionId}] Creating iOS Simulator "${deviceName}"…`);
@@ -473,7 +658,7 @@ export class SessionManagerService {
   ): Promise<Session> {
     const { id: sessionId } = session;
     // AVD names must not contain spaces; use a short safe identifier.
-    const avdName = `wms_session_${shortId(sessionId)}`;
+    const avdName = `${WMS_ANDROID_AVD_NAME_PREFIX}${shortId(sessionId)}`;
 
     // The runtimeId for Android is the system image package path, e.g.:
     //   system-images;android-34;google_apis;arm64-v8a
@@ -662,6 +847,97 @@ export class SessionManagerService {
   }
 
   // -------------------------------------------------------------------------
+  // Private — orphan device cleanup
+  // -------------------------------------------------------------------------
+
+  /**
+   * Scan for and clean up orphan iOS Simulators that match our naming prefix
+   * but are not tracked by any current in-memory session.
+   *
+   * Uses a direct `xcrun simctl list devices -j` call to access device names,
+   * since the high-level `listDevices()` return type does not expose the name.
+   */
+  private async cleanupOrphanIOSDevices(): Promise<void> {
+    try {
+      // Raw simctl JSON gives us device name + UDID + state per device.
+      const output = await execJSON<{
+        devices: Record<
+          string,
+          Array<{ udid: string; name: string; state: string; isAvailable: boolean }>
+        >;
+      }>('xcrun', ['simctl', 'list', 'devices', '-j']);
+
+      const trackedUdids = new Set(
+        [...this.sessions.values()]
+          .filter((s) => s._iosUdid)
+          .map((s) => s._iosUdid!),
+      );
+
+      for (const runtimeDevices of Object.values(output.devices)) {
+        for (const device of runtimeDevices) {
+          if (!device.name.startsWith(WMS_IOS_DEVICE_NAME_PREFIX)) continue;
+          if (trackedUdids.has(device.udid)) continue;
+
+          // Matches our naming convention but is not tracked — it's an orphan.
+          log(
+            `Found orphan iOS Simulator: "${device.name}" (${device.udid}) — cleaning up…`,
+          );
+
+          try {
+            if (device.state.toLowerCase() !== 'shutdown') {
+              await iosSimulatorService.shutdownDevice(device.udid);
+            }
+            await iosSimulatorService.deleteDevice(device.udid);
+            log(`Orphan iOS Simulator ${device.udid} cleaned up successfully.`);
+          } catch (err: unknown) {
+            warn(
+              `Failed to clean up orphan iOS Simulator ${device.udid}: ${String(err)}`,
+            );
+          }
+        }
+      }
+    } catch (err: unknown) {
+      warn(`Orphan iOS device scan failed: ${String(err)}`);
+    }
+  }
+
+  /**
+   * Scan for and clean up orphan Android AVDs that match our naming prefix
+   * but are not tracked by any current in-memory session.
+   */
+  private async cleanupOrphanAndroidAVDs(): Promise<void> {
+    try {
+      const allAVDs = await androidEmulatorService.listAVDs();
+      const trackedAvdNames = new Set(
+        [...this.sessions.values()]
+          .filter((s) => s._androidAvdName)
+          .map((s) => s._androidAvdName!),
+      );
+
+      for (const avd of allAVDs) {
+        const avdName = avd.platformDeviceId; // This IS the AVD name.
+        if (!avdName.startsWith(WMS_ANDROID_AVD_NAME_PREFIX)) continue;
+        if (trackedAvdNames.has(avdName)) continue;
+
+        // Matches our naming convention but is not tracked — it's an orphan.
+        log(`Found orphan Android AVD: "${avdName}" — cleaning up…`);
+
+        try {
+          if (avd.state === 'booted') {
+            await androidEmulatorService.shutdownEmulator(avdName);
+          }
+          await androidEmulatorService.deleteAVD(avdName);
+          log(`Orphan Android AVD "${avdName}" cleaned up successfully.`);
+        } catch (err: unknown) {
+          warn(`Failed to clean up orphan Android AVD "${avdName}": ${String(err)}`);
+        }
+      }
+    } catch (err: unknown) {
+      warn(`Orphan Android AVD scan failed: ${String(err)}`);
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Private — session timeout
   // -------------------------------------------------------------------------
 
@@ -673,22 +949,57 @@ export class SessionManagerService {
   private async checkTimeouts(): Promise<void> {
     const cutoff = Date.now() - SESSION_TIMEOUT_MS;
 
-    for (const session of this.sessions.values()) {
-      if (session.status !== 'active' && session.status !== 'creating') continue;
+    // Snapshot the IDs to terminate before the loop, since terminateSession()
+    // mutates the sessions Map.
+    const timedOutIds = [...this.sessions.values()]
+      .filter(
+        (s) =>
+          (s.status === 'active' || s.status === 'creating') &&
+          new Date(s.createdAt).getTime() < cutoff,
+      )
+      .map((s) => s.id);
 
-      const createdMs = new Date(session.createdAt).getTime();
-      if (createdMs < cutoff) {
+    for (const id of timedOutIds) {
+      warn(
+        `Session ${id} has exceeded the ${SESSION_TIMEOUT_MS / 60_000} min ` +
+          `timeout — terminating automatically.`,
+      );
+      await this.terminateSession(id).catch((err: unknown) => {
         warn(
-          `Session ${session.id} has exceeded the ${SESSION_TIMEOUT_MS / 60_000} min ` +
-            `timeout — terminating automatically.`,
+          `Auto-termination of timed-out session ${id} failed: ` +
+            String(err),
         );
-        await this.terminateSession(session.id).catch((err: unknown) => {
-          warn(
-            `Auto-termination of timed-out session ${session.id} failed: ` +
-              String(err),
-          );
-        });
+      });
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Private — memory eviction
+  // -------------------------------------------------------------------------
+
+  /**
+   * Remove terminated/error sessions from the in-memory Map once they are
+   * older than `config.sessionMemoryEvictionMs`.  The database retains them
+   * permanently for historical queries.
+   *
+   * Runs every 5 minutes via the eviction interval started in the constructor.
+   */
+  private evictStaleMemorySessions(): void {
+    const cutoff = Date.now() - config.sessionMemoryEvictionMs;
+    let evicted = 0;
+
+    for (const [id, session] of this.sessions) {
+      if (session.status !== 'terminated' && session.status !== 'error') continue;
+
+      const updatedMs = new Date(session.updatedAt).getTime();
+      if (updatedMs < cutoff) {
+        this.sessions.delete(id);
+        evicted++;
       }
+    }
+
+    if (evicted > 0) {
+      log(`Evicted ${evicted} stale session(s) from memory.`);
     }
   }
 }
