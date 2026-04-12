@@ -1,5 +1,4 @@
-import { execFile, spawn, type ChildProcess } from 'node:child_process';
-import { promisify } from 'node:util';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { arch } from 'node:os';
@@ -7,8 +6,6 @@ import { config } from '../config.js';
 import type { DeviceType, Runtime, SimulatorDevice, DeviceState } from '@web-mobile-simulator/shared';
 import { DEVICE_BOOT_TIMEOUT_MS } from '@web-mobile-simulator/shared';
 import { exec } from '../utils/exec.js';
-
-const execFileAsync = promisify(execFile);
 
 // ---------------------------------------------------------------------------
 // SDK tool paths derived from config
@@ -341,7 +338,7 @@ export class AndroidEmulatorService {
       return abi === hostAbi;
     });
 
-    return compatible.map(({ path, version, installed }): Runtime => {
+    return compatible.map(({ path, version: _version, installed }): Runtime => {
       const apiLevel = apiLevelFromImagePath(path);
       return {
         id: `android-runtime-${path.replace(/;/g, '-')}`,

@@ -37,6 +37,7 @@ export async function exec(
     const err = error as NodeJS.ErrnoException & { stderr?: string };
     throw new Error(
       `Command failed: ${command} ${args.join(' ')}\n${err.stderr ?? err.message ?? String(error)}`,
+      { cause: error },
     );
   }
 }

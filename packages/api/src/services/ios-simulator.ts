@@ -506,6 +506,7 @@ export class IOSSimulatorService {
           `Failed to download runtime "${identifier}".\n` +
             `simctl error:     ${String(simctlError)}\n` +
             `xcodebuild error: ${String(xcodebuildError)}`,
+          { cause: xcodebuildError },
         );
       }
     }

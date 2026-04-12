@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "lint": "echo 'no lint configured yet'"
+    "lint": "eslint src/"
   },
   "devDependencies": {
     "typescript": "~5.7.0"
