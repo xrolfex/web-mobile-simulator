@@ -32,6 +32,18 @@ declare module '@novnc/novnc' {
     clipViewport?: boolean;
     /** Whether to enable drag scrolling. */
     dragViewport?: boolean;
+    /** Whether to request a shared VNC connection. Default: true. */
+    shared?: boolean;
+    /** Repeater ID for UltraVNC repeaters. */
+    repeaterID?: string;
+    /** Whether input events (mouse, keyboard, touch) are forwarded. Default: false (input enabled). */
+    viewOnly?: boolean;
+    /** Whether clicking the canvas focuses it for keyboard capture. Default: true. */
+    focusOnClick?: boolean;
+    /** JPEG quality level for Tight encoding (0-9). Default: 6. */
+    qualityLevel?: number;
+    /** Compression level for encodings (0-9). Default: 2. */
+    compressionLevel?: number;
   }
 
   /** Event fired when the connection is established. */
@@ -75,6 +87,7 @@ declare module '@novnc/novnc' {
     clipboard: CustomEvent<{ text: string }>;
     bell: CustomEvent<Record<string, never>>;
     capabilities: CustomEvent<{ capabilities: Record<string, boolean> }>;
+    clippingviewport: CustomEvent<{ viewport: DOMRect; desktop: { width: number; height: number } }>;
   }
 
   /**
@@ -106,6 +119,16 @@ declare module '@novnc/novnc' {
     showDotCursor: boolean;
     /** Background fill colour. */
     background: string;
+    /** Whether input events (mouse, keyboard, touch) are forwarded to the remote. Default: false. */
+    viewOnly: boolean;
+    /** Whether clicking the canvas focuses it for keyboard capture. Default: true. */
+    focusOnClick: boolean;
+    /** JPEG quality level for Tight encoding (0-9, higher = better quality). Default: 6. */
+    qualityLevel: number;
+    /** Compression level for encodings (0-9, higher = more compression). Default: 2. */
+    compressionLevel: number;
+    /** Server capabilities (e.g. whether XVP power management is supported). */
+    readonly capabilities: { power: boolean };
 
     // ── Methods ───────────────────────────────────────────────────────────────
 
@@ -134,6 +157,45 @@ declare module '@novnc/novnc' {
      * @param down   True for key-down, false for key-up.
      */
     sendKey(keysym: number, code: string | null, down?: boolean): void;
+
+    /** Focus the VNC canvas element for keyboard input capture. */
+    focus(options?: FocusOptions): void;
+
+    /** Remove keyboard focus from the VNC canvas element. */
+    blur(): void;
+
+    /** Send clipboard text to the remote desktop. */
+    clipboardPasteFrom(text: string): void;
+
+    /** Request XVP machine shutdown (requires server support). */
+    machineShutdown(): void;
+
+    /** Request XVP machine reboot (requires server support). */
+    machineReboot(): void;
+
+    /** Request XVP machine reset (requires server support). */
+    machineReset(): void;
+
+    /**
+     * Get the current canvas contents as ImageData.
+     * @returns The ImageData for the current VNC frame.
+     */
+    getImageData(): ImageData;
+
+    /**
+     * Get the current canvas contents as a data: URL.
+     * @param type MIME type (e.g. 'image/png'). Defaults to 'image/png'.
+     * @param encoderOptions Quality for lossy formats (0-1).
+     */
+    toDataURL(type?: string, encoderOptions?: number): string;
+
+    /**
+     * Get the current canvas contents as a Blob, asynchronously.
+     * @param callback Callback receiving the Blob.
+     * @param type MIME type. Defaults to 'image/png'.
+     * @param quality Quality for lossy formats (0-1).
+     */
+    toBlob(callback: BlobCallback, type?: string, quality?: number): void;
 
     // ── EventTarget interface ─────────────────────────────────────────────────
 

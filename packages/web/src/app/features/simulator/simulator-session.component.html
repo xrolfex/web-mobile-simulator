@@ -90,6 +90,104 @@
       </div>
     }
 
+    <!-- ── Device Controls ──────────────────────────────────────────── -->
+    @if (isReady() && session()!.device.platform === 'ios') {
+      <div class="controls-section">
+        <h3 class="controls-section__title">Device Controls</h3>
+
+        <div class="controls-grid">
+          <button
+            class="ctrl-btn"
+            (click)="onPressButton('home')"
+            [disabled]="controlBusy()"
+            title="Home Button"
+            aria-label="Press Home button"
+          >
+            <span class="ctrl-btn__icon" aria-hidden="true">⊙</span>
+            <span class="ctrl-btn__label">Home</span>
+          </button>
+
+          <button
+            class="ctrl-btn"
+            (click)="onPressButton('lock')"
+            [disabled]="controlBusy()"
+            title="Lock / Power Button"
+            aria-label="Press Lock button"
+          >
+            <span class="ctrl-btn__icon" aria-hidden="true">🔒</span>
+            <span class="ctrl-btn__label">Lock</span>
+          </button>
+
+          <button
+            class="ctrl-btn"
+            (click)="onPressButton('volumeUp')"
+            [disabled]="controlBusy()"
+            title="Volume Up"
+            aria-label="Press Volume Up"
+          >
+            <span class="ctrl-btn__icon" aria-hidden="true">🔊</span>
+            <span class="ctrl-btn__label">Vol +</span>
+          </button>
+
+          <button
+            class="ctrl-btn"
+            (click)="onPressButton('volumeDown')"
+            [disabled]="controlBusy()"
+            title="Volume Down"
+            aria-label="Press Volume Down"
+          >
+            <span class="ctrl-btn__icon" aria-hidden="true">🔉</span>
+            <span class="ctrl-btn__label">Vol −</span>
+          </button>
+
+          <button
+            class="ctrl-btn"
+            (click)="onShake()"
+            [disabled]="controlBusy()"
+            title="Shake Gesture"
+            aria-label="Trigger shake gesture"
+          >
+            <span class="ctrl-btn__icon" aria-hidden="true">📳</span>
+            <span class="ctrl-btn__label">Shake</span>
+          </button>
+
+          <button
+            class="ctrl-btn"
+            (click)="onScreenshot()"
+            [disabled]="controlBusy()"
+            title="Take Screenshot"
+            aria-label="Take screenshot"
+          >
+            <span class="ctrl-btn__icon" aria-hidden="true">📸</span>
+            <span class="ctrl-btn__label">Screenshot</span>
+          </button>
+        </div>
+
+        <!-- Orientation Controls -->
+        <div class="controls-orientation">
+          <label class="controls-orientation__label">Orientation</label>
+          <div class="controls-orientation__buttons">
+            <button
+              class="orient-btn"
+              [class.orient-btn--active]="currentOrientation() === 'portrait'"
+              (click)="onRotate('portrait')"
+              [disabled]="controlBusy()"
+              title="Portrait"
+              aria-label="Rotate to portrait"
+            >↕ Portrait</button>
+            <button
+              class="orient-btn"
+              [class.orient-btn--active]="currentOrientation() === 'landscapeLeft'"
+              (click)="onRotate('landscapeLeft')"
+              [disabled]="controlBusy()"
+              title="Landscape Left"
+              aria-label="Rotate to landscape left"
+            >↔ Landscape</button>
+          </div>
+        </div>
+      </div>
+    }
+
     <!-- Stop session button -->
     <div class="session-sidebar__actions">
       <button

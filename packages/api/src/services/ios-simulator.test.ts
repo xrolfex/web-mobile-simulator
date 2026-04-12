@@ -636,4 +636,210 @@ describe('IOSSimulatorService', () => {
       expect(state).toBe('error');
     });
   });
+
+  // -------------------------------------------------------------------------
+  // pressButton()
+  // -------------------------------------------------------------------------
+
+  describe('pressButton(udid, button)', () => {
+    macosOnly('calls xcrun simctl ui <udid> pressButton home', async () => {
+      // First call: assertSimctlAvailable() → xcrun --find simctl
+      // Second call: the actual pressButton command
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+      await service.pressButton('TEST-UDID', 'home');
+
+      expect(mockExec.mock.calls[1]).toEqual([
+        'xcrun',
+        ['simctl', 'ui', 'TEST-UDID', 'pressButton', 'home'],
+        expect.any(Object),
+      ]);
+    });
+
+    macosOnly('calls xcrun simctl ui <udid> pressButton lock', async () => {
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+      await service.pressButton('TEST-UDID', 'lock');
+
+      expect(mockExec.mock.calls[1]).toEqual([
+        'xcrun',
+        ['simctl', 'ui', 'TEST-UDID', 'pressButton', 'lock'],
+        expect.any(Object),
+      ]);
+    });
+
+    macosOnly('calls xcrun simctl ui <udid> pressButton volumeUp', async () => {
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+      await service.pressButton('TEST-UDID', 'volumeUp');
+
+      expect(mockExec.mock.calls[1]).toEqual([
+        'xcrun',
+        ['simctl', 'ui', 'TEST-UDID', 'pressButton', 'volumeUp'],
+        expect.any(Object),
+      ]);
+    });
+
+    macosOnly('calls xcrun simctl ui <udid> pressButton volumeDown', async () => {
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+      await service.pressButton('TEST-UDID', 'volumeDown');
+
+      expect(mockExec.mock.calls[1]).toEqual([
+        'xcrun',
+        ['simctl', 'ui', 'TEST-UDID', 'pressButton', 'volumeDown'],
+        expect.any(Object),
+      ]);
+    });
+
+    macosOnly('exec is called exactly twice (simctl check + pressButton command)', async () => {
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+      await service.pressButton('TEST-UDID', 'home');
+
+      expect(mockExec).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // setOrientation()
+  // -------------------------------------------------------------------------
+
+  describe('setOrientation(udid, orientation)', () => {
+    macosOnly('maps "portrait" to the "portrait" simctl string', async () => {
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+      await service.setOrientation('TEST-UDID', 'portrait');
+
+      expect(mockExec.mock.calls[1]).toEqual([
+        'xcrun',
+        ['simctl', 'orientation', 'TEST-UDID', 'portrait'],
+        expect.any(Object),
+      ]);
+    });
+
+    macosOnly('maps "landscapeLeft" to the "landscape left" simctl string', async () => {
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+      await service.setOrientation('TEST-UDID', 'landscapeLeft');
+
+      expect(mockExec.mock.calls[1]).toEqual([
+        'xcrun',
+        ['simctl', 'orientation', 'TEST-UDID', 'landscape left'],
+        expect.any(Object),
+      ]);
+    });
+
+    macosOnly('maps "landscapeRight" to the "landscape right" simctl string', async () => {
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+      await service.setOrientation('TEST-UDID', 'landscapeRight');
+
+      expect(mockExec.mock.calls[1]).toEqual([
+        'xcrun',
+        ['simctl', 'orientation', 'TEST-UDID', 'landscape right'],
+        expect.any(Object),
+      ]);
+    });
+
+    macosOnly('maps "portraitUpsideDown" to the "portrait upside down" simctl string', async () => {
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+      await service.setOrientation('TEST-UDID', 'portraitUpsideDown');
+
+      expect(mockExec.mock.calls[1]).toEqual([
+        'xcrun',
+        ['simctl', 'orientation', 'TEST-UDID', 'portrait upside down'],
+        expect.any(Object),
+      ]);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // shake()
+  // -------------------------------------------------------------------------
+
+  describe('shake(udid)', () => {
+    macosOnly('calls xcrun simctl ui <udid> shake', async () => {
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+      await service.shake('TEST-UDID');
+
+      expect(mockExec.mock.calls[1]).toEqual([
+        'xcrun',
+        ['simctl', 'ui', 'TEST-UDID', 'shake'],
+        expect.any(Object),
+      ]);
+    });
+
+    macosOnly('throws with "Shake gesture is not supported" message when exec fails', async () => {
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockRejectedValueOnce(new Error('Command failed: xcrun simctl ui TEST-UDID shake'));
+
+      await expect(service.shake('TEST-UDID')).rejects.toThrow(
+        'Shake gesture is not supported',
+      );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // takeScreenshot()
+  // -------------------------------------------------------------------------
+
+  describe('takeScreenshot(udid, outputPath)', () => {
+    macosOnly('calls xcrun simctl io <udid> screenshot --type=png <outputPath>', async () => {
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+      await service.takeScreenshot('TEST-UDID', '/tmp/screenshot.png');
+
+      expect(mockExec.mock.calls[1]).toEqual([
+        'xcrun',
+        ['simctl', 'io', 'TEST-UDID', 'screenshot', '--type=png', '/tmp/screenshot.png'],
+        expect.any(Object),
+      ]);
+    });
+
+    macosOnly('exec is called exactly twice (simctl check + screenshot command)', async () => {
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+      await service.takeScreenshot('TEST-UDID', '/tmp/screenshot.png');
+
+      expect(mockExec).toHaveBeenCalledTimes(2);
+    });
+
+    macosOnly('propagates exec failures as thrown errors', async () => {
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockRejectedValueOnce(new Error('Command failed: xcrun simctl io'));
+
+      await expect(
+        service.takeScreenshot('TEST-UDID', '/tmp/screenshot.png'),
+      ).rejects.toThrow('Command failed');
+    });
+  });
 });

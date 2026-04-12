@@ -529,6 +529,122 @@ export class IOSSimulatorService {
   }
 
   // -------------------------------------------------------------------------
+  // Device Control
+  // -------------------------------------------------------------------------
+
+  /**
+   * Simulate pressing a hardware button on the device.
+   * Uses: `xcrun simctl ui <udid> pressButton <buttonName>`
+   *
+   * @param udid   - The device UDID.
+   * @param button - Button name: `'home' | 'lock' | 'volumeUp' | 'volumeDown'`
+   */
+  async pressButton(
+    udid: string,
+    button: 'home' | 'lock' | 'volumeUp' | 'volumeDown',
+  ): Promise<void> {
+    log(`Pressing button "${button}" on device ${udid}`);
+    await this.assertSimctlAvailable();
+
+    // simctl uses camelCase for volume buttons
+    const buttonMap: Record<string, string> = {
+      home: 'home',
+      lock: 'lock',
+      volumeUp: 'volumeUp',
+      volumeDown: 'volumeDown',
+    };
+    const simctlButton = buttonMap[button];
+    if (!simctlButton) {
+      throw new Error(`Unknown button: ${button}`);
+    }
+
+    await exec(SIMCTL, ['simctl', 'ui', udid, 'pressButton', simctlButton], XCRUN_EXEC_OPTIONS);
+    log(`Button "${button}" pressed on device ${udid}`);
+  }
+
+  /**
+   * Set the device orientation/rotation.
+   * Uses: `xcrun simctl orientation <udid> <orientation>`
+   *
+   * NOTE: `xcrun simctl orientation` is available in newer Xcode versions.
+   * For older versions, fallback approaches are needed (UI automation).
+   *
+   * @param udid        - The device UDID.
+   * @param orientation - `'portrait' | 'landscapeLeft' | 'landscapeRight' | 'portraitUpsideDown'`
+   */
+  async setOrientation(
+    udid: string,
+    orientation: 'portrait' | 'landscapeLeft' | 'landscapeRight' | 'portraitUpsideDown',
+  ): Promise<void> {
+    log(`Setting orientation to "${orientation}" on device ${udid}`);
+    await this.assertSimctlAvailable();
+
+    const orientationMap: Record<string, string> = {
+      portrait: 'portrait',
+      landscapeLeft: 'landscape left',
+      landscapeRight: 'landscape right',
+      portraitUpsideDown: 'portrait upside down',
+    };
+
+    const simctlOrientation = orientationMap[orientation];
+    if (!simctlOrientation) {
+      const validOrientations = Object.keys(orientationMap);
+      throw new Error(
+        `Invalid orientation: ${orientation}. Valid options: ${validOrientations.join(', ')}`,
+      );
+    }
+
+    await exec(
+      SIMCTL,
+      ['simctl', 'orientation', udid, simctlOrientation],
+      XCRUN_EXEC_OPTIONS,
+    );
+    log(`Orientation set to "${orientation}" on device ${udid}`);
+  }
+
+  /**
+   * Trigger a shake gesture on the device.
+   * Uses: `xcrun simctl ui <udid> shake` (available in Xcode 15+).
+   *
+   * Note: This command may not be available in all Xcode versions.
+   * If it fails, a descriptive error is thrown rather than silently swallowed.
+   *
+   * @param udid - The device UDID.
+   */
+  async shake(udid: string): Promise<void> {
+    log(`Triggering shake gesture on device ${udid}`);
+    await this.assertSimctlAvailable();
+
+    try {
+      await exec(SIMCTL, ['simctl', 'ui', udid, 'shake'], XCRUN_EXEC_OPTIONS);
+      log(`Shake gesture triggered on device ${udid}`);
+    } catch (error: unknown) {
+      // Shake may not be supported in older Xcode versions — surface a clear message.
+      warn(`Shake gesture failed (may not be supported): ${String(error)}`);
+      throw new Error('Shake gesture is not supported in this Xcode version.');
+    }
+  }
+
+  /**
+   * Take a screenshot of the device screen and save it to `outputPath`.
+   * Uses: `xcrun simctl io <udid> screenshot --type=png <outputPath>`
+   *
+   * @param udid       - The device UDID.
+   * @param outputPath - Filesystem path where the PNG screenshot will be written.
+   */
+  async takeScreenshot(udid: string, outputPath: string): Promise<void> {
+    log(`Taking screenshot of device ${udid} → ${outputPath}`);
+    await this.assertSimctlAvailable();
+
+    await exec(
+      SIMCTL,
+      ['simctl', 'io', udid, 'screenshot', '--type=png', outputPath],
+      XCRUN_EXEC_OPTIONS,
+    );
+    log(`Screenshot saved: ${outputPath}`);
+  }
+
+  // -------------------------------------------------------------------------
   // Private helpers
   // -------------------------------------------------------------------------
 

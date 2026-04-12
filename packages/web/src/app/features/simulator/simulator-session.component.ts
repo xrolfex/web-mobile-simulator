@@ -12,7 +12,12 @@ import { switchMap, takeWhile } from 'rxjs/operators';
 
 import { ApiService } from '../../core/services/api.service';
 import { ToastService } from '../../core/services/toast.service';
-import { Session, SessionStatus } from '../../core/types/api.types';
+import {
+  DeviceOrientation,
+  Session,
+  SessionStatus,
+  SimulatorButton,
+} from '../../core/types/api.types';
 import { SimulatorViewerComponent } from './simulator-viewer.component';
 import type { ConnectionState } from './simulator-viewer.component';
 
@@ -79,6 +84,12 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
 
   /** Whether a file is being dragged over the drop zone. */
   protected readonly dragOver = signal<boolean>(false);
+
+  /** Whether a device control action is in-flight. */
+  protected readonly controlBusy = signal<boolean>(false);
+
+  /** Current device orientation (client-side tracking). */
+  protected readonly currentOrientation = signal<DeviceOrientation>('portrait');
 
   /** File input accept attribute based on platform. */
   protected readonly acceptedFileTypes = computed<string>(() => {
@@ -199,6 +210,111 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
     event.preventDefault();
     event.stopPropagation();
     this.dragOver.set(false);
+  }
+
+  // ── Device Control handlers ──────────────────────────────────────────────────
+
+  /**
+   * Press a hardware button on the simulator.
+   * @param button The button to press.
+   */
+  protected onPressButton(button: SimulatorButton): void {
+    const currentSession = this.session();
+    if (!currentSession) return;
+
+    this.controlBusy.set(true);
+    this.api.pressButton(currentSession.id, button).subscribe({
+      next: (response) => {
+        this.controlBusy.set(false);
+        if (!response.success) {
+          this.toast.error(response.error?.message ?? `Failed to press ${button}.`);
+        }
+      },
+      error: (err: unknown) => {
+        this.controlBusy.set(false);
+        const message = err instanceof Error ? err.message : `Failed to press ${button}.`;
+        this.toast.error(message);
+      },
+    });
+  }
+
+  /**
+   * Set the device orientation.
+   * @param orientation Target orientation.
+   */
+  protected onRotate(orientation: DeviceOrientation): void {
+    const currentSession = this.session();
+    if (!currentSession) return;
+
+    this.controlBusy.set(true);
+    this.api.setOrientation(currentSession.id, orientation).subscribe({
+      next: (response) => {
+        this.controlBusy.set(false);
+        if (response.success) {
+          this.currentOrientation.set(orientation);
+        } else {
+          this.toast.error(response.error?.message ?? 'Failed to rotate device.');
+        }
+      },
+      error: (err: unknown) => {
+        this.controlBusy.set(false);
+        const message = err instanceof Error ? err.message : 'Failed to rotate device.';
+        this.toast.error(message);
+      },
+    });
+  }
+
+  /**
+   * Trigger a shake gesture on the device.
+   */
+  protected onShake(): void {
+    const currentSession = this.session();
+    if (!currentSession) return;
+
+    this.controlBusy.set(true);
+    this.api.shakeDevice(currentSession.id).subscribe({
+      next: (response) => {
+        this.controlBusy.set(false);
+        if (!response.success) {
+          this.toast.error(response.error?.message ?? 'Failed to trigger shake.');
+        }
+      },
+      error: (err: unknown) => {
+        this.controlBusy.set(false);
+        const message = err instanceof Error ? err.message : 'Failed to trigger shake.';
+        this.toast.error(message);
+      },
+    });
+  }
+
+  /**
+   * Take a screenshot and download it as a PNG file.
+   */
+  protected onScreenshot(): void {
+    const currentSession = this.session();
+    if (!currentSession) return;
+
+    this.controlBusy.set(true);
+    this.api.takeScreenshot(currentSession.id).subscribe({
+      next: (blob: Blob) => {
+        this.controlBusy.set(false);
+        // Trigger a browser download of the returned PNG blob
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = `screenshot-${currentSession.id}-${Date.now()}.png`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        document.body.removeChild(anchor);
+        URL.revokeObjectURL(url);
+        this.toast.success('Screenshot saved.');
+      },
+      error: (err: unknown) => {
+        this.controlBusy.set(false);
+        const message = err instanceof Error ? err.message : 'Failed to take screenshot.';
+        this.toast.error(message);
+      },
+    });
   }
 
   // ── Private helpers ────────────────────────────────────────────────────────

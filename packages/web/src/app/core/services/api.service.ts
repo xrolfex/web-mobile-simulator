@@ -6,12 +6,14 @@ import {
   AppUploadResponse,
   CreateSessionRequest,
   CreateSessionResponse,
+  DeviceOrientation,
   DeviceTypeListResponse,
   DownloadRuntimeRequest,
   Platform,
   RuntimeListResponse,
   Session,
   SessionListResponse,
+  SimulatorButton,
 } from '../types/api.types';
 
 /**
@@ -91,6 +93,58 @@ export class ApiService {
       formData,
       // Note: Do NOT set Content-Type header — Angular/browser sets it
       // automatically with the correct multipart boundary
+    );
+  }
+
+  // ── Device Control ────────────────────────────────────────────────────────
+
+  /**
+   * Press a hardware button on the session's simulator.
+   * POST /api/sessions/:id/control/button
+   * @param sessionId The session UUID.
+   * @param button    The button to press.
+   */
+  pressButton(sessionId: string, button: SimulatorButton) {
+    return this.http.post<ApiResponse<void>>(
+      `${this.baseUrl}/api/sessions/${sessionId}/control/button`,
+      { button },
+    );
+  }
+
+  /**
+   * Set the device orientation.
+   * POST /api/sessions/:id/control/rotate
+   * @param sessionId   The session UUID.
+   * @param orientation The target orientation.
+   */
+  setOrientation(sessionId: string, orientation: DeviceOrientation) {
+    return this.http.post<ApiResponse<void>>(
+      `${this.baseUrl}/api/sessions/${sessionId}/control/rotate`,
+      { orientation },
+    );
+  }
+
+  /**
+   * Trigger a shake gesture on the device.
+   * POST /api/sessions/:id/control/shake
+   * @param sessionId The session UUID.
+   */
+  shakeDevice(sessionId: string) {
+    return this.http.post<ApiResponse<void>>(
+      `${this.baseUrl}/api/sessions/${sessionId}/control/shake`,
+      {},
+    );
+  }
+
+  /**
+   * Take a screenshot and return it as a Blob.
+   * GET /api/sessions/:id/control/screenshot
+   * @param sessionId The session UUID.
+   */
+  takeScreenshot(sessionId: string) {
+    return this.http.get(
+      `${this.baseUrl}/api/sessions/${sessionId}/control/screenshot`,
+      { responseType: 'blob' },
     );
   }
 

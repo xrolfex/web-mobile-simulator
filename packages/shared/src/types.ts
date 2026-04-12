@@ -98,6 +98,28 @@ export interface AppUploadResponse {
   result: AppInstallResult;
 }
 
+// === Device Control Types ===
+
+/** Hardware buttons that can be pressed via simctl. */
+export type SimulatorButton = 'home' | 'lock' | 'volumeUp' | 'volumeDown';
+
+/** Device orientation options. */
+export type DeviceOrientation =
+  | 'portrait'
+  | 'landscapeLeft'
+  | 'landscapeRight'
+  | 'portraitUpsideDown';
+
+/** Request body for the press-button endpoint. */
+export interface PressButtonRequest {
+  button: SimulatorButton;
+}
+
+/** Request body for the set-orientation endpoint. */
+export interface SetOrientationRequest {
+  orientation: DeviceOrientation;
+}
+
 // === Runtime Management Types ===
 
 export interface RuntimeListResponse {

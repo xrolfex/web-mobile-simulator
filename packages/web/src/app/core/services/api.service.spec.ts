@@ -17,11 +17,13 @@ import type {
   ApiResponse,
   CreateSessionRequest,
   CreateSessionResponse,
+  DeviceOrientation,
   DeviceTypeListResponse,
   DownloadRuntimeRequest,
   RuntimeListResponse,
   Session,
   SessionListResponse,
+  SimulatorButton,
 } from '../types/api.types';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -371,6 +373,79 @@ describe('ApiService', () => {
       expect(req.request.method).toBe('POST');
       expect(req.request.body).toEqual(request);
       req.flush({ success: true });
+    });
+  });
+
+  // ── Device Control ────────────────────────────────────────────────────────
+
+  describe('pressButton(sessionId, button)', () => {
+    it('should make a POST request to /api/sessions/:id/control/button with the button body', () => {
+      // Arrange
+      const button: SimulatorButton = 'home';
+      const mockResponse: ApiResponse<void> = { success: true, data: undefined };
+
+      // Act
+      service.pressButton(mockSession.id, button).subscribe();
+      const req = httpTesting.expectOne(
+        `${BASE}/api/sessions/${mockSession.id}/control/button`,
+      );
+
+      // Assert
+      expect(req.request.method).toBe('POST');
+      expect(req.request.body).toEqual({ button });
+      req.flush(mockResponse);
+    });
+  });
+
+  describe('setOrientation(sessionId, orientation)', () => {
+    it('should make a POST request to /api/sessions/:id/control/rotate with the orientation body', () => {
+      // Arrange
+      const orientation: DeviceOrientation = 'portrait';
+      const mockResponse: ApiResponse<void> = { success: true, data: undefined };
+
+      // Act
+      service.setOrientation(mockSession.id, orientation).subscribe();
+      const req = httpTesting.expectOne(
+        `${BASE}/api/sessions/${mockSession.id}/control/rotate`,
+      );
+
+      // Assert
+      expect(req.request.method).toBe('POST');
+      expect(req.request.body).toEqual({ orientation });
+      req.flush(mockResponse);
+    });
+  });
+
+  describe('shakeDevice(sessionId)', () => {
+    it('should make a POST request to /api/sessions/:id/control/shake with an empty body', () => {
+      // Arrange
+      const mockResponse: ApiResponse<void> = { success: true, data: undefined };
+
+      // Act
+      service.shakeDevice(mockSession.id).subscribe();
+      const req = httpTesting.expectOne(
+        `${BASE}/api/sessions/${mockSession.id}/control/shake`,
+      );
+
+      // Assert
+      expect(req.request.method).toBe('POST');
+      expect(req.request.body).toEqual({});
+      req.flush(mockResponse);
+    });
+  });
+
+  describe('takeScreenshot(sessionId)', () => {
+    it('should make a GET request to /api/sessions/:id/control/screenshot with responseType blob', () => {
+      // Act
+      service.takeScreenshot(mockSession.id).subscribe();
+      const req = httpTesting.expectOne(
+        `${BASE}/api/sessions/${mockSession.id}/control/screenshot`,
+      );
+
+      // Assert
+      expect(req.request.method).toBe('GET');
+      expect(req.request.responseType).toBe('blob');
+      req.flush(new Blob(['screenshot-data'], { type: 'image/png' }));
     });
   });
 });
