@@ -9,6 +9,7 @@ import {
 import { ActivatedRoute, Router } from '@angular/router';
 import { Subscription, interval } from 'rxjs';
 import { switchMap, takeWhile } from 'rxjs/operators';
+import { FormsModule } from '@angular/forms';
 
 import { ApiService } from '../../core/services/api.service';
 import { ToastService } from '../../core/services/toast.service';
@@ -40,7 +41,7 @@ const MAX_POLL_ATTEMPTS = 30;
 @Component({
   selector: 'app-simulator-session',
   standalone: true,
-  imports: [SimulatorViewerComponent],
+  imports: [SimulatorViewerComponent, FormsModule],
   templateUrl: './simulator-session.component.html',
   styleUrl: './simulator-session.component.scss',
 })
@@ -90,6 +91,15 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
 
   /** Current device orientation (client-side tracking). */
   protected readonly currentOrientation = signal<DeviceOrientation>('portrait');
+
+  /** Text entered in the clipboard input field. */
+  protected readonly clipboardText = signal<string>('');
+
+  /** Text entered in the open-url input field. */
+  protected readonly urlText = signal<string>('');
+
+  /** Text entered in the send-text input field. */
+  protected readonly sendTextValue = signal<string>('');
 
   /** File input accept attribute based on platform. */
   protected readonly acceptedFileTypes = computed<string>(() => {
@@ -312,6 +322,112 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
       error: (err: unknown) => {
         this.controlBusy.set(false);
         const message = err instanceof Error ? err.message : 'Failed to take screenshot.';
+        this.toast.error(message);
+      },
+    });
+  }
+
+  /**
+   * Set the device clipboard to the text in the clipboard input.
+   */
+  protected onSetClipboard(): void {
+    const currentSession = this.session();
+    const text = this.clipboardText();
+    if (!currentSession || !text) return;
+
+    this.controlBusy.set(true);
+    this.api.setClipboard(currentSession.id, text).subscribe({
+      next: (response) => {
+        this.controlBusy.set(false);
+        if (response.success) {
+          this.toast.success('Clipboard set on device.');
+          this.clipboardText.set('');
+        } else {
+          this.toast.error(response.error?.message ?? 'Failed to set clipboard.');
+        }
+      },
+      error: (err: unknown) => {
+        this.controlBusy.set(false);
+        const message = err instanceof Error ? err.message : 'Failed to set clipboard.';
+        this.toast.error(message);
+      },
+    });
+  }
+
+  /**
+   * Get the device clipboard and populate the clipboard input field.
+   */
+  protected onGetClipboard(): void {
+    const currentSession = this.session();
+    if (!currentSession) return;
+
+    this.controlBusy.set(true);
+    this.api.getClipboard(currentSession.id).subscribe({
+      next: (response) => {
+        this.controlBusy.set(false);
+        if (response.success && response.data) {
+          this.clipboardText.set(response.data.text);
+          this.toast.success('Clipboard read from device.');
+        } else {
+          this.toast.error(response.error?.message ?? 'Failed to get clipboard.');
+        }
+      },
+      error: (err: unknown) => {
+        this.controlBusy.set(false);
+        const message = err instanceof Error ? err.message : 'Failed to get clipboard.';
+        this.toast.error(message);
+      },
+    });
+  }
+
+  /**
+   * Open the URL from the URL input field on the device.
+   */
+  protected onOpenUrl(): void {
+    const currentSession = this.session();
+    const url = this.urlText();
+    if (!currentSession || !url.trim()) return;
+
+    this.controlBusy.set(true);
+    this.api.openUrl(currentSession.id, url.trim()).subscribe({
+      next: (response) => {
+        this.controlBusy.set(false);
+        if (response.success) {
+          this.toast.success('URL opened on device.');
+        } else {
+          this.toast.error(response.error?.message ?? 'Failed to open URL.');
+        }
+      },
+      error: (err: unknown) => {
+        this.controlBusy.set(false);
+        const message = err instanceof Error ? err.message : 'Failed to open URL.';
+        this.toast.error(message);
+      },
+    });
+  }
+
+  /**
+   * Type the text from the send-text input field into the device.
+   */
+  protected onSendText(): void {
+    const currentSession = this.session();
+    const text = this.sendTextValue();
+    if (!currentSession || !text) return;
+
+    this.controlBusy.set(true);
+    this.api.sendText(currentSession.id, text).subscribe({
+      next: (response) => {
+        this.controlBusy.set(false);
+        if (response.success) {
+          this.toast.success('Text sent to device.');
+          this.sendTextValue.set('');
+        } else {
+          this.toast.error(response.error?.message ?? 'Failed to send text.');
+        }
+      },
+      error: (err: unknown) => {
+        this.controlBusy.set(false);
+        const message = err instanceof Error ? err.message : 'Failed to send text.';
         this.toast.error(message);
       },
     });

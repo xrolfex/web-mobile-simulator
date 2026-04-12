@@ -1,7 +1,7 @@
 <div class="simulator-viewer" [class]="'platform-' + platform">
 
-  <!-- ── Toolbar ─────────────────────────────────────────────────────────── -->
-  <div class="viewer-toolbar" role="toolbar" aria-label="VNC viewer controls">
+  <!-- ── Toolbar ─────────────────────────────────────────────────────── -->
+  <div class="viewer-toolbar" role="toolbar" aria-label="Stream viewer controls">
     <div class="viewer-toolbar__status">
       <span
         class="status-dot"
@@ -12,9 +12,14 @@
         aria-hidden="true"
       ></span>
       <span class="status-label">{{ connectionState() | titlecase }}</span>
-      @if (desktopName()) {
-        <span class="desktop-name" title="Remote desktop name">
-          — {{ desktopName() }}
+      @if (connectionState() === 'connected' && fps() > 0) {
+        <span class="fps-counter" title="Frames per second">
+          {{ fps() }} FPS
+        </span>
+      }
+      @if (frameWidth() > 0) {
+        <span class="resolution" title="Device resolution">
+          {{ frameWidth() }}×{{ frameHeight() }}
         </span>
       }
     </div>
@@ -46,8 +51,14 @@
     </div>
   </div>
 
-  <!-- ── VNC Canvas Container ──────────────────────────────────────────── -->
-  <div class="vnc-container" #vncContainer aria-label="Simulator display">
+  <!-- ── Canvas Container ────────────────────────────────────────────── -->
+  <div class="canvas-container" aria-label="Simulator display">
+    <canvas
+      #displayCanvas
+      class="display-canvas"
+      (click)="onCanvasClick($event)"
+      aria-label="Simulator screen — click to interact"
+    ></canvas>
 
     @if (connectionState() === 'connecting') {
       <div class="overlay overlay--connecting" role="status" aria-live="polite">
@@ -72,6 +83,5 @@
         <button class="btn btn--retry" (click)="reconnect()">Reconnect</button>
       </div>
     }
-
   </div>
 </div>

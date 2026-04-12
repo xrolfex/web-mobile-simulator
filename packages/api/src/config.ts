@@ -17,10 +17,6 @@ export const config = {
   androidSdkRoot:
     process.env.ANDROID_SDK_ROOT || `${homedir()}/Library/Android/sdk`,
   databaseUrl: process.env.DATABASE_URL || 'file:./data/simulator.db',
-  vncProxyPortRange: {
-    start: parseInt(process.env.VNC_PROXY_PORT_RANGE_START || '6900', 10),
-    end: parseInt(process.env.VNC_PROXY_PORT_RANGE_END || '6999', 10),
-  },
 
   // --- Session concurrency ---
 

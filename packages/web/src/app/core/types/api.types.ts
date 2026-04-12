@@ -78,10 +78,8 @@ export interface Session {
   id: string;
   device: SimulatorDevice;
   status: SessionStatus;
-  /** WebSocket URL for the VNC/display connection. */
+  /** WebSocket URL for the display stream (e.g. /ws/stream/<sessionId>). */
   streamUrl?: string;
-  /** Port the VNC proxy is running on. */
-  proxyPort?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -152,6 +150,30 @@ export interface PressButtonRequest {
 /** Request body for the set-orientation endpoint. */
 export interface SetOrientationRequest {
   orientation: DeviceOrientation;
+}
+
+/** Request body for the set-clipboard endpoint. */
+export interface SetClipboardRequest {
+  /** The text to place on the device clipboard. */
+  text: string;
+}
+
+/** Response from the get-clipboard endpoint. */
+export interface GetClipboardResponse {
+  /** The current clipboard text on the device (may be empty). */
+  text: string;
+}
+
+/** Request body for the open-url endpoint. */
+export interface OpenUrlRequest {
+  /** The URL or deep-link to open on the device. */
+  url: string;
+}
+
+/** Request body for the send-text endpoint. */
+export interface SendTextRequest {
+  /** The text string to type into the currently focused field. */
+  text: string;
 }
 
 // ── List Response Shapes ──────────────────────────────────────────────────────

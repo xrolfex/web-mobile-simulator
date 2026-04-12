@@ -20,6 +20,7 @@ import type {
   DeviceOrientation,
   DeviceTypeListResponse,
   DownloadRuntimeRequest,
+  GetClipboardResponse,
   RuntimeListResponse,
   Session,
   SessionListResponse,
@@ -446,6 +447,85 @@ describe('ApiService', () => {
       expect(req.request.method).toBe('GET');
       expect(req.request.responseType).toBe('blob');
       req.flush(new Blob(['screenshot-data'], { type: 'image/png' }));
+    });
+  });
+
+  describe('setClipboard(sessionId, text)', () => {
+    it('should make a POST request to /api/sessions/:id/control/clipboard with the text body', () => {
+      // Arrange
+      const text = 'Hello clipboard';
+      const mockResponse: ApiResponse<void> = { success: true, data: undefined };
+
+      // Act
+      service.setClipboard(mockSession.id, text).subscribe();
+      const req = httpTesting.expectOne(
+        `${BASE}/api/sessions/${mockSession.id}/control/clipboard`,
+      );
+
+      // Assert
+      expect(req.request.method).toBe('POST');
+      expect(req.request.body).toEqual({ text });
+      req.flush(mockResponse);
+    });
+  });
+
+  describe('getClipboard(sessionId)', () => {
+    it('should make a GET request to /api/sessions/:id/control/clipboard and return clipboard text', () => {
+      // Arrange
+      const mockResponse: ApiResponse<GetClipboardResponse> = {
+        success: true,
+        data: { text: 'Hello World' },
+      };
+      let result: ApiResponse<GetClipboardResponse> | undefined;
+
+      // Act
+      service.getClipboard(mockSession.id).subscribe((r) => (result = r));
+      const req = httpTesting.expectOne(
+        `${BASE}/api/sessions/${mockSession.id}/control/clipboard`,
+      );
+
+      // Assert
+      expect(req.request.method).toBe('GET');
+      req.flush(mockResponse);
+      expect(result).toEqual(mockResponse);
+    });
+  });
+
+  describe('openUrl(sessionId, url)', () => {
+    it('should make a POST request to /api/sessions/:id/control/open-url with the url body', () => {
+      // Arrange
+      const url = 'https://example.com';
+      const mockResponse: ApiResponse<void> = { success: true, data: undefined };
+
+      // Act
+      service.openUrl(mockSession.id, url).subscribe();
+      const req = httpTesting.expectOne(
+        `${BASE}/api/sessions/${mockSession.id}/control/open-url`,
+      );
+
+      // Assert
+      expect(req.request.method).toBe('POST');
+      expect(req.request.body).toEqual({ url });
+      req.flush(mockResponse);
+    });
+  });
+
+  describe('sendText(sessionId, text)', () => {
+    it('should make a POST request to /api/sessions/:id/control/send-text with the text body', () => {
+      // Arrange
+      const text = 'Hello World';
+      const mockResponse: ApiResponse<void> = { success: true, data: undefined };
+
+      // Act
+      service.sendText(mockSession.id, text).subscribe();
+      const req = httpTesting.expectOne(
+        `${BASE}/api/sessions/${mockSession.id}/control/send-text`,
+      );
+
+      // Assert
+      expect(req.request.method).toBe('POST');
+      expect(req.request.body).toEqual({ text });
+      req.flush(mockResponse);
     });
   });
 });

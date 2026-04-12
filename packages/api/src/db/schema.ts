@@ -21,10 +21,10 @@ export const sessions = sqliteTable('sessions', {
   /** Full `SimulatorDevice` object serialised to a JSON string. */
   deviceJson: text('device_json').notNull(),
 
-  /** WebSocket URL for VNC/display connection (null when not yet active). */
+  /** WebSocket URL for the display stream (null when not yet active). */
   streamUrl: text('stream_url'),
 
-  /** Port the VNC proxy is running on (null when not yet active). */
+  /** Port the VNC proxy was running on — retained for schema compatibility, always null now. */
   proxyPort: integer('proxy_port'),
 
   /** iOS Simulator UDID — present only for `platform === 'ios'` sessions. */

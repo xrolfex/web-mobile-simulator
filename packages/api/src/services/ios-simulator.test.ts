@@ -9,11 +9,25 @@ vi.mock('../utils/exec.js', () => ({
   execJSON: vi.fn(),
 }));
 
+// ---------------------------------------------------------------------------
+// Mock node:child_process to allow testing setClipboard (which uses spawn)
+// ---------------------------------------------------------------------------
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...original,
+    spawn: vi.fn(),
+  };
+});
+
 import { IOSSimulatorService } from './ios-simulator.js';
 import { exec, execJSON } from '../utils/exec.js';
+import { spawn } from 'node:child_process';
 
 const mockExec = exec as ReturnType<typeof vi.fn>;
 const mockExecJSON = execJSON as ReturnType<typeof vi.fn>;
+const mockSpawn = spawn as ReturnType<typeof vi.fn>;
 
 // ---------------------------------------------------------------------------
 // Realistic sample data mirroring xcrun simctl output
@@ -840,6 +854,289 @@ describe('IOSSimulatorService', () => {
       await expect(
         service.takeScreenshot('TEST-UDID', '/tmp/screenshot.png'),
       ).rejects.toThrow('Command failed');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // setClipboard()
+  // -------------------------------------------------------------------------
+
+  describe('setClipboard(udid, text)', () => {
+    macosOnly('spawns xcrun simctl pbcopy and writes text to stdin', async () => {
+      // Arrange — assertSimctlAvailable calls exec once
+      mockExec.mockResolvedValue({ stdout: '/usr/bin/simctl\n', stderr: '' });
+
+      const mockStdin = { write: vi.fn(), end: vi.fn() };
+      const mockStderr = { on: vi.fn() };
+      const mockChild = {
+        stdin: mockStdin,
+        stderr: mockStderr,
+        on: vi.fn((event: string, cb: Function) => {
+          if (event === 'close') {
+            // Simulate successful close immediately
+            setTimeout(() => cb(0), 0);
+          }
+        }),
+      };
+      mockSpawn.mockReturnValue(mockChild);
+
+      // Act
+      await service.setClipboard('TEST-UDID', 'Clipboard text');
+
+      // Assert — spawn called with the correct command/args
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'xcrun',
+        ['simctl', 'pbcopy', 'TEST-UDID'],
+        expect.objectContaining({ stdio: ['pipe', 'ignore', 'pipe'] }),
+      );
+      // Text piped to stdin
+      expect(mockStdin.write).toHaveBeenCalledWith('Clipboard text');
+      expect(mockStdin.end).toHaveBeenCalled();
+    });
+
+    macosOnly('rejects when pbcopy exits with a non-zero code', async () => {
+      // Arrange
+      mockExec.mockResolvedValue({ stdout: '/usr/bin/simctl\n', stderr: '' });
+
+      const mockStdin = { write: vi.fn(), end: vi.fn() };
+      const mockStderr = {
+        on: vi.fn((event: string, cb: Function) => {
+          if (event === 'data') cb(Buffer.from('some stderr error'));
+        }),
+      };
+      const mockChild = {
+        stdin: mockStdin,
+        stderr: mockStderr,
+        on: vi.fn((event: string, cb: Function) => {
+          if (event === 'close') {
+            setTimeout(() => cb(1), 0);
+          }
+        }),
+      };
+      mockSpawn.mockReturnValue(mockChild);
+
+      // Act & Assert
+      await expect(service.setClipboard('TEST-UDID', 'text')).rejects.toThrow(
+        /pbcopy exited with code 1/,
+      );
+    });
+
+    macosOnly('resolves without error when text is an empty string', async () => {
+      // Arrange
+      mockExec.mockResolvedValue({ stdout: '/usr/bin/simctl\n', stderr: '' });
+
+      const mockStdin = { write: vi.fn(), end: vi.fn() };
+      const mockStderr = { on: vi.fn() };
+      const mockChild = {
+        stdin: mockStdin,
+        stderr: mockStderr,
+        on: vi.fn((event: string, cb: Function) => {
+          if (event === 'close') setTimeout(() => cb(0), 0);
+        }),
+      };
+      mockSpawn.mockReturnValue(mockChild);
+
+      // Act & Assert — empty string is a valid "clear clipboard" operation
+      await expect(service.setClipboard('TEST-UDID', '')).resolves.toBeUndefined();
+      expect(mockStdin.write).toHaveBeenCalledWith('');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // getClipboard()
+  // -------------------------------------------------------------------------
+
+  describe('getClipboard(udid)', () => {
+    macosOnly('calls xcrun simctl pbpaste with the correct UDID', async () => {
+      // Arrange — first call is assertSimctlAvailable, second is pbpaste
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockResolvedValueOnce({ stdout: 'Hello World', stderr: '' });
+
+      // Act
+      const result = await service.getClipboard('TEST-UDID');
+
+      // Assert
+      expect(result).toBe('Hello World');
+      expect(mockExec.mock.calls[1]).toEqual([
+        'xcrun',
+        ['simctl', 'pbpaste', 'TEST-UDID'],
+        expect.any(Object),
+      ]);
+    });
+
+    macosOnly('returns the stdout string unchanged (including trailing newline)', async () => {
+      // Arrange
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockResolvedValueOnce({ stdout: 'line1\nline2\n', stderr: '' });
+
+      // Act
+      const result = await service.getClipboard('TEST-UDID');
+
+      // Assert — service returns stdout as-is (callers trim if needed)
+      expect(result).toBe('line1\nline2\n');
+    });
+
+    macosOnly('returns empty string when clipboard is empty', async () => {
+      // Arrange
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+      // Act
+      const result = await service.getClipboard('TEST-UDID');
+
+      // Assert
+      expect(result).toBe('');
+    });
+
+    macosOnly('exec is called exactly twice (simctl check + pbpaste command)', async () => {
+      // Arrange
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockResolvedValueOnce({ stdout: 'some text', stderr: '' });
+
+      // Act
+      await service.getClipboard('TEST-UDID');
+
+      // Assert
+      expect(mockExec).toHaveBeenCalledTimes(2);
+    });
+
+    macosOnly('propagates exec failures as thrown errors', async () => {
+      // Arrange
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockRejectedValueOnce(new Error('pbpaste failed'));
+
+      // Act & Assert
+      await expect(service.getClipboard('TEST-UDID')).rejects.toThrow('pbpaste failed');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // openUrl()
+  // -------------------------------------------------------------------------
+
+  describe('openUrl(udid, url)', () => {
+    macosOnly('calls xcrun simctl openurl with the correct UDID and URL', async () => {
+      // Arrange
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+      // Act
+      await service.openUrl('TEST-UDID', 'https://example.com');
+
+      // Assert
+      expect(mockExec.mock.calls[1]).toEqual([
+        'xcrun',
+        ['simctl', 'openurl', 'TEST-UDID', 'https://example.com'],
+        expect.any(Object),
+      ]);
+    });
+
+    macosOnly('works with deep-link URL schemes', async () => {
+      // Arrange
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+      // Act
+      await service.openUrl('TEST-UDID', 'myapp://home');
+
+      // Assert
+      expect(mockExec.mock.calls[1]).toEqual([
+        'xcrun',
+        ['simctl', 'openurl', 'TEST-UDID', 'myapp://home'],
+        expect.any(Object),
+      ]);
+    });
+
+    macosOnly('exec is called exactly twice (simctl check + openurl command)', async () => {
+      // Arrange
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+      // Act
+      await service.openUrl('TEST-UDID', 'https://example.com');
+
+      // Assert
+      expect(mockExec).toHaveBeenCalledTimes(2);
+    });
+
+    macosOnly('propagates exec failures as thrown errors', async () => {
+      // Arrange
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockRejectedValueOnce(new Error('Command failed: xcrun simctl openurl'));
+
+      // Act & Assert
+      await expect(service.openUrl('TEST-UDID', 'https://example.com')).rejects.toThrow(
+        'Command failed',
+      );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // sendText()
+  // -------------------------------------------------------------------------
+
+  describe('sendText(udid, text)', () => {
+    macosOnly('calls xcrun simctl io type with the correct UDID and text', async () => {
+      // Arrange
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+      // Act
+      await service.sendText('TEST-UDID', 'Hello World');
+
+      // Assert
+      expect(mockExec.mock.calls[1]).toEqual([
+        'xcrun',
+        ['simctl', 'io', 'TEST-UDID', 'type', 'Hello World'],
+        expect.any(Object),
+      ]);
+    });
+
+    macosOnly('passes the text as a single argument (preserving spaces)', async () => {
+      // Arrange
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+      // Act
+      await service.sendText('TEST-UDID', 'hello world test');
+
+      // Assert — text is passed as one arg, not split on spaces
+      const secondCallArgs = mockExec.mock.calls[1]![1] as string[];
+      expect(secondCallArgs[secondCallArgs.length - 1]).toBe('hello world test');
+    });
+
+    macosOnly('exec is called exactly twice (simctl check + io type command)', async () => {
+      // Arrange
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+      // Act
+      await service.sendText('TEST-UDID', 'hello');
+
+      // Assert
+      expect(mockExec).toHaveBeenCalledTimes(2);
+    });
+
+    macosOnly('propagates exec failures as thrown errors', async () => {
+      // Arrange
+      mockExec
+        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
+        .mockRejectedValueOnce(new Error('Command failed: xcrun simctl io'));
+
+      // Act & Assert
+      await expect(service.sendText('TEST-UDID', 'hello')).rejects.toThrow('Command failed');
     });
   });
 });

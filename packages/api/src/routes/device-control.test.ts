@@ -16,6 +16,14 @@ vi.mock('../services/index.js', () => ({
     setOrientation: vi.fn(),
     shake: vi.fn(),
     takeScreenshot: vi.fn(),
+    setClipboard: vi.fn(),
+    getClipboard: vi.fn(),
+    openUrl: vi.fn(),
+    sendText: vi.fn(),
+  },
+  androidEmulatorService: {
+    openUrl: vi.fn(),
+    sendText: vi.fn(),
   },
 }));
 
@@ -26,7 +34,7 @@ vi.mock('node:fs/promises', () => ({
 }));
 
 import deviceControlRoutes from './device-control.js';
-import { sessionManagerService, iosSimulatorService } from '../services/index.js';
+import { sessionManagerService, iosSimulatorService, androidEmulatorService } from '../services/index.js';
 import { readFile, unlink } from 'node:fs/promises';
 
 // ---------------------------------------------------------------------------
@@ -38,6 +46,12 @@ const mockPressButton = vi.mocked(iosSimulatorService.pressButton);
 const mockSetOrientation = vi.mocked(iosSimulatorService.setOrientation);
 const mockShake = vi.mocked(iosSimulatorService.shake);
 const mockTakeScreenshot = vi.mocked(iosSimulatorService.takeScreenshot);
+const mockSetClipboard = vi.mocked(iosSimulatorService.setClipboard);
+const mockGetClipboard = vi.mocked(iosSimulatorService.getClipboard);
+const mockIosOpenUrl = vi.mocked(iosSimulatorService.openUrl);
+const mockIosSendText = vi.mocked(iosSimulatorService.sendText);
+const mockAndroidOpenUrl = vi.mocked(androidEmulatorService.openUrl);
+const mockAndroidSendText = vi.mocked(androidEmulatorService.sendText);
 const mockReadFile = vi.mocked(readFile);
 const mockUnlink = vi.mocked(unlink);
 
@@ -780,5 +794,707 @@ describe('device-control response envelope', () => {
     expect(json).toHaveProperty('error');
     expect(json.error).toHaveProperty('code');
     expect(json.error).toHaveProperty('message');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/sessions/:id/control/clipboard  (set clipboard — iOS only)
+// ---------------------------------------------------------------------------
+
+describe('POST /api/sessions/:id/control/clipboard', () => {
+  it('returns 404 when the session is not found', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(null);
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/nonexistent/control/clipboard',
+      payload: { text: 'hello' },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(404);
+    const json = response.json();
+    expect(json.success).toBe(false);
+    expect(json.error.code).toBe('SESSION_NOT_FOUND');
+  });
+
+  it('returns 400 when the session status is not "active"', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(inactiveSession);
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/clipboard',
+      payload: { text: 'hello' },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(400);
+    const json = response.json();
+    expect(json.success).toBe(false);
+    expect(json.error.code).toBe('SESSION_NOT_ACTIVE');
+  });
+
+  it('returns 400 with UNSUPPORTED_PLATFORM when session platform is "android"', async () => {
+    // Arrange — text validation happens first, so provide valid text
+    mockGetSession.mockReturnValue(androidSession);
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/clipboard',
+      payload: { text: 'hello' },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(400);
+    const json = response.json();
+    expect(json.success).toBe(false);
+    expect(json.error.code).toBe('UNSUPPORTED_PLATFORM');
+  });
+
+  it('returns 400 with INVALID_TEXT when text field is missing from body', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(activeIosSession);
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/clipboard',
+      payload: {},
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(400);
+    const json = response.json();
+    expect(json.success).toBe(false);
+    expect(json.error.code).toBe('INVALID_TEXT');
+  });
+
+  it('returns 400 with INVALID_TEXT when text is null', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(activeIosSession);
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/clipboard',
+      payload: { text: null },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(400);
+    const json = response.json();
+    expect(json.success).toBe(false);
+    expect(json.error.code).toBe('INVALID_TEXT');
+  });
+
+  it('returns 400 with INVALID_TEXT when text is a number', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(activeIosSession);
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/clipboard',
+      payload: { text: 42 },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(400);
+    const json = response.json();
+    expect(json.success).toBe(false);
+    expect(json.error.code).toBe('INVALID_TEXT');
+  });
+
+  it('returns 200 and calls setClipboard with correct UDID and text on success', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(activeIosSession);
+    mockSetClipboard.mockResolvedValue(undefined);
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/clipboard',
+      payload: { text: 'Hello clipboard' },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(200);
+    const json = response.json();
+    expect(json.success).toBe(true);
+    expect(json.data.success).toBe(true);
+    expect(mockSetClipboard).toHaveBeenCalledOnce();
+    expect(mockSetClipboard).toHaveBeenCalledWith('UDID-12345', 'Hello clipboard');
+  });
+
+  it('returns 200 when text is an empty string (valid edge case)', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(activeIosSession);
+    mockSetClipboard.mockResolvedValue(undefined);
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/clipboard',
+      payload: { text: '' },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert — empty string is a valid string; clipboard should be cleared
+    expect(response.statusCode).toBe(200);
+    const json = response.json();
+    expect(json.success).toBe(true);
+    expect(mockSetClipboard).toHaveBeenCalledWith('UDID-12345', '');
+  });
+
+  it('returns 502 with SIMCTL_ERROR when setClipboard throws', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(activeIosSession);
+    mockSetClipboard.mockRejectedValue(new Error('pbcopy exited with code 1'));
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/clipboard',
+      payload: { text: 'some text' },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(502);
+    const json = response.json();
+    expect(json.success).toBe(false);
+    expect(json.error.code).toBe('SIMCTL_ERROR');
+    expect(json.error.message).toContain('pbcopy exited with code 1');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/sessions/:id/control/clipboard  (get clipboard — iOS only)
+// ---------------------------------------------------------------------------
+
+describe('GET /api/sessions/:id/control/clipboard', () => {
+  it('returns 404 when the session is not found', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(null);
+
+    // Act
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/sessions/nonexistent/control/clipboard',
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(404);
+    const json = response.json();
+    expect(json.success).toBe(false);
+    expect(json.error.code).toBe('SESSION_NOT_FOUND');
+  });
+
+  it('returns 400 when the session status is not "active"', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(inactiveSession);
+
+    // Act
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/sessions/session-abc/control/clipboard',
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(400);
+    const json = response.json();
+    expect(json.error.code).toBe('SESSION_NOT_ACTIVE');
+  });
+
+  it('returns 400 with UNSUPPORTED_PLATFORM when session platform is "android"', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(androidSession);
+
+    // Act
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/sessions/session-abc/control/clipboard',
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(400);
+    const json = response.json();
+    expect(json.success).toBe(false);
+    expect(json.error.code).toBe('UNSUPPORTED_PLATFORM');
+  });
+
+  it('returns 200 with { text } payload and calls getClipboard with correct UDID', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(activeIosSession);
+    mockGetClipboard.mockResolvedValue('Hello World');
+
+    // Act
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/sessions/session-abc/control/clipboard',
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(200);
+    const json = response.json();
+    expect(json.success).toBe(true);
+    expect(json.data.text).toBe('Hello World');
+    expect(mockGetClipboard).toHaveBeenCalledOnce();
+    expect(mockGetClipboard).toHaveBeenCalledWith('UDID-12345');
+  });
+
+  it('returns 200 with empty text when clipboard is empty', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(activeIosSession);
+    mockGetClipboard.mockResolvedValue('');
+
+    // Act
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/sessions/session-abc/control/clipboard',
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(200);
+    const json = response.json();
+    expect(json.data.text).toBe('');
+  });
+
+  it('returns 502 with SIMCTL_ERROR when getClipboard throws', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(activeIosSession);
+    mockGetClipboard.mockRejectedValue(new Error('pbpaste failed'));
+
+    // Act
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/sessions/session-abc/control/clipboard',
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(502);
+    const json = response.json();
+    expect(json.success).toBe(false);
+    expect(json.error.code).toBe('SIMCTL_ERROR');
+    expect(json.error.message).toContain('pbpaste failed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/sessions/:id/control/open-url  (both platforms)
+// ---------------------------------------------------------------------------
+
+describe('POST /api/sessions/:id/control/open-url', () => {
+  it('returns 404 when the session is not found', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(null);
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/nonexistent/control/open-url',
+      payload: { url: 'https://example.com' },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(404);
+    const json = response.json();
+    expect(json.success).toBe(false);
+    expect(json.error.code).toBe('SESSION_NOT_FOUND');
+  });
+
+  it('returns 400 when the session status is not "active"', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(inactiveSession);
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/open-url',
+      payload: { url: 'https://example.com' },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(400);
+    const json = response.json();
+    expect(json.error.code).toBe('SESSION_NOT_ACTIVE');
+  });
+
+  it('returns 400 with INVALID_URL when url field is missing', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(activeIosSession);
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/open-url',
+      payload: {},
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(400);
+    const json = response.json();
+    expect(json.success).toBe(false);
+    expect(json.error.code).toBe('INVALID_URL');
+  });
+
+  it('returns 400 with INVALID_URL when url is an empty string', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(activeIosSession);
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/open-url',
+      payload: { url: '' },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(400);
+    const json = response.json();
+    expect(json.success).toBe(false);
+    expect(json.error.code).toBe('INVALID_URL');
+  });
+
+  it('returns 400 with INVALID_URL when url is whitespace only', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(activeIosSession);
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/open-url',
+      payload: { url: '   ' },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(400);
+    const json = response.json();
+    expect(json.error.code).toBe('INVALID_URL');
+  });
+
+  it('returns 400 with INVALID_URL when url is not a string', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(activeIosSession);
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/open-url',
+      payload: { url: 12345 },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(400);
+    const json = response.json();
+    expect(json.error.code).toBe('INVALID_URL');
+  });
+
+  it('returns 200 and calls iosSimulatorService.openUrl with correct args for iOS session', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(activeIosSession);
+    mockIosOpenUrl.mockResolvedValue(undefined);
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/open-url',
+      payload: { url: 'https://example.com' },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(200);
+    const json = response.json();
+    expect(json.success).toBe(true);
+    expect(json.data.success).toBe(true);
+    expect(mockIosOpenUrl).toHaveBeenCalledOnce();
+    expect(mockIosOpenUrl).toHaveBeenCalledWith('UDID-12345', 'https://example.com');
+    expect(mockAndroidOpenUrl).not.toHaveBeenCalled();
+  });
+
+  it('returns 200 and calls androidEmulatorService.openUrl with correct args for Android session', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(androidSession);
+    mockAndroidOpenUrl.mockResolvedValue(undefined);
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/open-url',
+      payload: { url: 'https://example.com' },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(200);
+    const json = response.json();
+    expect(json.success).toBe(true);
+    expect(mockAndroidOpenUrl).toHaveBeenCalledOnce();
+    expect(mockAndroidOpenUrl).toHaveBeenCalledWith('test_avd', 'https://example.com');
+    expect(mockIosOpenUrl).not.toHaveBeenCalled();
+  });
+
+  it('trims leading/trailing whitespace from url before passing to service', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(activeIosSession);
+    mockIosOpenUrl.mockResolvedValue(undefined);
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/open-url',
+      payload: { url: '  https://example.com  ' },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(200);
+    expect(mockIosOpenUrl).toHaveBeenCalledWith('UDID-12345', 'https://example.com');
+  });
+
+  it('returns 502 with COMMAND_ERROR when iosSimulatorService.openUrl throws', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(activeIosSession);
+    mockIosOpenUrl.mockRejectedValue(new Error('simctl openurl failed'));
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/open-url',
+      payload: { url: 'https://example.com' },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(502);
+    const json = response.json();
+    expect(json.success).toBe(false);
+    expect(json.error.code).toBe('COMMAND_ERROR');
+    expect(json.error.message).toContain('simctl openurl failed');
+  });
+
+  it('returns 502 with COMMAND_ERROR when androidEmulatorService.openUrl throws', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(androidSession);
+    mockAndroidOpenUrl.mockRejectedValue(new Error('emulator is not running'));
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/open-url',
+      payload: { url: 'https://example.com' },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(502);
+    const json = response.json();
+    expect(json.error.code).toBe('COMMAND_ERROR');
+    expect(json.error.message).toContain('emulator is not running');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/sessions/:id/control/send-text  (both platforms)
+// ---------------------------------------------------------------------------
+
+describe('POST /api/sessions/:id/control/send-text', () => {
+  it('returns 404 when the session is not found', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(null);
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/nonexistent/control/send-text',
+      payload: { text: 'hello' },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(404);
+    const json = response.json();
+    expect(json.success).toBe(false);
+    expect(json.error.code).toBe('SESSION_NOT_FOUND');
+  });
+
+  it('returns 400 when the session status is not "active"', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(inactiveSession);
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/send-text',
+      payload: { text: 'hello' },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(400);
+    const json = response.json();
+    expect(json.error.code).toBe('SESSION_NOT_ACTIVE');
+  });
+
+  it('returns 400 with INVALID_TEXT when text field is missing', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(activeIosSession);
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/send-text',
+      payload: {},
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(400);
+    const json = response.json();
+    expect(json.success).toBe(false);
+    expect(json.error.code).toBe('INVALID_TEXT');
+  });
+
+  it('returns 400 with INVALID_TEXT when text is not a string', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(activeIosSession);
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/send-text',
+      payload: { text: 999 },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(400);
+    const json = response.json();
+    expect(json.error.code).toBe('INVALID_TEXT');
+  });
+
+  it('returns 200 and calls iosSimulatorService.sendText with correct args for iOS session', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(activeIosSession);
+    mockIosSendText.mockResolvedValue(undefined);
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/send-text',
+      payload: { text: 'Hello World' },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(200);
+    const json = response.json();
+    expect(json.success).toBe(true);
+    expect(json.data.success).toBe(true);
+    expect(mockIosSendText).toHaveBeenCalledOnce();
+    expect(mockIosSendText).toHaveBeenCalledWith('UDID-12345', 'Hello World');
+    expect(mockAndroidSendText).not.toHaveBeenCalled();
+  });
+
+  it('returns 200 and calls androidEmulatorService.sendText with correct args for Android session', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(androidSession);
+    mockAndroidSendText.mockResolvedValue(undefined);
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/send-text',
+      payload: { text: 'Hello Android' },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(200);
+    const json = response.json();
+    expect(json.success).toBe(true);
+    expect(mockAndroidSendText).toHaveBeenCalledOnce();
+    expect(mockAndroidSendText).toHaveBeenCalledWith('test_avd', 'Hello Android');
+    expect(mockIosSendText).not.toHaveBeenCalled();
+  });
+
+  it('returns 200 when text is an empty string (valid edge case per spec)', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(activeIosSession);
+    mockIosSendText.mockResolvedValue(undefined);
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/send-text',
+      payload: { text: '' },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert — empty string is valid; route spec explicitly allows it
+    expect(response.statusCode).toBe(200);
+    const json = response.json();
+    expect(json.success).toBe(true);
+    expect(mockIosSendText).toHaveBeenCalledWith('UDID-12345', '');
+  });
+
+  it('returns 502 with COMMAND_ERROR when iosSimulatorService.sendText throws', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(activeIosSession);
+    mockIosSendText.mockRejectedValue(new Error('simctl io type failed'));
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/send-text',
+      payload: { text: 'hello' },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(502);
+    const json = response.json();
+    expect(json.success).toBe(false);
+    expect(json.error.code).toBe('COMMAND_ERROR');
+    expect(json.error.message).toContain('simctl io type failed');
+  });
+
+  it('returns 502 with COMMAND_ERROR when androidEmulatorService.sendText throws', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(androidSession);
+    mockAndroidSendText.mockRejectedValue(new Error('adb input text failed'));
+
+    // Act
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sessions/session-abc/control/send-text',
+      payload: { text: 'hello' },
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Assert
+    expect(response.statusCode).toBe(502);
+    const json = response.json();
+    expect(json.error.code).toBe('COMMAND_ERROR');
+    expect(json.error.message).toContain('adb input text failed');
   });
 });

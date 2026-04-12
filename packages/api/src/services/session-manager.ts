@@ -16,7 +16,7 @@ import {
 import { config } from '../config.js';
 import { iosSimulatorService } from './ios-simulator.js';
 import { androidEmulatorService } from './android-emulator.js';
-import { vncProxyService } from './vnc-proxy.js';
+import { screenCaptureService } from './screen-capture.js';
 import { eventBusService } from './event-bus.js';
 import { initializeDatabase } from '../db/migrate.js';
 import { sessionRepository } from '../db/session-repository.js';
@@ -123,7 +123,7 @@ export class SessionCapacityError extends Error {
 
 /**
  * Orchestrates the full lifecycle of a simulator session:
- *   create device → boot → start VNC proxy → serve stream → shutdown → cleanup.
+ *   create device → boot → start screen capture → serve stream → shutdown → cleanup.
  *
  * Sessions are stored in an in-memory `Map`.  A periodic timer terminates
  * sessions that exceed `SESSION_TIMEOUT_MS` (30 minutes).
@@ -196,8 +196,8 @@ export class SessionManagerService {
           const internal = stored as InternalSession;
 
           // Sessions that were 'creating', 'active', or 'terminating' before
-          // the crash have lost their VNC proxies and device state — mark them
-          // as 'error'.
+          // the crash have lost their screen capture and device state — mark
+          // them as 'error'.
           if (
             internal.status === 'creating' ||
             internal.status === 'active' ||
@@ -209,7 +209,7 @@ export class SessionManagerService {
             this.persistSession(internal, 'update');
             log(
               `Rehydrated session ${internal.id} (was ${previousStatus}) — marked as error ` +
-              `(VNC proxy and device state lost after restart)`,
+              `(screen capture and device state lost after restart)`,
             );
           } else {
             log(`Rehydrated session ${internal.id} (status=${internal.status}) from database`);
@@ -337,11 +337,8 @@ export class SessionManagerService {
     this.persistSession(session, 'update');
     this.emitStatusChange(session, previousStatus);
 
-    // Stop the VNC proxy first — this is safe to call even if no proxy was
-    // started (it silently no-ops).
-    await vncProxyService.stopProxy(id).catch((err: unknown) => {
-      warn(`Failed to stop VNC proxy for session ${id}: ${String(err)}`);
-    });
+    // Stop screen capture first — safe to call even if no capture was started.
+    screenCaptureService.stopCapture(id);
 
     // Shut down and delete the platform device.
     await this.teardownDevice(session).catch((err: unknown) => {
@@ -387,6 +384,10 @@ export class SessionManagerService {
         }),
       ),
     );
+
+    // Stop any remaining screen captures (e.g. captures whose session was
+    // not in the active list due to a state mismatch).
+    screenCaptureService.cleanup();
 
     log(`Cleanup complete. Terminated ${activeIds.length} session(s).`);
   }
@@ -615,28 +616,14 @@ export class SessionManagerService {
     await iosSimulatorService.bootDevice(udid);
     session.device = { ...session.device, state: 'booted' };
 
-    // Step 3 — Discover the VNC port.
-    log(`[${sessionId}] Discovering VNC port for ${udid}…`);
-    const vncPort = await iosSimulatorService.getVNCPort(udid);
-    if (vncPort === null) {
-      throw new Error(
-        `Could not discover VNC port for iOS Simulator ${udid}. ` +
-          `Ensure the device is booted and the Simulator app is running.`,
-      );
-    }
+    // Step 3 — Start screen capture.
+    log(`[${sessionId}] Starting screen capture for iOS Simulator ${udid}…`);
+    screenCaptureService.startCapture(sessionId, 'ios', udid);
+    const wsUrl = `/ws/stream/${sessionId}`;
 
-    // Step 4 — Start the VNC WebSocket proxy.
-    log(`[${sessionId}] Starting VNC proxy on VNC port ${vncPort}…`);
-    const { wsPort, wsUrl } = await vncProxyService.startProxy(
-      sessionId,
-      'localhost',
-      vncPort,
-    );
-
-    // Step 5 — Finalise and activate the session.
+    // Step 4 — Finalise and activate the session.
     session.status = 'active';
     session.streamUrl = wsUrl;
-    session.proxyPort = wsPort;
     session.updatedAt = now();
     this.persistSession(session, 'update');
 
@@ -702,24 +689,17 @@ export class SessionManagerService {
     session.device = { ...session.device, state: 'booted' };
     log(`[${sessionId}] Emulator booted, ADB port: ${adbPort}`);
 
-    // Step 3 — Start the VNC proxy.
-    // Android emulator exposes a VNC server on port 5554+1 = 5555 by
-    // convention, but the display-streaming approach mirrors iOS via VNC.
-    // The ADB port is the emulator's console port (e.g. 5554); the display
-    // stream typically lives at adbPort+1.  Use the discovered adbPort + 1
-    // as the VNC target until a dedicated screen-capture pipeline is wired in.
-    const androidVncPort = adbPort + 1;
-    log(`[${sessionId}] Starting VNC proxy targeting Android display port ${androidVncPort}…`);
-    const { wsPort, wsUrl } = await vncProxyService.startProxy(
-      sessionId,
-      'localhost',
-      androidVncPort,
-    );
+    // Step 3 — Start screen capture.
+    // For Android, the device ID for ADB is the serial like "emulator-5554".
+    // The ADB serial is derived from the console port: "emulator-<adbPort>".
+    const androidSerial = `emulator-${adbPort}`;
+    log(`[${sessionId}] Starting screen capture for Android emulator ${androidSerial}…`);
+    screenCaptureService.startCapture(sessionId, 'android', androidSerial);
+    const wsUrl = `/ws/stream/${sessionId}`;
 
     // Step 4 — Finalise and activate the session.
     session.status = 'active';
     session.streamUrl = wsUrl;
-    session.proxyPort = wsPort;
     session.updatedAt = now();
     this.persistSession(session, 'update');
 
@@ -821,7 +801,7 @@ export class SessionManagerService {
 
   /**
    * Best-effort cleanup of resources created during a failed `createSession`
-   * call.  Stops the VNC proxy and tears down any partially created device.
+   * call.  Stops screen capture and tears down any partially created device.
    * All errors are swallowed so the original creation error can propagate.
    *
    * @param session - The failed session to clean up.
@@ -829,13 +809,8 @@ export class SessionManagerService {
   private async cleanupFailedSession(session: InternalSession): Promise<void> {
     log(`[${session.id}] Cleaning up resources from failed session creation…`);
 
-    // Stop the VNC proxy if it was started before the failure.
-    await vncProxyService.stopProxy(session.id).catch((err: unknown) => {
-      warn(
-        `[${session.id}] Could not stop VNC proxy during failed-session cleanup: ` +
-          String(err),
-      );
-    });
+    // Stop screen capture if it was started before the failure.
+    screenCaptureService.stopCapture(session.id);
 
     // Tear down any partially created device.
     await this.teardownDevice(session).catch((err: unknown) => {

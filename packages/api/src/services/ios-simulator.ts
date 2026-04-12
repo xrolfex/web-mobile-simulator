@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import type {
   DeviceType,
   DeviceState,
@@ -416,73 +417,6 @@ export class IOSSimulatorService {
   }
 
   // -------------------------------------------------------------------------
-  // VNC port discovery
-  // -------------------------------------------------------------------------
-
-  /**
-   * Discover the VNC port that a booted iOS Simulator is listening on.
-   *
-   * The Simulator app opens a VNC server when a device is booted.  We discover
-   * the port by:
-   *   1. Using `lsof -iTCP -sTCP:LISTEN -P` to list all TCP listeners.
-   *   2. Filtering lines that reference the Simulator process and the
-   *      well-known VNC port range (5900–5999).
-   *   3. Falling back to port 5900 (the default VNC port) if no matching
-   *      listener is found.
-   *
-   * Returns `null` if the device is not booted or no VNC listener is detected.
-   *
-   * @param udid - The UDID of the (booted) device.
-   * @returns The VNC TCP port number, or `null` if undiscoverable.
-   */
-  async getVNCPort(udid: string): Promise<number | null> {
-    log(`Discovering VNC port for device: ${udid}`);
-
-    // Confirm the device is actually booted before searching.
-    const state = await this.getDeviceState(udid);
-    if (state !== 'booted') {
-      warn(`getVNCPort: device ${udid} is not booted (state="${state}") — returning null`);
-      return null;
-    }
-
-    try {
-      // List all TCP listeners.  We avoid the shell so we use execFile directly
-      // via our exec helper (lsof is at a well-known path on macOS).
-      const { stdout } = await exec('/usr/sbin/lsof', [
-        '-iTCP',
-        '-sTCP:LISTEN',
-        '-P',        // numeric ports (no service name substitution)
-        '-n',        // numeric hosts
-      ]);
-
-      // A typical matching line looks like:
-      //   Simulator  12345  eric  …  TCP  *:5900 (LISTEN)
-      //   Simulator  12345  eric  …  TCP  127.0.0.1:5901 (LISTEN)
-      const vncPortPattern = /\bSimulator\b.*?:(\d+)\s*\(LISTEN\)/i;
-      const vncRangeMin = 5900;
-      const vncRangeMax = 5999;
-
-      for (const line of stdout.split('\n')) {
-        const match = vncPortPattern.exec(line);
-        if (!match) continue;
-
-        const port = parseInt(match[1]!, 10);
-        if (port >= vncRangeMin && port <= vncRangeMax) {
-          log(`Found VNC port ${port} for device ${udid}`);
-          return port;
-        }
-      }
-
-      // No listener found in the VNC range.
-      log(`No VNC listener detected in range ${vncRangeMin}–${vncRangeMax} — returning null`);
-      return null;
-    } catch (error: unknown) {
-      warn(`getVNCPort: lsof failed — ${String(error)}`);
-      return null;
-    }
-  }
-
-  // -------------------------------------------------------------------------
   // Runtime download
   // -------------------------------------------------------------------------
 
@@ -642,6 +576,109 @@ export class IOSSimulatorService {
       XCRUN_EXEC_OPTIONS,
     );
     log(`Screenshot saved: ${outputPath}`);
+  }
+
+  /**
+   * Set the device clipboard content.
+   * Uses: `xcrun simctl pbcopy <udid>` with text piped to stdin.
+   *
+   * @param udid - The device UDID.
+   * @param text - The text to place on the clipboard.
+   */
+  async setClipboard(udid: string, text: string): Promise<void> {
+    log(`Setting clipboard on device ${udid} (${text.length} chars)`);
+    await this.assertSimctlAvailable();
+
+    // pbcopy reads from stdin, so we spawn the process and write to its stdin
+    return new Promise<void>((resolve, reject) => {
+      const child = spawn(SIMCTL, ['simctl', 'pbcopy', udid], {
+        stdio: ['pipe', 'ignore', 'pipe'],
+        env: {
+          ...process.env,
+          DEVELOPER_DIR: `${config.xcodePath}/Contents/Developer`,
+        },
+      });
+
+      let stderr = '';
+      child.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+
+      child.on('close', (code) => {
+        if (code === 0) {
+          log(`Clipboard set on device ${udid}`);
+          resolve();
+        } else {
+          reject(new Error(`simctl pbcopy exited with code ${code}: ${stderr.trim()}`));
+        }
+      });
+
+      child.on('error', (err) => reject(err));
+
+      child.stdin?.write(text);
+      child.stdin?.end();
+    });
+  }
+
+  /**
+   * Get the device clipboard content.
+   * Uses: `xcrun simctl pbpaste <udid>`
+   *
+   * @param udid - The device UDID.
+   * @returns The clipboard text content.
+   */
+  async getClipboard(udid: string): Promise<string> {
+    log(`Getting clipboard from device ${udid}`);
+    await this.assertSimctlAvailable();
+
+    const { stdout } = await exec(
+      SIMCTL,
+      ['simctl', 'pbpaste', udid],
+      XCRUN_EXEC_OPTIONS,
+    );
+    log(`Clipboard read from device ${udid}: ${stdout.length} chars`);
+    return stdout;
+  }
+
+  /**
+   * Open a URL or deep-link on the device.
+   * Uses: `xcrun simctl openurl <udid> <url>`
+   *
+   * @param udid - The device UDID.
+   * @param url  - The URL or deep-link scheme to open.
+   */
+  async openUrl(udid: string, url: string): Promise<void> {
+    log(`Opening URL on device ${udid}: ${url}`);
+    await this.assertSimctlAvailable();
+
+    await exec(
+      SIMCTL,
+      ['simctl', 'openurl', udid, url],
+      XCRUN_EXEC_OPTIONS,
+    );
+    log(`URL opened on device ${udid}`);
+  }
+
+  /**
+   * Type text into the currently focused text field on the device.
+   * Uses: `xcrun simctl io <udid> type <text>`
+   *
+   * NOTE: This requires Xcode 15+ and only works when a text field is focused.
+   * If no text field is focused, simctl may fail silently or error.
+   *
+   * @param udid - The device UDID.
+   * @param text - The text string to type.
+   */
+  async sendText(udid: string, text: string): Promise<void> {
+    log(`Sending text to device ${udid}: "${text.substring(0, 50)}${text.length > 50 ? '…' : ''}"`);
+    await this.assertSimctlAvailable();
+
+    // simctl io type expects the text as trailing arguments.
+    // We pass it as a single argument — simctl handles spaces correctly.
+    await exec(
+      SIMCTL,
+      ['simctl', 'io', udid, 'type', text],
+      XCRUN_EXEC_OPTIONS,
+    );
+    log(`Text sent to device ${udid}`);
   }
 
   // -------------------------------------------------------------------------

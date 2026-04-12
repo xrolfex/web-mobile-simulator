@@ -188,6 +188,91 @@
       </div>
     }
 
+    <!-- ── Quick Actions (Clipboard / URL / Text) ───────────────────── -->
+    @if (isReady()) {
+      <div class="controls-section">
+        <h3 class="controls-section__title">Quick Actions</h3>
+
+        <!-- Clipboard (iOS only) -->
+        @if (session()!.device.platform === 'ios') {
+          <div class="quick-action">
+            <label class="quick-action__label">📋 Clipboard</label>
+            <div class="quick-action__row">
+              <input
+                type="text"
+                class="quick-action__input"
+                placeholder="Text to paste…"
+                [(ngModel)]="clipboardText"
+                [disabled]="controlBusy()"
+                aria-label="Clipboard text"
+                (keydown.enter)="onSetClipboard()"
+              />
+              <button
+                class="quick-action__btn"
+                (click)="onSetClipboard()"
+                [disabled]="controlBusy() || !clipboardText()"
+                title="Set device clipboard"
+                aria-label="Set clipboard on device"
+              >Paste</button>
+              <button
+                class="quick-action__btn quick-action__btn--secondary"
+                (click)="onGetClipboard()"
+                [disabled]="controlBusy()"
+                title="Read device clipboard"
+                aria-label="Read clipboard from device"
+              >Read</button>
+            </div>
+          </div>
+        }
+
+        <!-- Open URL (both platforms) -->
+        <div class="quick-action">
+          <label class="quick-action__label">🔗 Open URL</label>
+          <div class="quick-action__row">
+            <input
+              type="url"
+              class="quick-action__input"
+              placeholder="https:// or deep-link…"
+              [(ngModel)]="urlText"
+              [disabled]="controlBusy()"
+              aria-label="URL to open"
+              (keydown.enter)="onOpenUrl()"
+            />
+            <button
+              class="quick-action__btn"
+              (click)="onOpenUrl()"
+              [disabled]="controlBusy() || !urlText()"
+              title="Open URL on device"
+              aria-label="Open URL on device"
+            >Open</button>
+          </div>
+        </div>
+
+        <!-- Send Text (both platforms) -->
+        <div class="quick-action">
+          <label class="quick-action__label">⌨️ Send Text</label>
+          <div class="quick-action__row">
+            <input
+              type="text"
+              class="quick-action__input"
+              placeholder="Text to type…"
+              [(ngModel)]="sendTextValue"
+              [disabled]="controlBusy()"
+              aria-label="Text to type on device"
+              (keydown.enter)="onSendText()"
+            />
+            <button
+              class="quick-action__btn"
+              (click)="onSendText()"
+              [disabled]="controlBusy() || !sendTextValue()"
+              title="Type text on device"
+              aria-label="Type text on device"
+            >Type</button>
+          </div>
+        </div>
+      </div>
+    }
+
     <!-- Stop session button -->
     <div class="session-sidebar__actions">
       <button

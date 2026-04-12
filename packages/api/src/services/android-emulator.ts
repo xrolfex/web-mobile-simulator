@@ -587,6 +587,95 @@ export class AndroidEmulatorService {
   }
 
   /**
+   * Open a URL or deep-link on the Android emulator via ADB.
+   * Uses: `adb -s emulator-<port> shell am start -a android.intent.action.VIEW -d <url>`
+   *
+   * @param avdName - Name of the running AVD.
+   * @param url     - The URL or deep-link to open.
+   * @throws If the emulator is not running or the command fails.
+   */
+  async openUrl(avdName: string, url: string): Promise<void> {
+    this.assertSdkInstalled();
+    const adbPort = await this.getAdbPort(avdName);
+    if (adbPort === null) {
+      throw new Error(`Cannot open URL: emulator "${avdName}" is not running.`);
+    }
+    const serial = `emulator-${adbPort}`;
+    await exec(ADB, ['-s', serial, 'shell', 'am', 'start', '-a', 'android.intent.action.VIEW', '-d', url]);
+  }
+
+  /**
+   * Type text into the currently focused text field on the Android emulator via ADB.
+   * Uses: `adb -s emulator-<port> shell input text <escapedText>`
+   *
+   * Note: ADB `input text` has limitations:
+   * - Spaces must be replaced with `%s`
+   * - Special characters need escaping
+   * - Unicode support is limited
+   *
+   * @param avdName - Name of the running AVD.
+   * @param text    - The text string to type.
+   * @throws If the emulator is not running or the command fails.
+   */
+  async sendText(avdName: string, text: string): Promise<void> {
+    this.assertSdkInstalled();
+    const adbPort = await this.getAdbPort(avdName);
+    if (adbPort === null) {
+      throw new Error(`Cannot send text: emulator "${avdName}" is not running.`);
+    }
+    const serial = `emulator-${adbPort}`;
+    // ADB input text requires spaces to be encoded as %s
+    // and some special characters need shell escaping
+    const escapedText = text.replace(/ /g, '%s');
+    await exec(ADB, ['-s', serial, 'shell', 'input', 'text', escapedText]);
+  }
+
+  /**
+   * Send a tap (touch) event at the given pixel coordinates on the Android emulator.
+   * Uses: `adb -s emulator-<port> shell input tap <x> <y>`
+   *
+   * @param avdName - Name of the running AVD.
+   * @param x       - X pixel coordinate on the device screen.
+   * @param y       - Y pixel coordinate on the device screen.
+   * @throws If the emulator is not running or the command fails.
+   */
+  async sendTap(avdName: string, x: number, y: number): Promise<void> {
+    this.assertSdkInstalled();
+    const adbPort = await this.getAdbPort(avdName);
+    if (adbPort === null) {
+      throw new Error(`Cannot send tap: emulator "${avdName}" is not running.`);
+    }
+    const serial = `emulator-${adbPort}`;
+    await exec(ADB, ['-s', serial, 'shell', 'input', 'tap', String(Math.round(x)), String(Math.round(y))]);
+  }
+
+  /**
+   * Send a swipe gesture from one point to another on the Android emulator.
+   * Uses: `adb -s emulator-<port> shell input swipe <x1> <y1> <x2> <y2> <durationMs>`
+   *
+   * @param avdName    - Name of the running AVD.
+   * @param x1         - Starting X pixel coordinate.
+   * @param y1         - Starting Y pixel coordinate.
+   * @param x2         - Ending X pixel coordinate.
+   * @param y2         - Ending Y pixel coordinate.
+   * @param durationMs - Duration of the swipe in milliseconds (default 300).
+   * @throws If the emulator is not running or the command fails.
+   */
+  async sendSwipe(avdName: string, x1: number, y1: number, x2: number, y2: number, durationMs: number = 300): Promise<void> {
+    this.assertSdkInstalled();
+    const adbPort = await this.getAdbPort(avdName);
+    if (adbPort === null) {
+      throw new Error(`Cannot send swipe: emulator "${avdName}" is not running.`);
+    }
+    const serial = `emulator-${adbPort}`;
+    await exec(ADB, ['-s', serial, 'shell', 'input', 'swipe',
+      String(Math.round(x1)), String(Math.round(y1)),
+      String(Math.round(x2)), String(Math.round(y2)),
+      String(Math.round(durationMs)),
+    ]);
+  }
+
+  /**
    * Install an Android system image via `sdkmanager`.
    * SDK licenses are accepted automatically by piping `y\n` to stdin.
    *

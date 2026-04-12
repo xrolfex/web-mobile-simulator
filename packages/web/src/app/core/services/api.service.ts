@@ -9,6 +9,7 @@ import {
   DeviceOrientation,
   DeviceTypeListResponse,
   DownloadRuntimeRequest,
+  GetClipboardResponse,
   Platform,
   RuntimeListResponse,
   Session,
@@ -145,6 +146,56 @@ export class ApiService {
     return this.http.get(
       `${this.baseUrl}/api/sessions/${sessionId}/control/screenshot`,
       { responseType: 'blob' },
+    );
+  }
+
+  /**
+   * Set clipboard text on the device.
+   * POST /api/sessions/:id/control/clipboard
+   * @param sessionId The session UUID.
+   * @param text      The text to place on the clipboard.
+   */
+  setClipboard(sessionId: string, text: string) {
+    return this.http.post<ApiResponse<void>>(
+      `${this.baseUrl}/api/sessions/${sessionId}/control/clipboard`,
+      { text },
+    );
+  }
+
+  /**
+   * Get clipboard text from the device.
+   * GET /api/sessions/:id/control/clipboard
+   * @param sessionId The session UUID.
+   */
+  getClipboard(sessionId: string) {
+    return this.http.get<ApiResponse<GetClipboardResponse>>(
+      `${this.baseUrl}/api/sessions/${sessionId}/control/clipboard`,
+    );
+  }
+
+  /**
+   * Open a URL or deep-link on the device.
+   * POST /api/sessions/:id/control/open-url
+   * @param sessionId The session UUID.
+   * @param url       The URL to open.
+   */
+  openUrl(sessionId: string, url: string) {
+    return this.http.post<ApiResponse<void>>(
+      `${this.baseUrl}/api/sessions/${sessionId}/control/open-url`,
+      { url },
+    );
+  }
+
+  /**
+   * Type text into the currently focused field on the device.
+   * POST /api/sessions/:id/control/send-text
+   * @param sessionId The session UUID.
+   * @param text      The text to type.
+   */
+  sendText(sessionId: string, text: string) {
+    return this.http.post<ApiResponse<void>>(
+      `${this.baseUrl}/api/sessions/${sessionId}/control/send-text`,
+      { text },
     );
   }
 

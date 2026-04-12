@@ -4,7 +4,7 @@ import multipart from '@fastify/multipart';
 import websocket from '@fastify/websocket';
 import { config } from './config.js';
 import { registerRoutes } from './routes/index.js';
-import { sessionManagerService, vncProxyService } from './services/index.js';
+import { sessionManagerService } from './services/index.js';
 
 /**
  * Builds and configures the Fastify application instance.
@@ -54,10 +54,9 @@ async function start(): Promise<void> {
   async function shutdown(signal: string): Promise<void> {
     fastify.log.info(`Received ${signal} — shutting down gracefully…`);
     try {
-      // Terminate all active simulator sessions and stop VNC proxies before
-      // closing the HTTP server so resources are released cleanly.
+      // Terminate all active simulator sessions before closing the HTTP server
+      // so resources are released cleanly.
       await sessionManagerService.cleanup();
-      await vncProxyService.cleanup();
       await fastify.close();
       fastify.log.info('Server closed. Goodbye.');
       process.exit(0);

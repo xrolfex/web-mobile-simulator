@@ -2,11 +2,15 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type {
   ApiResponse,
   DeviceOrientation,
+  GetClipboardResponse,
+  OpenUrlRequest,
   PressButtonRequest,
+  SendTextRequest,
+  SetClipboardRequest,
   SetOrientationRequest,
   SimulatorButton,
 } from '@web-mobile-simulator/shared';
-import { sessionManagerService, iosSimulatorService } from '../services/index.js';
+import { sessionManagerService, iosSimulatorService, androidEmulatorService } from '../services/index.js';
 import { readFile, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -57,6 +61,24 @@ type SetOrientationRequestType = FastifyRequest<{
 
 /** Fastify request shape for routes with only a `:id` path param. */
 type SessionIdParamRequest = FastifyRequest<{ Params: { id: string } }>;
+
+/** Fastify request shape for clipboard set endpoint. */
+type SetClipboardRequestType = FastifyRequest<{
+  Params: { id: string };
+  Body: SetClipboardRequest;
+}>;
+
+/** Fastify request shape for open-url endpoint. */
+type OpenUrlRequestType = FastifyRequest<{
+  Params: { id: string };
+  Body: OpenUrlRequest;
+}>;
+
+/** Fastify request shape for send-text endpoint. */
+type SendTextRequestType = FastifyRequest<{
+  Params: { id: string };
+  Body: SendTextRequest;
+}>;
 
 // ---------------------------------------------------------------------------
 // Valid value sets
@@ -118,6 +140,40 @@ async function resolveIosSession(
   }
 
   return session.device.platformDeviceId;
+}
+
+/**
+ * Look up a session and verify it is active.
+ * Returns the session on success, or sends an error reply and returns `null`.
+ *
+ * @param id    - Session UUID from the route param.
+ * @param reply - The Fastify reply instance.
+ * @returns The session, or `null` if a response has already been sent.
+ */
+async function resolveActiveSession(
+  id: string,
+  reply: FastifyReply,
+): Promise<import('@web-mobile-simulator/shared').Session | null> {
+  const session = sessionManagerService.getSession(id);
+
+  if (session === null) {
+    await reply.code(404).send(
+      errorResponse('SESSION_NOT_FOUND', `Session "${id}" not found.`),
+    );
+    return null;
+  }
+
+  if (session.status !== 'active') {
+    await reply.code(400).send(
+      errorResponse(
+        'SESSION_NOT_ACTIVE',
+        `Session is "${session.status}", not active.`,
+      ),
+    );
+    return null;
+  }
+
+  return session;
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +349,162 @@ const deviceControlRoutes: FastifyPluginAsync = async (fastify) => {
         await unlink(tempPath).catch(() => {
           // Ignore cleanup errors — file may not exist if simctl failed before writing.
         });
+      }
+    },
+  );
+
+  // ── POST /api/sessions/:id/control/clipboard ───────────────────────────────
+
+  /**
+   * Set the clipboard text on the session's iOS simulator.
+   *
+   * Responds with:
+   * - 200 OK           — clipboard set successfully
+   * - 400 Bad Request  — missing/invalid text, session not active, or non-iOS platform
+   * - 404 Not Found    — session does not exist
+   * - 502 Bad Gateway  — simctl command failed
+   */
+  fastify.post(
+    '/api/sessions/:id/control/clipboard',
+    async (request: SetClipboardRequestType, reply: FastifyReply) => {
+      const { id } = request.params;
+      const { text } = (request.body ?? {}) as Partial<SetClipboardRequest>;
+
+      if (text === undefined || text === null || typeof text !== 'string') {
+        return reply.code(400).send(
+          errorResponse('INVALID_TEXT', '"text" is required and must be a string.'),
+        );
+      }
+
+      const udid = await resolveIosSession(id, reply);
+      if (udid === null) return;
+
+      try {
+        await iosSimulatorService.setClipboard(udid, text);
+        return reply.code(200).send(successResponse({ success: true }));
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : 'Failed to set clipboard.';
+        return reply.code(502).send(
+          errorResponse('SIMCTL_ERROR', message, String(error)),
+        );
+      }
+    },
+  );
+
+  // ── GET /api/sessions/:id/control/clipboard ────────────────────────────────
+
+  /**
+   * Get the clipboard text from the session's iOS simulator.
+   *
+   * Responds with:
+   * - 200 OK           — `{ text: string }` payload
+   * - 400 Bad Request  — session not active or non-iOS platform
+   * - 404 Not Found    — session does not exist
+   * - 502 Bad Gateway  — simctl command failed
+   */
+  fastify.get(
+    '/api/sessions/:id/control/clipboard',
+    async (request: SessionIdParamRequest, reply: FastifyReply) => {
+      const { id } = request.params;
+
+      const udid = await resolveIosSession(id, reply);
+      if (udid === null) return;
+
+      try {
+        const text = await iosSimulatorService.getClipboard(udid);
+        return reply.code(200).send(successResponse<GetClipboardResponse>({ text }));
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : 'Failed to get clipboard.';
+        return reply.code(502).send(
+          errorResponse('SIMCTL_ERROR', message, String(error)),
+        );
+      }
+    },
+  );
+
+  // ── POST /api/sessions/:id/control/open-url ────────────────────────────────
+
+  /**
+   * Open a URL or deep-link on the session's device (iOS and Android supported).
+   *
+   * Responds with:
+   * - 200 OK           — URL opened successfully
+   * - 400 Bad Request  — missing/invalid URL, session not active
+   * - 404 Not Found    — session does not exist
+   * - 502 Bad Gateway  — command failed
+   */
+  fastify.post(
+    '/api/sessions/:id/control/open-url',
+    async (request: OpenUrlRequestType, reply: FastifyReply) => {
+      const { id } = request.params;
+      const { url } = (request.body ?? {}) as Partial<OpenUrlRequest>;
+
+      if (!url || typeof url !== 'string' || url.trim() === '') {
+        return reply.code(400).send(
+          errorResponse('INVALID_URL', '"url" is required and must be a non-empty string.'),
+        );
+      }
+
+      const session = await resolveActiveSession(id, reply);
+      if (session === null) return;
+
+      try {
+        if (session.device.platform === 'ios') {
+          await iosSimulatorService.openUrl(session.device.platformDeviceId, url.trim());
+        } else {
+          // For Android, platformDeviceId is the AVD name
+          await androidEmulatorService.openUrl(session.device.platformDeviceId, url.trim());
+        }
+        return reply.code(200).send(successResponse({ success: true }));
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : 'Failed to open URL.';
+        return reply.code(502).send(
+          errorResponse('COMMAND_ERROR', message, String(error)),
+        );
+      }
+    },
+  );
+
+  // ── POST /api/sessions/:id/control/send-text ───────────────────────────────
+
+  /**
+   * Type text into the currently focused field on the session's device
+   * (iOS and Android supported).
+   *
+   * Responds with:
+   * - 200 OK           — text sent successfully
+   * - 400 Bad Request  — missing/invalid text, session not active
+   * - 404 Not Found    — session does not exist
+   * - 502 Bad Gateway  — command failed
+   */
+  fastify.post(
+    '/api/sessions/:id/control/send-text',
+    async (request: SendTextRequestType, reply: FastifyReply) => {
+      const { id } = request.params;
+      const { text } = (request.body ?? {}) as Partial<SendTextRequest>;
+
+      if (text === undefined || text === null || typeof text !== 'string') {
+        return reply.code(400).send(
+          errorResponse('INVALID_TEXT', '"text" is required and must be a string.'),
+        );
+      }
+
+      // Allow empty string (it's a valid "type nothing" case, though unusual)
+      const session = await resolveActiveSession(id, reply);
+      if (session === null) return;
+
+      try {
+        if (session.device.platform === 'ios') {
+          await iosSimulatorService.sendText(session.device.platformDeviceId, text);
+        } else {
+          await androidEmulatorService.sendText(session.device.platformDeviceId, text);
+        }
+        return reply.code(200).send(successResponse({ success: true }));
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : 'Failed to send text.';
+        return reply.code(502).send(
+          errorResponse('COMMAND_ERROR', message, String(error)),
+        );
       }
     },
   );

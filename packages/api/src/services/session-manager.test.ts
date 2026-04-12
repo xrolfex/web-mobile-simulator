@@ -36,7 +36,6 @@ vi.mock('./ios-simulator.js', () => ({
   iosSimulatorService: {
     createDevice: vi.fn(),
     bootDevice: vi.fn(),
-    getVNCPort: vi.fn(),
     shutdownDevice: vi.fn(),
     deleteDevice: vi.fn(),
     listDevices: vi.fn(),
@@ -55,11 +54,16 @@ vi.mock('./android-emulator.js', () => ({
   },
 }));
 
-// Mock VNC proxy service
-vi.mock('./vnc-proxy.js', () => ({
-  vncProxyService: {
-    startProxy: vi.fn(),
-    stopProxy: vi.fn(),
+// Mock screen capture service
+vi.mock('./screen-capture.js', () => ({
+  screenCaptureService: {
+    startCapture: vi.fn().mockReturnValue({
+      on: vi.fn(),
+      off: vi.fn(),
+      emit: vi.fn(),
+    }),
+    stopCapture: vi.fn(),
+    cleanup: vi.fn(),
   },
 }));
 
@@ -92,7 +96,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SessionManagerService, SessionCapacityError } from './session-manager.js';
 import { iosSimulatorService } from './ios-simulator.js';
 import { androidEmulatorService } from './android-emulator.js';
-import { vncProxyService } from './vnc-proxy.js';
+import { screenCaptureService } from './screen-capture.js';
 import { eventBusService } from './event-bus.js';
 import { execJSON } from '../utils/exec.js';
 
@@ -129,11 +133,7 @@ const ANDROID_REQUEST = {
 function mockSuccessfulIOSCreation(): void {
   asMock(iosSimulatorService.createDevice).mockResolvedValue('MOCK-UDID-1234');
   asMock(iosSimulatorService.bootDevice).mockResolvedValue(undefined);
-  asMock(iosSimulatorService.getVNCPort).mockResolvedValue(5900);
-  asMock(vncProxyService.startProxy).mockResolvedValue({
-    wsPort: 6900,
-    wsUrl: 'ws://localhost:6900',
-  });
+  // screenCaptureService.startCapture already has a default mock return value
 }
 
 function mockSuccessfulAndroidCreation(): void {
@@ -142,10 +142,7 @@ function mockSuccessfulAndroidCreation(): void {
     pid: 1234,
     adbPort: 5554,
   });
-  asMock(vncProxyService.startProxy).mockResolvedValue({
-    wsPort: 6901,
-    wsUrl: 'ws://localhost:6901',
-  });
+  // screenCaptureService.startCapture already has a default mock return value
 }
 
 // ---------------------------------------------------------------------------
@@ -210,8 +207,7 @@ describe('SessionManagerService', () => {
       const session = await service.createSession(IOS_REQUEST);
 
       expect(session.status).toBe('active');
-      expect(session.streamUrl).toBe('ws://localhost:6900');
-      expect(session.proxyPort).toBe(6900);
+      expect(session.streamUrl).toBe(`/ws/stream/${session.id}`);
       expect(session.device.platform).toBe('ios');
     });
 
@@ -224,19 +220,17 @@ describe('SessionManagerService', () => {
       expect(session.device.platformDeviceId).toBe('MOCK-UDID-1234');
     });
 
-    it('calls createDevice, bootDevice, getVNCPort, startProxy in the correct order', async () => {
+    it('calls createDevice, bootDevice, startCapture in the correct order', async () => {
       mockSuccessfulIOSCreation();
 
       await service.createSession(IOS_REQUEST);
 
       const createOrder = asMock(iosSimulatorService.createDevice).mock.invocationCallOrder[0]!;
       const bootOrder = asMock(iosSimulatorService.bootDevice).mock.invocationCallOrder[0]!;
-      const vncOrder = asMock(iosSimulatorService.getVNCPort).mock.invocationCallOrder[0]!;
-      const proxyOrder = asMock(vncProxyService.startProxy).mock.invocationCallOrder[0]!;
+      const captureOrder = asMock(screenCaptureService.startCapture).mock.invocationCallOrder[0]!;
 
       expect(createOrder).toBeLessThan(bootOrder);
-      expect(bootOrder).toBeLessThan(vncOrder);
-      expect(vncOrder).toBeLessThan(proxyOrder);
+      expect(bootOrder).toBeLessThan(captureOrder);
     });
 
     it('emits session_status_changed events for creating → active transitions', async () => {
@@ -263,7 +257,7 @@ describe('SessionManagerService', () => {
     it('sets status=error and calls cleanupFailedSession when bootDevice fails', async () => {
       asMock(iosSimulatorService.createDevice).mockResolvedValue('MOCK-UDID-ERR');
       asMock(iosSimulatorService.bootDevice).mockRejectedValue(new Error('boot failed'));
-      asMock(vncProxyService.stopProxy).mockResolvedValue(undefined);
+      asMock(screenCaptureService.stopCapture).mockReturnValue(undefined);
       asMock(iosSimulatorService.shutdownDevice).mockResolvedValue(undefined);
       asMock(iosSimulatorService.deleteDevice).mockResolvedValue(undefined);
 
@@ -274,26 +268,8 @@ describe('SessionManagerService', () => {
       const session = [...sessions.values()][0]!;
       expect(session.status).toBe('error');
 
-      // stopProxy should have been called for cleanup
-      expect(asMock(vncProxyService.stopProxy)).toHaveBeenCalled();
-    });
-
-    it('throws and sets status=error when getVNCPort returns null', async () => {
-      asMock(iosSimulatorService.createDevice).mockResolvedValue('MOCK-UDID-NULL');
-      asMock(iosSimulatorService.bootDevice).mockResolvedValue(undefined);
-      asMock(iosSimulatorService.getVNCPort).mockResolvedValue(null);
-      asMock(vncProxyService.stopProxy).mockResolvedValue(undefined);
-      asMock(iosSimulatorService.shutdownDevice).mockResolvedValue(undefined);
-      asMock(iosSimulatorService.deleteDevice).mockResolvedValue(undefined);
-
-      await expect(service.createSession(IOS_REQUEST)).rejects.toThrow(
-        'Could not discover VNC port',
-      );
-
-      const sessions = (service as unknown as { sessions: Map<string, { status: string }> })
-        .sessions;
-      const session = [...sessions.values()][0]!;
-      expect(session.status).toBe('error');
+      // stopCapture should have been called for cleanup
+      expect(asMock(screenCaptureService.stopCapture)).toHaveBeenCalled();
     });
   });
 
@@ -308,12 +284,11 @@ describe('SessionManagerService', () => {
       const session = await service.createSession(ANDROID_REQUEST);
 
       expect(session.status).toBe('active');
-      expect(session.streamUrl).toBe('ws://localhost:6901');
-      expect(session.proxyPort).toBe(6901);
+      expect(session.streamUrl).toBe(`/ws/stream/${session.id}`);
       expect(session.device.platform).toBe('android');
     });
 
-    it('calls createAVD, bootEmulator, startProxy in the correct order', async () => {
+    it('calls createAVD, bootEmulator, startCapture in the correct order', async () => {
       mockSuccessfulAndroidCreation();
 
       await service.createSession(ANDROID_REQUEST);
@@ -322,23 +297,10 @@ describe('SessionManagerService', () => {
         asMock(androidEmulatorService.createAVD).mock.invocationCallOrder[0]!;
       const bootOrder =
         asMock(androidEmulatorService.bootEmulator).mock.invocationCallOrder[0]!;
-      const proxyOrder = asMock(vncProxyService.startProxy).mock.invocationCallOrder[0]!;
+      const captureOrder = asMock(screenCaptureService.startCapture).mock.invocationCallOrder[0]!;
 
       expect(createOrder).toBeLessThan(bootOrder);
-      expect(bootOrder).toBeLessThan(proxyOrder);
-    });
-
-    it('uses adbPort + 1 as the VNC target port when starting the proxy', async () => {
-      mockSuccessfulAndroidCreation();
-
-      await service.createSession(ANDROID_REQUEST);
-
-      // bootEmulator resolves with adbPort: 5554, so VNC port should be 5555
-      expect(asMock(vncProxyService.startProxy)).toHaveBeenCalledWith(
-        expect.any(String),
-        'localhost',
-        5555, // adbPort (5554) + 1
-      );
+      expect(bootOrder).toBeLessThan(captureOrder);
     });
 
     it('sets status=error and runs cleanup when bootEmulator fails', async () => {
@@ -346,7 +308,7 @@ describe('SessionManagerService', () => {
       asMock(androidEmulatorService.bootEmulator).mockRejectedValue(
         new Error('emulator boot failed'),
       );
-      asMock(vncProxyService.stopProxy).mockResolvedValue(undefined);
+      asMock(screenCaptureService.stopCapture).mockReturnValue(undefined);
       asMock(androidEmulatorService.shutdownEmulator).mockResolvedValue(undefined);
       asMock(androidEmulatorService.deleteAVD).mockResolvedValue(undefined);
 
@@ -359,7 +321,7 @@ describe('SessionManagerService', () => {
       const session = [...sessions.values()][0]!;
       expect(session.status).toBe('error');
 
-      expect(asMock(vncProxyService.stopProxy)).toHaveBeenCalled();
+      expect(asMock(screenCaptureService.stopCapture)).toHaveBeenCalled();
     });
   });
 
@@ -382,11 +344,6 @@ describe('SessionManagerService', () => {
       });
 
       asMock(iosSimulatorService.bootDevice).mockResolvedValue(undefined);
-      asMock(iosSimulatorService.getVNCPort).mockResolvedValue(5900);
-      asMock(vncProxyService.startProxy).mockResolvedValue({
-        wsPort: 6900,
-        wsUrl: 'ws://localhost:6900',
-      });
 
       // Fire both without awaiting
       const first = service.createSession(IOS_REQUEST);
@@ -421,12 +378,7 @@ describe('SessionManagerService', () => {
       });
 
       asMock(iosSimulatorService.bootDevice).mockResolvedValue(undefined);
-      asMock(iosSimulatorService.getVNCPort).mockResolvedValue(5900);
-      asMock(vncProxyService.startProxy).mockResolvedValue({
-        wsPort: 6900,
-        wsUrl: 'ws://localhost:6900',
-      });
-      asMock(vncProxyService.stopProxy).mockResolvedValue(undefined);
+      asMock(screenCaptureService.stopCapture).mockReturnValue(undefined);
       asMock(iosSimulatorService.shutdownDevice).mockResolvedValue(undefined);
       asMock(iosSimulatorService.deleteDevice).mockResolvedValue(undefined);
 
@@ -442,7 +394,7 @@ describe('SessionManagerService', () => {
       asMock(iosSimulatorService.createDevice).mockRejectedValue(
         new Error('create failed'),
       );
-      asMock(vncProxyService.stopProxy).mockResolvedValue(undefined);
+      asMock(screenCaptureService.stopCapture).mockReturnValue(undefined);
 
       await expect(service.createSession(IOS_REQUEST)).rejects.toThrow('create failed');
 
@@ -663,7 +615,7 @@ describe('SessionManagerService', () => {
       mockSuccessfulIOSCreation();
       const session = await service.createSession(IOS_REQUEST);
 
-      asMock(vncProxyService.stopProxy).mockResolvedValue(undefined);
+      asMock(screenCaptureService.stopCapture).mockReturnValue(undefined);
       asMock(iosSimulatorService.shutdownDevice).mockResolvedValue(undefined);
       asMock(iosSimulatorService.deleteDevice).mockResolvedValue(undefined);
 
@@ -673,17 +625,17 @@ describe('SessionManagerService', () => {
       expect(terminated?.status).toBe('terminated');
     });
 
-    it('calls stopProxy and teardown (shutdownDevice + deleteDevice) for iOS', async () => {
+    it('calls stopCapture and teardown (shutdownDevice + deleteDevice) for iOS', async () => {
       mockSuccessfulIOSCreation();
       const session = await service.createSession(IOS_REQUEST);
 
-      asMock(vncProxyService.stopProxy).mockResolvedValue(undefined);
+      asMock(screenCaptureService.stopCapture).mockReturnValue(undefined);
       asMock(iosSimulatorService.shutdownDevice).mockResolvedValue(undefined);
       asMock(iosSimulatorService.deleteDevice).mockResolvedValue(undefined);
 
       await service.terminateSession(session.id);
 
-      expect(asMock(vncProxyService.stopProxy)).toHaveBeenCalledWith(session.id);
+      expect(asMock(screenCaptureService.stopCapture)).toHaveBeenCalledWith(session.id);
       expect(asMock(iosSimulatorService.shutdownDevice)).toHaveBeenCalledWith(
         'MOCK-UDID-1234',
       );
@@ -702,7 +654,7 @@ describe('SessionManagerService', () => {
       mockSuccessfulIOSCreation();
       const session = await service.createSession(IOS_REQUEST);
 
-      asMock(vncProxyService.stopProxy).mockResolvedValue(undefined);
+      asMock(screenCaptureService.stopCapture).mockReturnValue(undefined);
       asMock(iosSimulatorService.shutdownDevice).mockResolvedValue(undefined);
       asMock(iosSimulatorService.deleteDevice).mockResolvedValue(undefined);
 
@@ -735,15 +687,10 @@ describe('SessionManagerService', () => {
       // Reset mock for second creation
       asMock(iosSimulatorService.createDevice).mockResolvedValue('MOCK-UDID-5678');
       asMock(iosSimulatorService.bootDevice).mockResolvedValue(undefined);
-      asMock(iosSimulatorService.getVNCPort).mockResolvedValue(5901);
-      asMock(vncProxyService.startProxy).mockResolvedValue({
-        wsPort: 6901,
-        wsUrl: 'ws://localhost:6901',
-      });
 
       const session2 = await service.createSession(IOS_REQUEST);
 
-      asMock(vncProxyService.stopProxy).mockResolvedValue(undefined);
+      asMock(screenCaptureService.stopCapture).mockReturnValue(undefined);
       asMock(iosSimulatorService.shutdownDevice).mockResolvedValue(undefined);
       asMock(iosSimulatorService.deleteDevice).mockResolvedValue(undefined);
 
@@ -756,6 +703,19 @@ describe('SessionManagerService', () => {
       const s2 = service.getSession(session2.id);
       expect(s1?.status).toBe('terminated');
       expect(s2?.status).toBe('terminated');
+    });
+
+    it('calls screenCaptureService.cleanup() at the end of global cleanup', async () => {
+      mockSuccessfulIOSCreation();
+      await service.createSession(IOS_REQUEST);
+
+      asMock(screenCaptureService.stopCapture).mockReturnValue(undefined);
+      asMock(iosSimulatorService.shutdownDevice).mockResolvedValue(undefined);
+      asMock(iosSimulatorService.deleteDevice).mockResolvedValue(undefined);
+
+      await service.cleanup();
+
+      expect(asMock(screenCaptureService.cleanup)).toHaveBeenCalled();
     });
 
     it('clears both the timeout and eviction intervals', () => {
@@ -781,8 +741,10 @@ describe('SessionManagerService', () => {
       mockSuccessfulIOSCreation();
       await service.createSession(IOS_REQUEST);
 
-      // Make stopProxy throw to simulate failure
-      asMock(vncProxyService.stopProxy).mockRejectedValue(new Error('proxy error'));
+      // Make stopCapture throw to simulate failure
+      asMock(screenCaptureService.stopCapture).mockImplementation(() => {
+        throw new Error('capture stop error');
+      });
       asMock(iosSimulatorService.shutdownDevice).mockRejectedValue(
         new Error('shutdown error'),
       );
