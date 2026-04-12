@@ -42,6 +42,54 @@
       </div>
     }
 
+    <!-- ── App Upload ─────────────────────────────────────────────────── -->
+    @if (isReady()) {
+      <div class="upload-section">
+        <h3 class="upload-section__title">Install App</h3>
+
+        <div
+          class="upload-dropzone"
+          [class.upload-dropzone--drag-over]="dragOver()"
+          [class.upload-dropzone--uploading]="uploading()"
+          (dragover)="onDragOver($event)"
+          (dragleave)="onDragLeave($event)"
+          (drop)="onFileDrop($event)"
+        >
+          @if (uploading()) {
+            <div class="upload-dropzone__spinner" aria-hidden="true"></div>
+            <p class="upload-dropzone__text">Installing…</p>
+          } @else {
+            <p class="upload-dropzone__text">
+              Drop {{ session()!.device.platform === 'ios' ? '.app / .ipa' : '.apk' }} here
+            </p>
+            <span class="upload-dropzone__or">or</span>
+            <label class="btn btn--upload" tabindex="0">
+              Choose File
+              <input
+                type="file"
+                class="upload-dropzone__input"
+                [accept]="acceptedFileTypes()"
+                (change)="onFileSelected($event)"
+                aria-label="Select an app file to install"
+              />
+            </label>
+          }
+        </div>
+
+        @if (uploadMessage()) {
+          <div
+            class="upload-message"
+            [class.upload-message--success]="uploadSuccess()"
+            [class.upload-message--error]="!uploadSuccess()"
+            role="status"
+            aria-live="polite"
+          >
+            {{ uploadMessage() }}
+          </div>
+        }
+      </div>
+    }
+
     <!-- Stop session button -->
     <div class="session-sidebar__actions">
       <button

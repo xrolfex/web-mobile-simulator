@@ -67,6 +67,25 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
     return s?.status === 'active' && !!s.streamUrl;
   });
 
+  /** Whether a file upload is in progress. */
+  protected readonly uploading = signal<boolean>(false);
+
+  /** Result message from the last upload attempt. */
+  protected readonly uploadMessage = signal<string>('');
+
+  /** Whether the last upload was successful (for styling). */
+  protected readonly uploadSuccess = signal<boolean>(false);
+
+  /** Whether a file is being dragged over the drop zone. */
+  protected readonly dragOver = signal<boolean>(false);
+
+  /** File input accept attribute based on platform. */
+  protected readonly acceptedFileTypes = computed<string>(() => {
+    const s = this.session();
+    if (!s) return '';
+    return s.device.platform === 'ios' ? '.app,.ipa' : '.apk';
+  });
+
   private readonly api = inject(ApiService);
   private readonly route = inject(ActivatedRoute);
   private readonly router = inject(Router);
@@ -134,7 +153,94 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
     void this.stopSession();
   }
 
+  /**
+   * Handle file selection from the file input or drag-and-drop.
+   * Uploads the file to the session's simulator/emulator.
+   * @param event The file input change event or a direct File.
+   */
+  protected onFileSelected(event: Event): void {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+
+    this.uploadFile(file);
+
+    // Reset the input so the same file can be re-selected
+    input.value = '';
+  }
+
+  /**
+   * Handle files dropped onto the drop zone.
+   * @param event The drag-and-drop event.
+   */
+  protected onFileDrop(event: DragEvent): void {
+    event.preventDefault();
+    event.stopPropagation();
+    this.dragOver.set(false);
+
+    const file = event.dataTransfer?.files?.[0];
+    if (!file) return;
+
+    this.uploadFile(file);
+  }
+
+  /** Prevent default drag behavior and track drag state. */
+  protected onDragOver(event: DragEvent): void {
+    event.preventDefault();
+    event.stopPropagation();
+    this.dragOver.set(true);
+  }
+
+  /** Track drag leave state. */
+  protected onDragLeave(event: DragEvent): void {
+    event.preventDefault();
+    event.stopPropagation();
+    this.dragOver.set(false);
+  }
+
   // ── Private helpers ────────────────────────────────────────────────────────
+
+  /**
+   * Upload a file to the session API and handle the response.
+   * @param file The file to upload.
+   */
+  private uploadFile(file: File): void {
+    const currentSession = this.session();
+    if (!currentSession) return;
+
+    // Quick client-side extension validation
+    const platform = currentSession.device.platform;
+    const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
+    const allowedExts = platform === 'ios' ? ['app', 'ipa'] : ['apk'];
+    if (!allowedExts.includes(ext)) {
+      this.uploadMessage.set(`Invalid file type ".${ext}". Allowed: ${allowedExts.map(e => '.' + e).join(', ')}`);
+      this.uploadSuccess.set(false);
+      return;
+    }
+
+    this.uploading.set(true);
+    this.uploadMessage.set('');
+    this.uploadSuccess.set(false);
+
+    this.api.uploadApp(currentSession.id, file).subscribe({
+      next: (response) => {
+        this.uploading.set(false);
+        if (response.success && response.data) {
+          this.uploadMessage.set(response.data.result.message);
+          this.uploadSuccess.set(response.data.result.success);
+        } else {
+          this.uploadMessage.set(response.error?.message ?? 'Upload failed.');
+          this.uploadSuccess.set(false);
+        }
+      },
+      error: (err: unknown) => {
+        this.uploading.set(false);
+        const message = err instanceof Error ? err.message : 'Upload failed. Please try again.';
+        this.uploadMessage.set(message);
+        this.uploadSuccess.set(false);
+      },
+    });
+  }
 
   /**
    * Poll the session endpoint until it is active or the attempt limit is hit.

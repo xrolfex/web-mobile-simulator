@@ -1,5 +1,6 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
+import multipart from '@fastify/multipart';
 import websocket from '@fastify/websocket';
 import { config } from './config.js';
 import { registerRoutes } from './routes/index.js';
@@ -20,6 +21,13 @@ async function buildServer() {
   // --- Plugins ---
   await fastify.register(cors, {
     origin: true, // reflect request origin; tighten per-environment as needed
+  });
+
+  await fastify.register(multipart, {
+    limits: {
+      fileSize: 2 * 1024 * 1024 * 1024, // 2 GB max
+      files: 1, // Only one file per upload
+    },
   });
 
   await fastify.register(websocket);

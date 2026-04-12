@@ -3,6 +3,7 @@ import { HttpClient } from '@angular/common/http';
 import { environment } from '../../../environments/environment';
 import {
   ApiResponse,
+  AppUploadResponse,
   CreateSessionRequest,
   CreateSessionResponse,
   DeviceTypeListResponse,
@@ -72,6 +73,23 @@ export class ApiService {
   deleteSession(id: string) {
     return this.http.delete<ApiResponse<void>>(
       `${this.baseUrl}/api/sessions/${id}`,
+    );
+  }
+
+  /**
+   * Upload and install an app file onto a running session's simulator/emulator.
+   * POST /api/sessions/:id/apps
+   * @param sessionId The session UUID.
+   * @param file The app file (.app/.ipa/.apk) to upload and install.
+   */
+  uploadApp(sessionId: string, file: File) {
+    const formData = new FormData();
+    formData.append('file', file, file.name);
+    return this.http.post<ApiResponse<AppUploadResponse>>(
+      `${this.baseUrl}/api/sessions/${sessionId}/apps`,
+      formData,
+      // Note: Do NOT set Content-Type header — Angular/browser sets it
+      // automatically with the correct multipart boundary
     );
   }
 

@@ -98,6 +98,30 @@ export interface CreateSessionResponse {
   session: Session;
 }
 
+// ── App Upload/Install Types ──────────────────────────────────────────────────
+
+/** Supported app file extensions by platform. */
+export type AppFileExtension = '.app' | '.ipa' | '.apk';
+
+/** Result of uploading and installing an app on a simulator/emulator. */
+export interface AppInstallResult {
+  /** Whether the installation succeeded. */
+  success: boolean;
+  /** Original filename of the uploaded app. */
+  fileName: string;
+  /** Platform the app was installed on. */
+  platform: Platform;
+  /** Human-readable status message. */
+  message: string;
+  /** Time taken for the install in milliseconds. */
+  installDurationMs?: number;
+}
+
+/** Response body from the upload-app endpoint. */
+export interface AppUploadResponse {
+  result: AppInstallResult;
+}
+
 // ── List Response Shapes ──────────────────────────────────────────────────────
 
 /** Response body from the runtimes list endpoint. */
