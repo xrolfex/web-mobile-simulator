@@ -128,3 +128,40 @@ export interface ApiResponse<T> {
     details?: unknown;
   };
 }
+
+// ── WebSocket Message Types ───────────────────────────────────────────────────
+
+/** Discriminator for WebSocket message routing. */
+export type WebSocketMessageType =
+  | 'connected'
+  | 'session_status_changed'
+  | 'runtime_download_progress'
+  | 'device_state_changed'
+  | 'error';
+
+/** Typed envelope for all WebSocket messages from the server. */
+export interface WebSocketMessage<T = unknown> {
+  type: WebSocketMessageType;
+  payload: T;
+  timestamp: string;
+}
+
+/** Payload for session_status_changed events. */
+export interface SessionStatusChangedPayload {
+  sessionId: string;
+  status: SessionStatus;
+  previousStatus: SessionStatus;
+  device?: {
+    platform: Platform;
+    deviceType: string;
+  };
+}
+
+/** Payload for runtime_download_progress events. */
+export interface RuntimeDownloadProgressPayload {
+  platform: Platform;
+  identifier: string;
+  progress: number;
+  status: 'downloading' | 'installing' | 'completed' | 'error';
+  message?: string;
+}

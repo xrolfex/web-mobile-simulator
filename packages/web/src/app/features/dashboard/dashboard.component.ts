@@ -7,12 +7,19 @@ import {
   inject,
 } from '@angular/core';
 import { Router } from '@angular/router';
+import { Subscription } from 'rxjs';
 
 import { ApiService } from '../../core/services/api.service';
+import { WebSocketService } from '../../core/services/websocket.service';
 import { LaunchDialogComponent } from './launch-dialog.component';
 import type { Platform, Session } from '../../core/types/api.types';
-/** How often (ms) to auto-refresh the active sessions list. */
-const SESSION_REFRESH_INTERVAL_MS = 10_000;
+
+/**
+ * How often (ms) to auto-refresh the active sessions list via polling.
+ * Reduced from 10 s to 30 s because WebSocket events provide near-instant
+ * updates for session state changes.
+ */
+const SESSION_REFRESH_INTERVAL_MS = 30_000;
 
 /** Maps platform to its display configuration. */
 interface PlatformCard {
@@ -78,7 +85,11 @@ export class DashboardComponent implements OnInit, OnDestroy {
 
   private readonly api = inject(ApiService);
   private readonly router = inject(Router);
+  private readonly websocketService = inject(WebSocketService);
+
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
+  /** Subscription to WebSocket session-status events; cleaned up on destroy. */
+  private wsSessionSub: Subscription | null = null;
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
 
@@ -88,12 +99,23 @@ export class DashboardComponent implements OnInit, OnDestroy {
       () => this.loadSessions(),
       SESSION_REFRESH_INTERVAL_MS,
     );
+
+    // Connect WebSocket for real-time session updates.
+    this.websocketService.connect();
+
+    // Refresh the sessions list immediately whenever a session status changes.
+    this.wsSessionSub = this.websocketService.sessionStatusChanges$.subscribe(
+      () => this.loadSessions(),
+    );
   }
 
   ngOnDestroy(): void {
     if (this.refreshTimer !== null) {
       clearInterval(this.refreshTimer);
     }
+    // Unsubscribe from WebSocket events (do NOT disconnect — other components
+    // may still be using the shared service).
+    this.wsSessionSub?.unsubscribe();
   }
 
   // ── Template event handlers ──────────────────────────────────────────────

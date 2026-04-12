@@ -3,6 +3,7 @@ import healthRoutes from './health.js';
 import sessionRoutes from './sessions.js';
 import deviceRoutes from './devices.js';
 import runtimeRoutes from './runtimes.js';
+import wsEventsRoutes from './ws-events.js';
 
 /**
  * Registers all API route plugins on the provided Fastify instance.
@@ -14,4 +15,5 @@ export async function registerRoutes(fastify: FastifyInstance): Promise<void> {
   await fastify.register(sessionRoutes);
   await fastify.register(deviceRoutes);
   await fastify.register(runtimeRoutes);
+  await fastify.register(wsEventsRoutes);
 }

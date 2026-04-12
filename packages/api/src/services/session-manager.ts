@@ -6,11 +6,13 @@ import type {
   SimulatorDevice,
   DeviceType,
   Runtime,
+  Platform,
 } from '@web-mobile-simulator/shared';
 import { SESSION_TIMEOUT_MS } from '@web-mobile-simulator/shared';
 import { iosSimulatorService } from './ios-simulator.js';
 import { androidEmulatorService } from './android-emulator.js';
 import { vncProxyService } from './vnc-proxy.js';
+import { eventBusService } from './event-bus.js';
 
 // ---------------------------------------------------------------------------
 // Module-level helpers
@@ -42,6 +44,28 @@ function now(): string {
  */
 function shortId(uuid: string): string {
   return uuid.split('-')[0] ?? uuid.slice(0, 8);
+}
+
+// ---------------------------------------------------------------------------
+// Payload types
+// ---------------------------------------------------------------------------
+
+/**
+ * Payload emitted on the `session_status_changed` event bus topic whenever a
+ * session transitions between lifecycle states.
+ */
+export interface SessionStatusChangedPayload {
+  /** The session that changed state. */
+  sessionId: string;
+  /** The new status the session has just entered. */
+  status: SessionStatus;
+  /** The status the session held immediately before this transition. */
+  previousStatus: SessionStatus;
+  /** Basic device info, present once the device has been provisioned. */
+  device?: {
+    platform: Platform;
+    deviceType: string;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +171,7 @@ export class SessionManagerService {
 
     this.sessions.set(sessionId, session);
     log(`Creating session ${sessionId} (platform=${request.platform})`);
+    this.emitStatusChange(session, 'creating');
 
     try {
       if (request.platform === 'ios') {
@@ -160,9 +185,11 @@ export class SessionManagerService {
         );
       }
     } catch (error: unknown) {
+      const previousStatus = session.status;
       session.status = 'error';
       session.updatedAt = now();
       this.sessions.set(sessionId, session);
+      this.emitStatusChange(session, previousStatus);
 
       // Best-effort cleanup — swallow errors so the original error propagates.
       await this.cleanupFailedSession(session).catch((cleanupErr: unknown) => {
@@ -220,8 +247,10 @@ export class SessionManagerService {
 
     log(`Terminating session ${id}`);
 
+    const previousStatus = session.status;
     session.status = 'terminating';
     session.updatedAt = now();
+    this.emitStatusChange(session, previousStatus);
 
     // Stop the VNC proxy first — this is safe to call even if no proxy was
     // started (it silently no-ops).
@@ -236,6 +265,7 @@ export class SessionManagerService {
 
     session.status = 'terminated';
     session.updatedAt = now();
+    this.emitStatusChange(session, 'terminating');
 
     log(`Session ${id} terminated.`);
   }
@@ -352,6 +382,7 @@ export class SessionManagerService {
     session.updatedAt = now();
 
     log(`[${sessionId}] iOS session active — stream: ${wsUrl}`);
+    this.emitStatusChange(session, 'creating');
     return session;
   }
 
@@ -433,7 +464,41 @@ export class SessionManagerService {
     session.updatedAt = now();
 
     log(`[${sessionId}] Android session active — stream: ${wsUrl}`);
+    this.emitStatusChange(session, 'creating');
     return session;
+  }
+
+  // -------------------------------------------------------------------------
+  // Private — event emission
+  // -------------------------------------------------------------------------
+
+  /**
+   * Emit a `session_status_changed` event on the shared event bus.
+   *
+   * Should be called **after** the session's `status` field has been mutated
+   * so that `session.status` reflects the new state.
+   *
+   * @param session        - The session record after its status was updated.
+   * @param previousStatus - The status the session held before the transition.
+   */
+  private emitStatusChange(
+    session: InternalSession,
+    previousStatus: SessionStatus,
+  ): void {
+    const payload: SessionStatusChangedPayload = {
+      sessionId: session.id,
+      status: session.status,
+      previousStatus,
+      device:
+        session.device.id !== ''
+          ? {
+              platform: session.device.platform,
+              deviceType: session.device.deviceType.name,
+            }
+          : undefined,
+    };
+
+    eventBusService.emit('session_status_changed', payload);
   }
 
   // -------------------------------------------------------------------------
