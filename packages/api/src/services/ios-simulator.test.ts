@@ -171,10 +171,10 @@ describe('IOSSimulatorService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     // Provide a default resolved value for exec() so that assertSimctlAvailable()'s
-    // `exec('xcrun', ['--version'])` call succeeds in every test. Tests that need
+    // `exec('xcrun', ['--find', 'simctl'])` call succeeds in every test. Tests that need
     // exec() to behave differently will override this with mockResolvedValueOnce /
-    // mockRejectedValueOnce AFTER the xcrun --version call completes.
-    mockExec.mockResolvedValue({ stdout: 'xcrun version 123', stderr: '' });
+    // mockRejectedValueOnce AFTER the xcrun --find simctl call completes.
+    mockExec.mockResolvedValue({ stdout: '/Applications/Xcode.app/Contents/Developer/usr/bin/simctl\n', stderr: '' });
     service = new IOSSimulatorService();
   });
 
@@ -296,6 +296,11 @@ describe('IOSSimulatorService', () => {
       expect(mockExecJSON).toHaveBeenCalledWith(
         'xcrun',
         ['simctl', 'list', 'devicetypes', '-j'],
+        expect.objectContaining({
+          env: expect.objectContaining({
+            DEVELOPER_DIR: expect.stringContaining('Xcode.app/Contents/Developer'),
+          }),
+        }),
       );
     });
 
@@ -372,6 +377,11 @@ describe('IOSSimulatorService', () => {
       expect(mockExecJSON).toHaveBeenCalledWith(
         'xcrun',
         ['simctl', 'list', 'runtimes', '-j'],
+        expect.objectContaining({
+          env: expect.objectContaining({
+            DEVELOPER_DIR: expect.stringContaining('Xcode.app/Contents/Developer'),
+          }),
+        }),
       );
     });
   });
@@ -383,10 +393,10 @@ describe('IOSSimulatorService', () => {
   describe('createDevice()', () => {
     macosOnly('returns the UDID from stdout (trimmed)', async () => {
       const udid = 'FFFFFFFF-0000-0000-0000-FFFFFFFFFFFF';
-      // First call: assertSimctlAvailable() → xcrun --version
+      // First call: assertSimctlAvailable() → xcrun --find simctl
       // Second call: simctl create → returns the new UDID
       mockExec
-        .mockResolvedValueOnce({ stdout: 'xcrun version 123', stderr: '' })
+        .mockResolvedValueOnce({ stdout: '/Applications/Xcode.app/Contents/Developer/usr/bin/simctl\n', stderr: '' })
         .mockResolvedValueOnce({ stdout: `${udid}\n`, stderr: '' });
 
       const result = await service.createDevice(
@@ -400,10 +410,10 @@ describe('IOSSimulatorService', () => {
 
     macosOnly('calls exec with correct simctl create arguments', async () => {
       const udid = 'AAAAAAAA-1111-1111-1111-AAAAAAAAAAAA';
-      // First call: assertSimctlAvailable() → xcrun --version
+      // First call: assertSimctlAvailable() → xcrun --find simctl
       // Second call: simctl create → returns the new UDID
       mockExec
-        .mockResolvedValueOnce({ stdout: 'xcrun version 123', stderr: '' })
+        .mockResolvedValueOnce({ stdout: '/Applications/Xcode.app/Contents/Developer/usr/bin/simctl\n', stderr: '' })
         .mockResolvedValueOnce({ stdout: udid, stderr: '' });
 
       await service.createDevice(
@@ -418,14 +428,18 @@ describe('IOSSimulatorService', () => {
         'My Simulator',
         'com.apple.CoreSimulator.SimDeviceType.iPhone-15-Pro',
         'com.apple.CoreSimulator.SimRuntime.iOS-17-5',
-      ]);
+      ], expect.objectContaining({
+        env: expect.objectContaining({
+          DEVELOPER_DIR: expect.stringContaining('Xcode.app/Contents/Developer'),
+        }),
+      }));
     });
 
     macosOnly('throws if stdout is empty', async () => {
-      // First call: assertSimctlAvailable() → xcrun --version
+      // First call: assertSimctlAvailable() → xcrun --find simctl
       // Second call: simctl create → returns empty stdout
       mockExec
-        .mockResolvedValueOnce({ stdout: 'xcrun version 123', stderr: '' })
+        .mockResolvedValueOnce({ stdout: '/Applications/Xcode.app/Contents/Developer/usr/bin/simctl\n', stderr: '' })
         .mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       await expect(
@@ -438,10 +452,10 @@ describe('IOSSimulatorService', () => {
     });
 
     macosOnly('throws if stdout is only whitespace', async () => {
-      // First call: assertSimctlAvailable() → xcrun --version
+      // First call: assertSimctlAvailable() → xcrun --find simctl
       // Second call: simctl create → returns whitespace-only stdout
       mockExec
-        .mockResolvedValueOnce({ stdout: 'xcrun version 123', stderr: '' })
+        .mockResolvedValueOnce({ stdout: '/Applications/Xcode.app/Contents/Developer/usr/bin/simctl\n', stderr: '' })
         .mockResolvedValueOnce({ stdout: '   \n  ', stderr: '' });
 
       await expect(
@@ -454,10 +468,10 @@ describe('IOSSimulatorService', () => {
     });
 
     macosOnly('propagates exec() failures', async () => {
-      // First call: assertSimctlAvailable() → xcrun --version succeeds
+      // First call: assertSimctlAvailable() → xcrun --find simctl succeeds
       // Second call: simctl create → rejects with the expected error
       mockExec
-        .mockResolvedValueOnce({ stdout: 'xcrun version 123', stderr: '' })
+        .mockResolvedValueOnce({ stdout: '/Applications/Xcode.app/Contents/Developer/usr/bin/simctl\n', stderr: '' })
         .mockRejectedValueOnce(new Error('Command failed: xcrun simctl create'));
 
       await expect(

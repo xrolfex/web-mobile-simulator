@@ -6,6 +6,7 @@ import type {
 } from '@web-mobile-simulator/shared';
 import { DEVICE_BOOT_TIMEOUT_MS } from '@web-mobile-simulator/shared';
 import { exec, execJSON } from '../utils/exec.js';
+import { config } from '../config.js';
 
 // ---------------------------------------------------------------------------
 // Internal types — raw shapes returned by `xcrun simctl list … -j`
@@ -68,6 +69,19 @@ interface SimctlListOutput {
 const SIMCTL = 'xcrun';
 const LOG_PREFIX = '[IOSSimulatorService]';
 
+/**
+ * Environment overrides for all `xcrun` calls.
+ * Sets `DEVELOPER_DIR` so `xcrun` resolves tools (like `simctl`) from the
+ * full Xcode.app bundle, even when `xcode-select -p` points to the
+ * standalone Command Line Tools.
+ */
+const XCRUN_EXEC_OPTIONS: import('node:child_process').ExecFileOptions = {
+  env: {
+    ...process.env,
+    DEVELOPER_DIR: `${config.xcodePath}/Contents/Developer`,
+  },
+};
+
 /** Emit a prefixed log line to stdout. */
 function log(message: string): void {
   console.log(`${LOG_PREFIX} ${message}`);
@@ -129,6 +143,7 @@ export class IOSSimulatorService {
     const output = await execJSON<Pick<SimctlListOutput, 'devicetypes'>>(
       SIMCTL,
       ['simctl', 'list', 'devicetypes', '-j'],
+      XCRUN_EXEC_OPTIONS,
     );
 
     return output.devicetypes
@@ -159,6 +174,7 @@ export class IOSSimulatorService {
     const output = await execJSON<Pick<SimctlListOutput, 'runtimes'>>(
       SIMCTL,
       ['simctl', 'list', 'runtimes', '-j'],
+      XCRUN_EXEC_OPTIONS,
     );
 
     return output.runtimes
@@ -195,7 +211,7 @@ export class IOSSimulatorService {
       'simctl',
       'list',
       '-j',
-    ]);
+    ], XCRUN_EXEC_OPTIONS);
 
     // Build lookup maps for O(1) resolution.
     const deviceTypeMap = new Map<string, SimctlDeviceType>(
@@ -294,7 +310,7 @@ export class IOSSimulatorService {
       name,
       deviceTypeId,
       runtimeId,
-    ]);
+    ], XCRUN_EXEC_OPTIONS);
 
     const udid = stdout.trim();
     if (!udid) {
@@ -319,7 +335,7 @@ export class IOSSimulatorService {
 
     // Issue the boot command — simctl exits as soon as the boot is initiated,
     // not when it is complete, so we poll afterwards.
-    await exec(SIMCTL, ['simctl', 'boot', udid]);
+    await exec(SIMCTL, ['simctl', 'boot', udid], XCRUN_EXEC_OPTIONS);
 
     // Poll until the device reports "Booted" or we time out.
     const pollIntervalMs = 2_000;
@@ -351,7 +367,7 @@ export class IOSSimulatorService {
   async shutdownDevice(udid: string): Promise<void> {
     log(`Shutting down device: ${udid}`);
     await this.assertSimctlAvailable();
-    await exec(SIMCTL, ['simctl', 'shutdown', udid]);
+    await exec(SIMCTL, ['simctl', 'shutdown', udid], XCRUN_EXEC_OPTIONS);
     log(`Shutdown command sent for device: ${udid}`);
   }
 
@@ -364,7 +380,7 @@ export class IOSSimulatorService {
   async deleteDevice(udid: string): Promise<void> {
     log(`Deleting device: ${udid}`);
     await this.assertSimctlAvailable();
-    await exec(SIMCTL, ['simctl', 'delete', udid]);
+    await exec(SIMCTL, ['simctl', 'delete', udid], XCRUN_EXEC_OPTIONS);
     log(`Deleted device: ${udid}`);
   }
 
@@ -385,7 +401,7 @@ export class IOSSimulatorService {
       'list',
       'devices',
       '-j',
-    ]);
+    ], XCRUN_EXEC_OPTIONS);
 
     for (const devices of Object.values(output.devices)) {
       for (const device of devices) {
@@ -491,7 +507,7 @@ export class IOSSimulatorService {
     // `xcrun simctl runtime add` was added in Xcode 14 / simctl 800.
     // We attempt it first and fall back to xcodebuild on failure.
     try {
-      await exec(SIMCTL, ['simctl', 'runtime', 'add', identifier]);
+      await exec(SIMCTL, ['simctl', 'runtime', 'add', identifier], XCRUN_EXEC_OPTIONS);
       log(`Runtime download initiated via simctl for: ${identifier}`);
     } catch (simctlError: unknown) {
       warn(
@@ -499,7 +515,7 @@ export class IOSSimulatorService {
           `falling back to xcodebuild -downloadPlatform iOS`,
       );
       try {
-        await exec('xcodebuild', ['-downloadPlatform', 'iOS']);
+        await exec('xcodebuild', ['-downloadPlatform', 'iOS'], XCRUN_EXEC_OPTIONS);
         log('Runtime download initiated via xcodebuild.');
       } catch (xcodebuildError: unknown) {
         throw new Error(
@@ -517,8 +533,9 @@ export class IOSSimulatorService {
   // -------------------------------------------------------------------------
 
   /**
-   * Verify that `xcrun` is accessible on `PATH`.
-   * Throws a clear, actionable error if Xcode Command Line Tools are absent.
+   * Verify that `xcrun` can locate `simctl` inside the configured Xcode.app.
+   * Throws a clear, actionable error if Xcode (not just Command Line Tools)
+   * is absent or `DEVELOPER_DIR` does not point to a full Xcode bundle.
    */
   private async assertSimctlAvailable(): Promise<void> {
     // We perform this check lazily (not in the constructor) so the service can
@@ -532,13 +549,15 @@ export class IOSSimulatorService {
       );
     }
 
-    // Verify xcrun is actually available on PATH.
+    // Verify xcrun can actually locate simctl — not just that 'xcrun' binary
+    // exists on PATH.  xcrun --find simctl exits 0 and prints the path if
+    // simctl is reachable, exits non-zero if it is not.
     try {
-      await exec('xcrun', ['--version']);
+      await exec(SIMCTL, ['--find', 'simctl'], XCRUN_EXEC_OPTIONS);
     } catch {
       throw new Error(
-        'xcrun is not available on PATH. Install Xcode Command Line Tools: ' +
-        'xcode-select --install',
+        'xcrun cannot locate simctl. Ensure Xcode (not just Command Line Tools) ' +
+          'is installed, and run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer',
       );
     }
   }
