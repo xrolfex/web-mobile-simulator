@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { Readable, Writable } from 'node:stream';
 
 // ---------------------------------------------------------------------------
 // Mock node:child_process before importing the service.
@@ -8,10 +9,12 @@ import { EventEmitter } from 'node:events';
 // execFile.  We expose the mock as a callback-style function so that
 // promisify works correctly: the last argument promisify injects is the
 // Node-style (err, result) callback.
+// We also mock `spawn` for the new persistent iOS capture process path.
 // ---------------------------------------------------------------------------
 
 vi.mock('node:child_process', () => ({
   execFile: vi.fn(),
+  spawn: vi.fn(),
 }));
 
 // ---------------------------------------------------------------------------
@@ -21,6 +24,12 @@ vi.mock('node:child_process', () => ({
 vi.mock('node:fs/promises', () => ({
   readFile: vi.fn(),
   unlink: vi.fn().mockResolvedValue(undefined),
+  writeFile: vi.fn().mockResolvedValue(undefined),
+  access: vi.fn().mockResolvedValue(undefined), // pretend binary already compiled by default
+  // The service imports `constants as fsConstants` from 'node:fs/promises'.
+  // Without this, fsConstants is undefined and access(path, fsConstants.X_OK) throws
+  // a TypeError that gets swallowed by the try/catch, triggering unwanted compilation.
+  constants: { X_OK: 1 },
 }));
 
 // ---------------------------------------------------------------------------
@@ -34,8 +43,8 @@ vi.mock('../config.js', () => ({
   },
 }));
 
-import { execFile } from 'node:child_process';
-import { readFile, unlink } from 'node:fs/promises';
+import { execFile, spawn } from 'node:child_process';
+import { readFile, unlink, writeFile, access } from 'node:fs/promises';
 import { ScreenCaptureService } from './screen-capture.js';
 
 // ---------------------------------------------------------------------------
@@ -43,8 +52,58 @@ import { ScreenCaptureService } from './screen-capture.js';
 // ---------------------------------------------------------------------------
 
 const mockExecFile = execFile as unknown as ReturnType<typeof vi.fn>;
+const mockSpawn = spawn as unknown as ReturnType<typeof vi.fn>;
 const mockReadFile = readFile as unknown as ReturnType<typeof vi.fn>;
 const mockUnlink = unlink as unknown as ReturnType<typeof vi.fn>;
+const mockWriteFile = writeFile as unknown as ReturnType<typeof vi.fn>;
+const mockAccess = access as unknown as ReturnType<typeof vi.fn>;
+
+// ---------------------------------------------------------------------------
+// Mock child process helpers
+// ---------------------------------------------------------------------------
+
+interface MockChildProcess {
+  stdout: Readable;
+  stderr: Readable;
+  stdin: Writable;
+  kill: ReturnType<typeof vi.fn>;
+  on: ReturnType<typeof vi.fn>;
+  emit: (event: string, ...args: unknown[]) => boolean;
+  _processEmitter: EventEmitter;
+}
+
+/**
+ * Build a mock ChildProcess with real Readable streams for stdout/stderr.
+ * Process-level events (exit, error) are routed through a dedicated EventEmitter
+ * so that the `on` mock can be wired up correctly.
+ */
+function makeMockChildProcess(): MockChildProcess {
+  const processEmitter = new EventEmitter();
+  const stdout = new Readable({ read() {} });
+  const stderr = new Readable({ read() {} });
+
+  return {
+    stdout,
+    stderr,
+    stdin: new Writable({ write(_chunk, _enc, cb) { cb(); } }),
+    kill: vi.fn(),
+    on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+      processEmitter.on(event, handler);
+    }),
+    emit: (event: string, ...args: unknown[]) => processEmitter.emit(event, ...args),
+    _processEmitter: processEmitter,
+  };
+}
+
+/**
+ * Build a Buffer containing a single 4-byte big-endian length-prefixed frame.
+ * This is the wire format the Swift capture binary writes to stdout.
+ */
+function buildFramePacket(jpegData: Buffer): Buffer {
+  const header = Buffer.alloc(4);
+  header.writeUInt32BE(jpegData.length, 0);
+  return Buffer.concat([header, jpegData]);
+}
 
 // ---------------------------------------------------------------------------
 // Utility — wait for an event on an EventEmitter with a safety timeout.
@@ -64,10 +123,10 @@ function waitForEvent(emitter: EventEmitter, event: string, timeoutMs = 5000): P
 }
 
 /**
- * Configure `execFile` to behave as a successful no-op for the duration of
- * one or more frames.  `promisify` wraps the last argument as the callback,
- * so we accept any number of positional args and invoke the trailing function
- * as `cb(null, { stdout: Buffer.alloc(0), stderr: '' })`.
+ * Configure `execFile` to behave as a successful no-op.
+ * `promisify` wraps the last argument as the callback, so we accept any number
+ * of positional args and invoke the trailing function as
+ * `cb(null, { stdout: Buffer.alloc(0), stderr: '' })`.
  */
 function makeExecFileSucceed(): void {
   mockExecFile.mockImplementation(
@@ -104,7 +163,17 @@ describe('ScreenCaptureService', () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    // Default: execFile succeeds (no-op), unlink succeeds.
+    // Default: binary already compiled (access resolves) — skips compilation.
+    mockAccess.mockResolvedValue(undefined);
+    // Default: version sidecar file returns the current version — skips recompilation.
+    mockReadFile.mockResolvedValue('2');
+    mockWriteFile.mockResolvedValue(undefined);
+
+    // Default: spawn returns a fresh mock child process.
+    const defaultMockProcess = makeMockChildProcess();
+    mockSpawn.mockReturnValue(defaultMockProcess);
+
+    // Default: execFile succeeds (covers Android path + any xcrun fallbacks).
     makeExecFileSucceed();
     mockUnlink.mockResolvedValue(undefined);
 
@@ -179,21 +248,32 @@ describe('ScreenCaptureService', () => {
       expect(service.getActiveCount()).toBe(3);
     });
 
-    it('emits frame events for iOS captures', async () => {
-      // Arrange — execFile writes to file; readFile returns a fake JPEG buffer.
-      makeExecFileSucceed();
+    it('emits frame events for iOS captures via persistent capture process', async () => {
+      // Arrange — mock spawn returns a process that emits one length-prefixed JPEG frame.
       const fakeJpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]); // JPEG magic bytes
-      mockReadFile.mockResolvedValue(fakeJpeg);
+      const mockProcess = makeMockChildProcess();
+      mockSpawn.mockReturnValue(mockProcess);
 
       const sessionId = 'session-ios-frame';
 
       // Act
       const emitter = service.startCapture(sessionId, 'ios', 'UDID-IOS-1');
-      const frameData = await waitForEvent(emitter, 'frame');
 
+      // Wait for the binary compilation check (access mock already resolves) so
+      // startIOSCaptureProcess() is called and stdout listener is wired up.
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      // Register the 'frame' listener BEFORE pushing to stdout, because the event
+      // is emitted synchronously during the Readable 'data' handler.
+      const framePromise = waitForEvent(emitter, 'frame');
+
+      // Simulate the capture process emitting a length-prefixed JPEG frame on stdout.
+      mockProcess.stdout.push(buildFramePacket(fakeJpeg));
+
+      const frameData = await framePromise;
       service.stopCapture(sessionId);
 
-      // Assert — received frame data is the buffer from readFile
+      // Assert — the frame event payload is the raw JPEG bytes (without the 4-byte header).
       expect(Buffer.isBuffer(frameData)).toBe(true);
       expect((frameData as Buffer).equals(fakeJpeg)).toBe(true);
     });
@@ -219,6 +299,238 @@ describe('ScreenCaptureService', () => {
       // Assert
       expect(Buffer.isBuffer(frameData)).toBe(true);
       expect((frameData as Buffer).equals(fakePng)).toBe(true);
+    });
+
+    it('spawns the capture binary with --device-name and --fps args for iOS', async () => {
+      // Arrange
+      const mockProcess = makeMockChildProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      // Act
+      service.startCapture('session-spawn-args', 'ios', 'UDID-ARGS', 20, 'wms-session-test');
+
+      // Yield so the promise chain (ensureCaptureBinaryCompiled → startIOSCaptureProcess) resolves.
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      // Assert — spawn called with the correct binary path and arguments.
+      expect(mockSpawn).toHaveBeenCalledWith(
+        expect.stringContaining('wms-ios-capture-stream'),
+        ['--device-name', 'wms-session-test', '--fps', '20'],
+        expect.objectContaining({ stdio: ['ignore', 'pipe', 'pipe'] }),
+      );
+    });
+
+    it('uses deviceId as device name when no deviceName param is supplied', async () => {
+      // Arrange
+      const mockProcess = makeMockChildProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      // Act — no 5th param, so deviceId should be used as the device name.
+      service.startCapture('session-no-device-name', 'ios', 'MY-UDID-1234', 15);
+
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      // Assert — spawn receives deviceId as --device-name.
+      expect(mockSpawn).toHaveBeenCalledWith(
+        expect.stringContaining('wms-ios-capture-stream'),
+        ['--device-name', 'MY-UDID-1234', '--fps', '15'],
+        expect.anything(),
+      );
+    });
+
+    it('correctly parses a frame split across multiple stdout chunks', async () => {
+      // Arrange
+      const fakeJpeg = Buffer.alloc(100, 0xff); // 100-byte fake JPEG payload
+      const fullPacket = buildFramePacket(fakeJpeg);
+      const chunk1 = fullPacket.subarray(0, 10);  // partial header + partial body
+      const chunk2 = fullPacket.subarray(10);      // rest of body
+
+      const mockProcess = makeMockChildProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      // Act
+      const emitter = service.startCapture('session-split-frame', 'ios', 'UDID-SPLIT');
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      // Register listener BEFORE pushing chunks — frame fires synchronously on the second push.
+      const framePromise = waitForEvent(emitter, 'frame');
+
+      // Push the two chunks separately — the service must buffer and reassemble.
+      mockProcess.stdout.push(chunk1);
+      mockProcess.stdout.push(chunk2);
+
+      const frameData = await framePromise;
+      service.stopCapture('session-split-frame');
+
+      // Assert — the reconstructed frame equals the original JPEG payload.
+      expect((frameData as Buffer).equals(fakeJpeg)).toBe(true);
+    });
+
+    it('parses multiple complete frames from a single large stdout chunk', async () => {
+      // Arrange
+      const fakeJpeg1 = Buffer.from([0xff, 0xd8, 0x01]);
+      const fakeJpeg2 = Buffer.from([0xff, 0xd8, 0x02]);
+      const combinedPacket = Buffer.concat([buildFramePacket(fakeJpeg1), buildFramePacket(fakeJpeg2)]);
+
+      const mockProcess = makeMockChildProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      const receivedFrames: Buffer[] = [];
+      const emitter = service.startCapture('session-multi-frame', 'ios', 'UDID-MULTI');
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      emitter.on('frame', (f: unknown) => receivedFrames.push(f as Buffer));
+
+      // Act — push both frames in a single chunk.
+      mockProcess.stdout.push(combinedPacket);
+
+      // Give the event loop a tick to flush all synchronous event handlers.
+      await new Promise(resolve => setTimeout(resolve, 10));
+      service.stopCapture('session-multi-frame');
+
+      // Assert — both frames were parsed and emitted.
+      expect(receivedFrames.length).toBe(2);
+      expect(receivedFrames[0]!.equals(fakeJpeg1)).toBe(true);
+      expect(receivedFrames[1]!.equals(fakeJpeg2)).toBe(true);
+    });
+
+    it('falls back to xcrun polling loop when Swift binary compilation fails', async () => {
+      // Arrange: access rejects (no cached binary), then swiftc compilation fails.
+      mockAccess.mockRejectedValue(new Error('ENOENT: no such file or directory'));
+
+      const fakeJpeg = Buffer.from([0xff, 0xd8, 0xff]);
+
+      // First execFile call is swiftc — fail it.
+      // Subsequent calls are xcrun — succeed so readFile can provide the frame.
+      let swiftcCallDone = false;
+      mockExecFile.mockImplementation((...args: unknown[]) => {
+        const cb = args[args.length - 1] as (err: Error | null, result?: { stdout: Buffer; stderr: string }) => void;
+        if (!swiftcCallDone) {
+          swiftcCallDone = true;
+          cb(new Error('swiftc: command not found'));
+        } else {
+          cb(null, { stdout: Buffer.alloc(0), stderr: '' });
+        }
+      });
+      mockReadFile.mockResolvedValue(fakeJpeg);
+
+      // Act
+      const emitter = service.startCapture('session-fallback', 'ios', 'UDID-FALLBACK');
+
+      // Wait long enough for: access rejection → compilation attempt → swiftc failure
+      // → catch handler → runCaptureLoop → first xcrun call → readFile → frame event.
+      const frameData = await waitForEvent(emitter, 'frame', 10_000);
+      service.stopCapture('session-fallback');
+
+      // Assert — received a valid frame via the xcrun fallback path.
+      expect(Buffer.isBuffer(frameData)).toBe(true);
+      expect((frameData as Buffer).equals(fakeJpeg)).toBe(true);
+    });
+
+    it('skips compilation when the cached binary already exists (access resolves)', async () => {
+      // Arrange — access resolves (default), so writeFile and swiftc must NOT be called.
+      const mockProcess = makeMockChildProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      // Act
+      service.startCapture('session-skip-compile', 'ios', 'UDID-SKIP');
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      // Assert — no compilation was attempted.
+      expect(mockWriteFile).not.toHaveBeenCalled();
+      expect(mockExecFile).not.toHaveBeenCalled();
+      // And spawn WAS called (persistent process path taken).
+      expect(mockSpawn).toHaveBeenCalled();
+      // readFile was called to check the version sidecar (but no recompile occurred).
+      expect(mockReadFile).toHaveBeenCalled();
+    });
+
+    it('recompiles when the version sidecar file is missing (readFile rejects)', async () => {
+      // Arrange — binary exists, but version file is missing.
+      mockAccess.mockResolvedValue(undefined);
+      mockReadFile.mockRejectedValue(new Error('ENOENT: no such file or directory'));
+
+      const mockProcess = makeMockChildProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      // Make execFile succeed (swiftc compilation).
+      makeExecFileSucceed();
+
+      // Act
+      service.startCapture('session-recompile-no-ver', 'ios', 'UDID-NOVER');
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // Assert — Swift source written and swiftc invoked.
+      expect(mockWriteFile).toHaveBeenCalledWith(
+        expect.stringContaining('wms-ios-capture-stream.swift'),
+        expect.any(String),
+        'utf8',
+      );
+      expect(mockExecFile).toHaveBeenCalledWith(
+        'swiftc',
+        expect.arrayContaining([expect.stringContaining('wms-ios-capture-stream.swift')]),
+        expect.anything(),
+        expect.any(Function),
+      );
+      // Version file written after successful compilation.
+      expect(mockWriteFile).toHaveBeenCalledWith(
+        expect.stringContaining('wms-ios-capture-stream.ver'),
+        '2',
+        'utf8',
+      );
+    });
+
+    it('recompiles when the cached binary has a stale version', async () => {
+      // Arrange — binary exists, but version sidecar returns an old version.
+      mockAccess.mockResolvedValue(undefined);
+      mockReadFile.mockResolvedValue('1'); // old version
+
+      const mockProcess = makeMockChildProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      makeExecFileSucceed();
+
+      // Act
+      service.startCapture('session-recompile-stale', 'ios', 'UDID-STALE');
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // Assert — recompilation was triggered.
+      expect(mockExecFile).toHaveBeenCalledWith(
+        'swiftc',
+        expect.any(Array),
+        expect.anything(),
+        expect.any(Function),
+      );
+      // Old binary was deleted before recompile.
+      expect(mockUnlink).toHaveBeenCalledWith(
+        expect.stringContaining('wms-ios-capture-stream'),
+      );
+      // Version file written with new version.
+      expect(mockWriteFile).toHaveBeenCalledWith(
+        expect.stringContaining('wms-ios-capture-stream.ver'),
+        '2',
+        'utf8',
+      );
+    });
+
+    it('writes the version sidecar file after fresh compilation', async () => {
+      // Arrange — binary does not exist.
+      mockAccess.mockRejectedValue(new Error('ENOENT: no such file or directory'));
+      makeExecFileSucceed();
+
+      const mockProcess = makeMockChildProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      // Act
+      service.startCapture('session-ver-write', 'ios', 'UDID-VERWRITE');
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // Assert — version sidecar written after compilation.
+      expect(mockWriteFile).toHaveBeenCalledWith(
+        expect.stringContaining('wms-ios-capture-stream.ver'),
+        '2',
+        'utf8',
+      );
     });
   });
 
@@ -269,19 +581,41 @@ describe('ScreenCaptureService', () => {
       expect(service.getEmitter('session-keep')).not.toBeNull();
     });
 
-    it('attempts to unlink the temp file for iOS captures', async () => {
-      // Arrange
-      const sessionId = 'session-unlink-ios';
-      service.startCapture(sessionId, 'ios', 'UDID-IOS-UNLINK');
+    it('sends SIGTERM to the capture process when stopped', async () => {
+      // Arrange — spawn returns a controllable mock process.
+      const mockProcess = makeMockChildProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      const sessionId = 'session-sigterm';
+      service.startCapture(sessionId, 'ios', 'UDID-SIGTERM');
+
+      // Wait for ensureCaptureBinaryCompiled → startIOSCaptureProcess to run.
+      await new Promise(resolve => setTimeout(resolve, 0));
 
       // Act
       service.stopCapture(sessionId);
 
-      // Yield so the fire-and-forget unlink() promise has a chance to execute.
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      // Assert — kill was called with SIGTERM.
+      expect(mockProcess.kill).toHaveBeenCalledWith('SIGTERM');
+    });
 
-      // Assert
-      expect(mockUnlink).toHaveBeenCalledWith(`/tmp/wms-capture-${sessionId}.jpg`);
+    it('does NOT unlink a temp file for iOS captures using the persistent process', async () => {
+      // Arrange — access resolves (default) → persistent process path is taken.
+      const mockProcess = makeMockChildProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      const sessionId = 'session-no-unlink-ios-persistent';
+      service.startCapture(sessionId, 'ios', 'UDID-IOS-UNLINK');
+
+      // Wait for the process to be spawned so captureProcess is set on the session.
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      // Act
+      service.stopCapture(sessionId);
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      // Assert — unlink must NOT be called because hadCaptureProcess is true.
+      expect(mockUnlink).not.toHaveBeenCalled();
     });
 
     it('does NOT attempt to unlink a temp file for Android captures', async () => {
@@ -295,8 +629,31 @@ describe('ScreenCaptureService', () => {
       // Yield to let any async side-effects flush.
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      // Assert — unlink must never be called for Android sessions
+      // Assert — unlink must never be called for Android sessions.
       expect(mockUnlink).not.toHaveBeenCalled();
+    });
+
+    it('does not emit an error event after stopCapture is called before process exits', async () => {
+      // Arrange
+      const mockProcess = makeMockChildProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      const sessionId = 'session-no-error-on-stop';
+      const emitter = service.startCapture(sessionId, 'ios', 'UDID-CLEAN-STOP');
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      let errorFired = false;
+      emitter.on('error', () => { errorFired = true; });
+
+      // Act — stop cleanly, then simulate the process exiting (code 0).
+      service.stopCapture(sessionId);
+      // After stopCapture, session.active is false — exit should be silently ignored.
+      mockProcess.emit('exit', 0, null);
+
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      // Assert — no error was emitted because session.active was already false.
+      expect(errorFired).toBe(false);
     });
   });
 
@@ -390,6 +747,28 @@ describe('ScreenCaptureService', () => {
         service.cleanup();
       }).not.toThrow();
     });
+
+    it('sends SIGTERM to all active iOS capture processes on cleanup', async () => {
+      // Arrange — two separate iOS sessions each with their own mock process.
+      const mockProcess1 = makeMockChildProcess();
+      const mockProcess2 = makeMockChildProcess();
+      mockSpawn
+        .mockReturnValueOnce(mockProcess1)
+        .mockReturnValueOnce(mockProcess2);
+
+      service.startCapture('cleanup-kill-1', 'ios', 'UDID-K1');
+      service.startCapture('cleanup-kill-2', 'ios', 'UDID-K2');
+
+      // Wait for both spawns to complete.
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      // Act
+      service.cleanup();
+
+      // Assert — both processes were killed.
+      expect(mockProcess1.kill).toHaveBeenCalledWith('SIGTERM');
+      expect(mockProcess2.kill).toHaveBeenCalledWith('SIGTERM');
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -397,7 +776,7 @@ describe('ScreenCaptureService', () => {
   // -------------------------------------------------------------------------
 
   describe('error handling', () => {
-    it('emits error after MAX_CONSECUTIVE_FAILURES (5) failures', async () => {
+    it('emits error after MAX_CONSECUTIVE_FAILURES (5) failures for Android', async () => {
       // Arrange — make every execFile call fail immediately.
       makeExecFileFail('simulated capture failure');
 
@@ -414,15 +793,12 @@ describe('ScreenCaptureService', () => {
       expect((errorData as Error).message).toMatch(/failed after 5 consecutive errors/i);
     });
 
-    it('stops the capture after max consecutive failures', async () => {
+    it('stops the capture after max consecutive failures for Android', async () => {
       // Arrange
       makeExecFileFail('fail-for-stop-check');
 
       const sessionId = 'session-auto-stop';
-      const emitter = service.startCapture(sessionId, 'ios', 'UDID-FAIL');
-
-      // Also mock readFile to reject so the iOS path fails too.
-      mockReadFile.mockRejectedValue(new Error('readFile failure'));
+      const emitter = service.startCapture(sessionId, 'android', 'emulator-5554');
 
       // Act — wait for the error event that fires after 5 failures.
       await waitForEvent(emitter, 'error', 10_000);
@@ -432,9 +808,9 @@ describe('ScreenCaptureService', () => {
       expect(service.getEmitter(sessionId)).toBeNull();
     });
 
-    it('resets the consecutive failure counter after a successful frame', async () => {
-      // Arrange — first few calls fail, then one succeeds.
-      const fakeJpeg = Buffer.from([0xff, 0xd8, 0xff]);
+    it('resets the consecutive failure counter after a successful frame (Android)', async () => {
+      // Arrange — first few calls fail, then succeed forever after.
+      const fakePng = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
       let callCount = 0;
 
       mockExecFile.mockImplementation(
@@ -444,27 +820,27 @@ describe('ScreenCaptureService', () => {
           if (callCount <= 3) {
             cb(new Error('transient failure'));
           } else {
-            cb(null, { stdout: Buffer.alloc(0), stderr: '' });
+            cb(null, { stdout: fakePng, stderr: '' });
           }
         },
       );
-      mockReadFile.mockResolvedValue(fakeJpeg);
 
       const sessionId = 'session-reset-failures';
 
       // Act — wait for a successful frame (which means the counter reset).
-      const emitter = service.startCapture(sessionId, 'ios', 'UDID-RESET');
+      const emitter = service.startCapture(sessionId, 'android', 'emulator-5554');
       const frame = await waitForEvent(emitter, 'frame', 10_000);
 
       service.stopCapture(sessionId);
 
       // Assert — we received a valid frame, proving the loop recovered.
       expect(Buffer.isBuffer(frame)).toBe(true);
+      expect((frame as Buffer).equals(fakePng)).toBe(true);
     });
 
-    it('does not emit error for fewer than 5 consecutive failures when a frame succeeds first', async () => {
+    it('does not emit error for fewer than 5 consecutive failures when a frame succeeds first (Android)', async () => {
       // Arrange — fail 4 times, then succeed.
-      const fakeJpeg = Buffer.from([0xff, 0xd8, 0xff]);
+      const fakePng = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
       let callCount = 0;
 
       mockExecFile.mockImplementation(
@@ -474,15 +850,14 @@ describe('ScreenCaptureService', () => {
           if (callCount <= 4) {
             cb(new Error('transient sub-threshold failure'));
           } else {
-            cb(null, { stdout: Buffer.alloc(0), stderr: '' });
+            cb(null, { stdout: fakePng, stderr: '' });
           }
         },
       );
-      mockReadFile.mockResolvedValue(fakeJpeg);
 
       const sessionId = 'session-below-threshold';
       let errorFired = false;
-      const emitter = service.startCapture(sessionId, 'ios', 'UDID-THRESHOLD');
+      const emitter = service.startCapture(sessionId, 'android', 'emulator-5554');
       emitter.on('error', () => { errorFired = true; });
 
       // Wait for the first successful frame.
@@ -507,6 +882,196 @@ describe('ScreenCaptureService', () => {
 
       // Assert — the last error message should appear in the emitted error.
       expect(error.message).toContain(lastErrorMsg);
+    });
+
+    it('emits error when the iOS capture process exits unexpectedly with non-zero code', async () => {
+      // Arrange — create MAX_IOS_CAPTURE_RESTARTS + 1 mock processes so each
+      // restart attempt gets a fresh process to emit 'exit' on.
+      // The service restarts up to MAX_IOS_CAPTURE_RESTARTS (5) times before
+      // giving up and emitting an 'error' on the session emitter.
+      const MAX_RESTARTS = 5;
+      const mockProcesses = Array.from({ length: MAX_RESTARTS + 1 }, makeMockChildProcess);
+      let spawnCallIndex = 0;
+      mockSpawn.mockImplementation(() => mockProcesses[spawnCallIndex++]);
+
+      vi.useFakeTimers();
+      try {
+        const sessionId = 'session-ios-crash';
+        const emitter = service.startCapture(sessionId, 'ios', 'UDID-CRASH');
+
+        // Flush the promise chain (access → then → startIOSCaptureProcess) so
+        // the 'exit' listener is registered on the first mock process.
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        const errorPromise = waitForEvent(emitter, 'error', 15_000);
+
+        // Act — exhaust all restart attempts by firing 'exit' on each spawned process.
+        // Between each exit and the next spawn there is a 1000ms setTimeout.
+        for (let i = 0; i <= MAX_RESTARTS; i++) {
+          mockProcesses[i]!.emit('exit', 1, null);
+          // Advance fake timers so the 1000ms restart delay fires and the next
+          // startIOSCaptureProcess() call runs (which calls spawn again).
+          await vi.advanceTimersByTimeAsync(1100);
+        }
+
+        // Assert — after exhausting all restarts, an error is emitted.
+        const error = await errorPromise;
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toContain('exhausted all 5 restart attempts');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('cleans up the session map when iOS capture process exits unexpectedly', async () => {
+      // Arrange — same restart-exhaustion setup as the error-emission test above.
+      const MAX_RESTARTS = 5;
+      const mockProcesses = Array.from({ length: MAX_RESTARTS + 1 }, makeMockChildProcess);
+      let spawnCallIndex = 0;
+      mockSpawn.mockImplementation(() => mockProcesses[spawnCallIndex++]);
+
+      vi.useFakeTimers();
+      try {
+        const sessionId = 'session-ios-crash-cleanup';
+        const emitter = service.startCapture(sessionId, 'ios', 'UDID-CRASH-CLEANUP');
+
+        // Flush promise chain so the first process is spawned.
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        const errorPromise = waitForEvent(emitter, 'error', 15_000);
+
+        // Exhaust all restart attempts.
+        for (let i = 0; i <= MAX_RESTARTS; i++) {
+          mockProcesses[i]!.emit('exit', 1, null);
+          await vi.advanceTimersByTimeAsync(1100);
+        }
+
+        await errorPromise;
+      } finally {
+        vi.useRealTimers();
+      }
+
+      // Assert — session is removed from the active map after all restarts fail.
+      expect(service.getActiveCount()).toBe(0);
+      expect(service.getEmitter('session-ios-crash-cleanup')).toBeNull();
+    });
+
+    it('emits error when the iOS capture process emits an error event', async () => {
+      // Arrange — exhaust all restart attempts via the 'error' event path.
+      const MAX_RESTARTS = 5;
+      const mockProcesses = Array.from({ length: MAX_RESTARTS + 1 }, makeMockChildProcess);
+      let spawnCallIndex = 0;
+      mockSpawn.mockImplementation(() => mockProcesses[spawnCallIndex++]);
+
+      vi.useFakeTimers();
+      try {
+        const sessionId = 'session-ios-spawn-error';
+        const emitter = service.startCapture(sessionId, 'ios', 'UDID-SPAWN-ERR');
+
+        // Flush promise chain so the first process is spawned.
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        const errorPromise = waitForEvent(emitter, 'error', 15_000);
+
+        // Act — fire 'error' on each spawned process, advancing fake timers between
+        // each attempt so the 1000ms restart delay fires.
+        const spawnError = new Error('ENOENT: spawn failed');
+        for (let i = 0; i <= MAX_RESTARTS; i++) {
+          mockProcesses[i]!.emit('error', spawnError);
+          await vi.advanceTimersByTimeAsync(1100);
+        }
+
+        const error = await errorPromise;
+
+        // Assert — once all restarts are exhausted the original error is re-emitted.
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toBe('ENOENT: spawn failed');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not emit a double error when iOS process emits error then exit', async () => {
+      // Arrange — with restart logic, emitting both 'error' and 'exit' on the same
+      // process schedules two restart setTimeout calls.  We exhaust both chains and
+      // verify that the session emitter fires at most 1 'error' event total.
+      // Each chain needs MAX_RESTARTS + 1 = 6 processes; provision generously.
+      const MAX_RESTARTS = 5;
+      const mockProcesses = Array.from({ length: (MAX_RESTARTS + 1) * 2 }, makeMockChildProcess);
+      let spawnCallIndex = 0;
+      mockSpawn.mockImplementation(() => mockProcesses[spawnCallIndex++] ?? makeMockChildProcess());
+
+      vi.useFakeTimers();
+      try {
+        const sessionId = 'session-double-error';
+        const emitter = service.startCapture(sessionId, 'ios', 'UDID-DOUBLE');
+
+        // Flush promise chain so the first process is spawned.
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        const errors: unknown[] = [];
+        emitter.on('error', (e: unknown) => errors.push(e));
+
+        // Act — emit both 'error' and then 'exit' on the initial process.
+        // Both handlers schedule a restart since restartCount = 0 < 5.
+        const spawnError = new Error('spawn ENOENT');
+        mockProcesses[0]!.emit('error', spawnError);
+        mockProcesses[0]!.emit('exit', null, 'SIGKILL');
+
+        // Advance timers far enough for all chained restarts in both paths to run
+        // and exhaust.  2 chains × 5 restarts × 1100ms per step = 11000ms.
+        for (let tick = 0; tick < (MAX_RESTARTS + 1) * 2 + 2; tick++) {
+          await vi.advanceTimersByTimeAsync(1100);
+          // Trigger exit/error on any newly spawned processes so their chains
+          // also exhaust without hanging.
+          for (let p = 1; p < spawnCallIndex; p++) {
+            const proc = mockProcesses[p];
+            if (proc) {
+              proc.emit('exit', 1, null);
+            }
+          }
+        }
+
+        // Assert — at most 1 error emitted; the second exhaustion finds
+        // session.active = false and returns without emitting again.
+        expect(errors.length).toBeLessThanOrEqual(1);
+      } finally {
+        vi.useRealTimers();
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 10));
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // getActiveCount()
+  // -------------------------------------------------------------------------
+
+  describe('getActiveCount()', () => {
+    it('returns 0 when no captures are active', () => {
+      expect(service.getActiveCount()).toBe(0);
+    });
+
+    it('returns the correct count as captures are started and stopped', () => {
+      service.startCapture('count-a', 'ios', 'UDID-CA');
+      expect(service.getActiveCount()).toBe(1);
+
+      service.startCapture('count-b', 'android', 'emulator-5554');
+      expect(service.getActiveCount()).toBe(2);
+
+      service.stopCapture('count-a');
+      expect(service.getActiveCount()).toBe(1);
+
+      service.stopCapture('count-b');
+      expect(service.getActiveCount()).toBe(0);
     });
   });
 });

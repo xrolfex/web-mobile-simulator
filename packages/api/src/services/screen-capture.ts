@@ -1,7 +1,10 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
+import { readFile, unlink, writeFile, access, constants as fsConstants } from 'node:fs/promises';
 import { promisify } from 'node:util';
-import { readFile, unlink } from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { config } from '../config.js';
 
 // ---------------------------------------------------------------------------
@@ -25,16 +28,21 @@ export interface CaptureSession {
   platform: 'ios' | 'android';
   /** iOS UDID or Android serial (e.g. `'emulator-5554'`). */
   deviceId: string;
-  /** Target frames-per-second. Actual FPS will be lower due to capture latency. */
+  /** Target frames-per-second. Actual FPS may be lower if capture latency exceeds the frame budget. */
   targetFps: number;
   /** Whether the capture loop is actively running. */
   active: boolean;
 }
 
-/** Internal record that adds the emitter and abort controller to CaptureSession. */
+/** Internal record that adds runtime state to CaptureSession. */
 interface InternalCaptureSession extends CaptureSession {
   emitter: EventEmitter;
+  /** Used by Android polling loop to signal stop. */
   abortController: AbortController;
+  /** iOS only: the persistent capture child process. */
+  captureProcess?: ChildProcess;
+  /** iOS only: accumulates partial frame data read from the capture process stdout. */
+  frameBuffer: Buffer;
 }
 
 // ---------------------------------------------------------------------------
@@ -58,7 +66,7 @@ function warn(message: string): void {
 // ---------------------------------------------------------------------------
 
 /** Default frames-per-second target if none is specified. */
-const DEFAULT_TARGET_FPS = 8;
+const DEFAULT_TARGET_FPS = 15;
 
 /** Maximum consecutive capture failures before the loop is stopped. */
 const MAX_CONSECUTIVE_FAILURES = 5;
@@ -81,6 +89,146 @@ const XCRUN_EXEC_OPTIONS: import('node:child_process').ExecFileOptions = {
 
 /** Fully-qualified path to the `adb` binary derived from config. */
 const ADB = `${config.androidSdkRoot}/platform-tools/adb`;
+
+/** Path where the compiled iOS capture binary is cached across server restarts. */
+const CAPTURE_BINARY_PATH = join(tmpdir(), 'wms-ios-capture-stream');
+
+/** Temp path used to write the Swift source before compilation. */
+const CAPTURE_SWIFT_TMP_PATH = join(tmpdir(), 'wms-ios-capture-stream.swift');
+
+/** Maximum number of times the iOS capture process is restarted before giving up. */
+const MAX_IOS_CAPTURE_RESTARTS = 5;
+
+/** Version tag for the compiled iOS capture binary. Increment to force recompilation. */
+const CAPTURE_BINARY_VERSION = '2';
+
+/** Sidecar file that stores the version of the currently-cached binary. */
+const CAPTURE_BINARY_VERSION_PATH = join(tmpdir(), 'wms-ios-capture-stream.ver');
+
+// ---------------------------------------------------------------------------
+// Embedded Swift source
+// ---------------------------------------------------------------------------
+
+/**
+ * Swift source for the persistent iOS screen capture process.
+ * Uses ScreenCaptureKit SCScreenshotManager (macOS 14+) to capture the
+ * Simulator window by device name, writing 4-byte big-endian length-prefixed
+ * JPEG frames to stdout.
+ */
+const IOS_CAPTURE_SWIFT_SOURCE = `
+import ScreenCaptureKit
+import CoreGraphics
+import Foundation
+import AppKit
+import UniformTypeIdentifiers
+
+var deviceName: String = ""
+var targetFps: Int = 15
+var argIdx = 1
+while argIdx < CommandLine.arguments.count {
+    switch CommandLine.arguments[argIdx] {
+    case "--device-name":
+        argIdx += 1
+        if argIdx < CommandLine.arguments.count { deviceName = CommandLine.arguments[argIdx] }
+    case "--fps":
+        argIdx += 1
+        if argIdx < CommandLine.arguments.count { targetFps = Int(CommandLine.arguments[argIdx]) ?? 15 }
+    default: break
+    }
+    argIdx += 1
+}
+guard !deviceName.isEmpty else {
+    fputs("Usage: ios-capture-stream --device-name <name> [--fps <fps>]\\n", stderr)
+    exit(1)
+}
+
+// Establish the WindowServer (CGS) connection that ScreenCaptureKit and AppKit
+// require.  Without this, SCShareableContent calls abort with CGS_REQUIRE_INIT.
+NSApplication.shared.setActivationPolicy(.prohibited)
+
+signal(SIGTERM) { _ in exit(0) }
+signal(SIGINT)  { _ in exit(0) }
+
+let stdoutHandle = FileHandle.standardOutput
+
+func writeFrame(_ jpegData: Data) {
+    var length = UInt32(jpegData.count).bigEndian
+    let lengthData = withUnsafeBytes(of: &length) { Data($0) }
+    stdoutHandle.write(lengthData)
+    stdoutHandle.write(jpegData)
+}
+
+@available(macOS 14.0, *)
+func runCaptureLoop() async {
+    let frameInterval: TimeInterval = 1.0 / Double(targetFps)
+    var consecutiveFailures = 0
+    let maxFailures = 30
+
+    while true {
+        let loopStart = Date()
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            let simulatorWindows = content.windows.filter {
+                $0.owningApplication?.bundleIdentifier == "com.apple.iphonesimulator"
+            }
+            guard let window = (
+                simulatorWindows.first(where: { ($0.title ?? "").contains(deviceName) })
+                ?? simulatorWindows.first
+            ) else {
+                consecutiveFailures += 1
+                fputs("[\\(deviceName)] No Simulator window found (\\(consecutiveFailures)/\\(maxFailures))\\n", stderr)
+                if consecutiveFailures >= maxFailures { exit(1) }
+                try await Task.sleep(nanoseconds: 500_000_000)
+                continue
+            }
+            consecutiveFailures = 0
+
+            let filter = SCContentFilter(desktopIndependentWindow: window)
+            let config = SCStreamConfiguration()
+            config.showsCursor = false
+            let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+            config.width  = max(1, Int(window.frame.width  * scale))
+            config.height = max(1, Int(window.frame.height * scale))
+
+            let cgImage = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+
+            let mutableData = NSMutableData()
+            guard let destination = CGImageDestinationCreateWithData(
+                mutableData, UTType.jpeg.identifier as CFString, 1, nil
+            ) else { continue }
+            let options: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: 0.85]
+            CGImageDestinationAddImage(destination, cgImage, options as CFDictionary)
+            guard CGImageDestinationFinalize(destination) else { continue }
+
+            writeFrame(mutableData as Data)
+
+        } catch {
+            consecutiveFailures += 1
+            fputs("[\\(deviceName)] Capture error: \\(error) (\\(consecutiveFailures)/\\(maxFailures))\\n", stderr)
+            if consecutiveFailures >= maxFailures {
+                fputs("[\\(deviceName)] Too many consecutive failures — exiting\\n", stderr)
+                exit(1)
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            continue
+        }
+
+        let elapsed = Date().timeIntervalSince(loopStart)
+        let remaining = frameInterval - elapsed
+        if remaining > 0.001 {
+            try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+        }
+    }
+}
+
+if #available(macOS 14.0, *) {
+    Task { await runCaptureLoop() }
+    RunLoop.main.run()
+} else {
+    fputs("ERROR: iOS persistent capture requires macOS 14.0 or later\\n", stderr)
+    exit(1)
+}
+`;
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -113,11 +261,13 @@ function iosTempFilePath(sessionId: string): string {
  * Manages per-session screen capture loops for iOS Simulators and Android
  * emulators.
  *
- * When `startCapture` is called a background loop begins that continuously
- * captures frames from the device and publishes them as `'frame'` events on
- * the returned {@link EventEmitter}.  Consumers subscribe to those events to
- * receive raw image buffers (JPEG for iOS, PNG for Android) and forward them
- * to browser clients via WebSocket.
+ * For iOS, a persistent Swift binary is compiled on first use (via
+ * `swiftc` + ScreenCaptureKit) and spawned per session.  The binary writes
+ * 4-byte big-endian length-prefixed JPEG frames to stdout which are parsed
+ * and emitted as `'frame'` events.  If compilation fails, the service falls
+ * back to the `xcrun simctl io screenshot` polling loop.
+ *
+ * For Android, `adb exec-out screencap -p` is polled at the target FPS.
  *
  * Export the singleton `screenCaptureService` rather than constructing
  * instances directly.
@@ -125,6 +275,9 @@ function iosTempFilePath(sessionId: string): string {
 export class ScreenCaptureService {
   /** Active capture sessions keyed by session ID. */
   private readonly captures = new Map<string, InternalCaptureSession>();
+
+  /** Shared promise for one-time capture binary compilation. */
+  private compileBinaryPromise: Promise<void> | null = null;
 
   // -------------------------------------------------------------------------
   // Public API
@@ -136,6 +289,10 @@ export class ScreenCaptureService {
    * If a capture is already running for `sessionId` the existing
    * {@link EventEmitter} is returned unchanged.
    *
+   * For iOS, a persistent ScreenCaptureKit-based process is spawned.  If
+   * binary compilation fails the method transparently falls back to the
+   * `xcrun simctl io screenshot` polling loop.
+   *
    * Emits:
    * - `'frame'` — `Buffer` containing JPEG (iOS) or PNG (Android) image data.
    * - `'error'` — `Error` emitted after `MAX_CONSECUTIVE_FAILURES` consecutive
@@ -145,6 +302,8 @@ export class ScreenCaptureService {
    * @param platform   - Target platform: `'ios'` or `'android'`.
    * @param deviceId   - iOS UDID or Android ADB serial (e.g. `'emulator-5554'`).
    * @param targetFps  - Desired capture rate (default {@link DEFAULT_TARGET_FPS}).
+   * @param deviceName - iOS Simulator device name used to locate the correct
+   *                     Simulator window (iOS only, falls back to `deviceId`).
    * @returns An `EventEmitter` that emits `'frame'` and `'error'` events.
    */
   startCapture(
@@ -152,6 +311,7 @@ export class ScreenCaptureService {
     platform: 'ios' | 'android',
     deviceId: string,
     targetFps: number = DEFAULT_TARGET_FPS,
+    deviceName?: string,
   ): EventEmitter {
     const existing = this.captures.get(sessionId);
     if (existing) {
@@ -170,14 +330,34 @@ export class ScreenCaptureService {
       active: true,
       emitter,
       abortController,
+      frameBuffer: Buffer.alloc(0),
     };
 
     this.captures.set(sessionId, session);
 
     log(`Starting ${platform} capture for session ${sessionId} (device=${deviceId}, fps=${targetFps})`);
 
-    // Launch the capture loop in the background — do not await.
-    void this.runCaptureLoop(session);
+    if (platform === 'ios') {
+      // Start a persistent SCScreenshotManager-based capture process.
+      // Falls back to the xcrun polling loop if compilation fails.
+      void this.ensureCaptureBinaryCompiled()
+        .then(() => {
+          if (session.active) {
+            this.startIOSCaptureProcess(session, deviceName ?? deviceId);
+          }
+        })
+        .catch((err: unknown) => {
+          warn(
+            `iOS capture binary unavailable (${(err as Error).message}). ` +
+            'Falling back to xcrun screenshot polling.',
+          );
+          if (session.active) {
+            void this.runCaptureLoop(session);
+          }
+        });
+    } else {
+      void this.runCaptureLoop(session);
+    }
 
     return emitter;
   }
@@ -196,10 +376,18 @@ export class ScreenCaptureService {
     log(`Stopping capture for session ${sessionId}`);
     session.active = false;
     session.abortController.abort();
+
+    // Kill the persistent iOS capture process if running.
+    const hadCaptureProcess = !!session.captureProcess;
+    if (session.captureProcess) {
+      try { session.captureProcess.kill('SIGTERM'); } catch { /* already dead */ }
+      session.captureProcess = undefined;
+    }
+
     this.captures.delete(sessionId);
 
-    // Best-effort temp file cleanup for iOS sessions.
-    if (session.platform === 'ios') {
+    // Best-effort temp file cleanup only for iOS xcrun fallback (no persistent process).
+    if (session.platform === 'ios' && !hadCaptureProcess) {
       const tmpPath = iosTempFilePath(sessionId);
       unlink(tmpPath).catch(() => {
         // File may not exist if a frame was never captured — ignore silently.
@@ -236,12 +424,181 @@ export class ScreenCaptureService {
   }
 
   // -------------------------------------------------------------------------
+  // Private — iOS persistent capture binary
+  // -------------------------------------------------------------------------
+
+  /**
+   * Idempotent: compiles the Swift iOS capture binary if it does not already
+   * exist at {@link CAPTURE_BINARY_PATH}.  Concurrent calls share a single
+   * compilation Promise so the binary is compiled at most once per process.
+   *
+   * @throws If `swiftc` is unavailable or compilation fails.
+   */
+  private ensureCaptureBinaryCompiled(): Promise<void> {
+    if (!this.compileBinaryPromise) {
+      this.compileBinaryPromise = (async () => {
+        // Check if a previously compiled binary is already present.
+        try {
+          await access(CAPTURE_BINARY_PATH, fsConstants.X_OK);
+          // Binary exists — check whether it matches the current source version.
+          try {
+            const ver = await readFile(CAPTURE_BINARY_VERSION_PATH, 'utf8');
+            if (ver.trim() === CAPTURE_BINARY_VERSION) {
+              log('iOS capture binary already compiled — reusing cached binary');
+              return;
+            }
+          } catch {
+            // Version file missing — treat as stale and recompile.
+          }
+          // Version mismatch or missing version file — delete the stale binary.
+          log('iOS capture binary is stale (source changed) — recompiling…');
+          await unlink(CAPTURE_BINARY_PATH).catch(() => {});
+        } catch {
+          // Binary missing or not executable — proceed with compilation.
+        }
+
+        log('Compiling iOS capture binary (first run — this takes a few seconds)…');
+        await writeFile(CAPTURE_SWIFT_TMP_PATH, IOS_CAPTURE_SWIFT_SOURCE, 'utf8');
+        await execFileAsync('swiftc', [
+          CAPTURE_SWIFT_TMP_PATH,
+          '-framework', 'ScreenCaptureKit',
+          '-o', CAPTURE_BINARY_PATH,
+        ], { timeout: 60_000 }); // swiftc can be slow
+        await writeFile(CAPTURE_BINARY_VERSION_PATH, CAPTURE_BINARY_VERSION, 'utf8');
+        log('iOS capture binary compiled successfully');
+      })().catch((err: unknown) => {
+        // Reset so a subsequent session can retry compilation.
+        this.compileBinaryPromise = null;
+        throw err;
+      });
+    }
+    return this.compileBinaryPromise;
+  }
+
+  /**
+   * Spawn the persistent iOS capture binary for a session and wire up
+   * stdout frame parsing and process lifecycle handling.
+   *
+   * @param session      - The internal capture session (must have platform === 'ios').
+   * @param deviceName   - iOS Simulator device name used to locate the correct window.
+   * @param restartCount - Number of times this process has been restarted (default 0).
+   *                       Used to limit total restart attempts to {@link MAX_IOS_CAPTURE_RESTARTS}.
+   */
+  private startIOSCaptureProcess(
+    session: InternalCaptureSession,
+    deviceName: string,
+    restartCount: number = 0,
+  ): void {
+    const { sessionId, targetFps } = session;
+
+    const child = spawn(CAPTURE_BINARY_PATH, [
+      '--device-name', deviceName,
+      '--fps', String(targetFps),
+    ], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    session.captureProcess = child;
+    session.frameBuffer = Buffer.alloc(0);
+
+    child.stdout!.on('data', (chunk: Buffer) => {
+      session.frameBuffer = Buffer.concat([session.frameBuffer, chunk]);
+      this.parseFrameBuffer(session);
+    });
+
+    child.stderr!.on('data', (data: Buffer) => {
+      warn(`iOS capture [${sessionId}]: ${data.toString().trim()}`);
+    });
+
+    child.on('exit', (code, signal) => {
+      if (!session.active) return; // Normal stop via stopCapture — do nothing.
+
+      if (restartCount < MAX_IOS_CAPTURE_RESTARTS) {
+        warn(
+          `iOS capture process for session ${sessionId} exited unexpectedly ` +
+          `(code=${code ?? 'null'}, signal=${signal ?? 'null'}) — ` +
+          `restarting (attempt ${restartCount + 1}/${MAX_IOS_CAPTURE_RESTARTS})…`,
+        );
+        // Keep the emitter in the captures map so WebSocket clients stay connected.
+        // Restart after a short delay to let Simulator.app fully appear.
+        setTimeout(() => {
+          if (session.active) {
+            this.startIOSCaptureProcess(session, deviceName, restartCount + 1);
+          }
+        }, 1000);
+      } else {
+        warn(
+          `iOS capture process for session ${sessionId} exhausted all ` +
+          `${MAX_IOS_CAPTURE_RESTARTS} restart attempts — stopping capture.`,
+        );
+        const err = new Error(
+          `iOS capture process exhausted all ${MAX_IOS_CAPTURE_RESTARTS} restart attempts`,
+        );
+        session.active = false;
+        this.captures.delete(sessionId);
+        session.emitter.emit('error', err);
+      }
+    });
+
+    child.on('error', (err: Error) => {
+      warn(`iOS capture process error for session ${sessionId}: ${err.message}`);
+      if (!session.active) return;
+
+      if (restartCount < MAX_IOS_CAPTURE_RESTARTS) {
+        warn(
+          `Restarting iOS capture process for session ${sessionId} ` +
+          `(attempt ${restartCount + 1}/${MAX_IOS_CAPTURE_RESTARTS})…`,
+        );
+        setTimeout(() => {
+          if (session.active) {
+            this.startIOSCaptureProcess(session, deviceName, restartCount + 1);
+          }
+        }, 1000);
+      } else {
+        session.active = false;
+        this.captures.delete(sessionId);
+        session.emitter.emit('error', err);
+      }
+    });
+
+    log(`iOS capture process started for session ${sessionId} (device="${deviceName}", fps=${targetFps})`);
+  }
+
+  /**
+   * Parse as many complete length-prefixed JPEG frames as possible from
+   * `session.frameBuffer`, emitting a `'frame'` event for each.
+   *
+   * Frame format: [4-byte big-endian uint32 length][JPEG bytes…]
+   *
+   * @param session - The iOS capture session whose `frameBuffer` to parse.
+   */
+  private parseFrameBuffer(session: InternalCaptureSession): void {
+    const HEADER_SIZE = 4;
+    while (session.frameBuffer.length >= HEADER_SIZE) {
+      const frameLength = session.frameBuffer.readUInt32BE(0);
+
+      if (session.frameBuffer.length < HEADER_SIZE + frameLength) {
+        break; // Incomplete frame — wait for more data.
+      }
+
+      const jpegData = session.frameBuffer.subarray(HEADER_SIZE, HEADER_SIZE + frameLength);
+      session.frameBuffer = session.frameBuffer.subarray(HEADER_SIZE + frameLength);
+
+      if (session.active && !session.abortController.signal.aborted) {
+        session.emitter.emit('frame', jpegData);
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Private — capture loops
   // -------------------------------------------------------------------------
 
   /**
    * Main capture loop.  Runs until the session's `AbortController` is aborted
    * or `MAX_CONSECUTIVE_FAILURES` consecutive errors occur.
+   *
+   * Used by Android and by the iOS xcrun fallback path.
    *
    * @param session - The internal capture session to run the loop for.
    */

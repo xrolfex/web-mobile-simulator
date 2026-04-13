@@ -467,43 +467,91 @@ export class IOSSimulatorService {
   // -------------------------------------------------------------------------
 
   /**
-   * Simulate pressing a hardware button on the device.
-   * Uses: `xcrun simctl ui <udid> pressButton <buttonName>`
+   * Simulate pressing a hardware button on the device via AppleScript.
    *
-   * @param udid   - The device UDID.
-   * @param button - Button name: `'home' | 'lock' | 'volumeUp' | 'volumeDown'`
+   * Triggers Simulator.app keyboard shortcuts or Device-menu clicks rather
+   * than `xcrun simctl ui pressButton`, which does not exist — `simctl ui`
+   * only supports `appearance`, `increase_contrast`, and `content_size`.
+   *
+   * Button → Simulator.app action mapping:
+   * - `home`       → Cmd+Shift+H  (Device > Home)
+   * - `lock`       → Device menu item "Lock Screen"
+   * - `volumeUp`   → Device menu item "Volume Up"   (no keyboard shortcut)
+   * - `volumeDown` → Device menu item "Volume Down" (no keyboard shortcut)
+   *
+   * Simulator.app must be running and connected to the device.
+   *
+   * @param udid   - The device UDID (used for logging).
+   * @param button - Button to press: `'home' | 'lock' | 'volumeUp' | 'volumeDown'`
    */
   async pressButton(
     udid: string,
     button: 'home' | 'lock' | 'volumeUp' | 'volumeDown',
   ): Promise<void> {
     log(`Pressing button "${button}" on device ${udid}`);
-    await this.assertSimctlAvailable();
 
-    // simctl uses camelCase for volume buttons
-    const buttonMap: Record<string, string> = {
-      home: 'home',
-      lock: 'lock',
-      volumeUp: 'volumeUp',
-      volumeDown: 'volumeDown',
-    };
-    const simctlButton = buttonMap[button];
-    if (!simctlButton) {
-      throw new Error(`Unknown button: ${button}`);
+    // Map each button to the AppleScript snippet that triggers it.
+    // Simulator.app must be frontmost for keyboard shortcuts to work.
+    let actionSnippet: string;
+    switch (button) {
+      case 'home':
+        // Device > Home (Cmd+Shift+H)
+        actionSnippet = 'keystroke "h" using {command down, shift down}';
+        break;
+      case 'lock':
+        // Device > Lock Screen — use menu click to avoid ambiguity with
+        // Cmd+L which maps to different actions on some Xcode versions.
+        actionSnippet = 'click menu item "Lock Screen" of menu 1 of menu bar item "Device" of menu bar 1';
+        break;
+      case 'volumeUp':
+        // Device > Volume Up — no keyboard shortcut; click the menu item directly.
+        actionSnippet = 'click menu item "Volume Up" of menu 1 of menu bar item "Device" of menu bar 1';
+        break;
+      case 'volumeDown':
+        // Device > Volume Down — no keyboard shortcut; click the menu item directly.
+        actionSnippet = 'click menu item "Volume Down" of menu 1 of menu bar item "Device" of menu bar 1';
+        break;
+      default:
+        throw new Error(`Unknown button: ${button}`);
     }
 
-    await exec(SIMCTL, ['simctl', 'ui', udid, 'pressButton', simctlButton], XCRUN_EXEC_OPTIONS);
+    const script = `
+      tell application "System Events"
+        tell process "Simulator"
+          set frontmost to true
+          ${actionSnippet}
+        end tell
+      end tell
+    `;
+
+    await exec('osascript', ['-e', script]);
     log(`Button "${button}" pressed on device ${udid}`);
   }
 
   /**
-   * Set the device orientation/rotation.
-   * Uses: `xcrun simctl orientation <udid> <orientation>`
+   * Rotate the device orientation via Simulator.app Device-menu clicks.
    *
-   * NOTE: `xcrun simctl orientation` is available in newer Xcode versions.
-   * For older versions, fallback approaches are needed (UI automation).
+   * `xcrun simctl orientation` is NOT a valid simctl subcommand — it does not
+   * exist in any Xcode version.  Instead this method triggers the
+   * Simulator.app Device menu items "Rotate Left" and "Rotate Right".
    *
-   * @param udid        - The device UDID.
+   * **Limitation:** Simulator.app only exposes *relative* rotation commands
+   * (left / right), not absolute orientation setters.  The mapping below
+   * applies a single relative rotation as a best-effort approximation:
+   *
+   * | `orientation`        | Action                        |
+   * |----------------------|-------------------------------|
+   * | `landscapeLeft`      | Device > Rotate Left          |
+   * | `landscapeRight`     | Device > Rotate Right         |
+   * | `portrait`           | Device > Rotate Right (best effort) |
+   * | `portraitUpsideDown` | Device > Rotate Left  (best effort) |
+   *
+   * Callers that need precise absolute orientation control should track the
+   * current orientation externally and issue multiple rotate calls as needed.
+   *
+   * Simulator.app must be running and connected to the device.
+   *
+   * @param udid        - The device UDID (used for logging).
    * @param orientation - `'portrait' | 'landscapeLeft' | 'landscapeRight' | 'portraitUpsideDown'`
    */
   async setOrientation(
@@ -511,52 +559,65 @@ export class IOSSimulatorService {
     orientation: 'portrait' | 'landscapeLeft' | 'landscapeRight' | 'portraitUpsideDown',
   ): Promise<void> {
     log(`Setting orientation to "${orientation}" on device ${udid}`);
-    await this.assertSimctlAvailable();
 
-    const orientationMap: Record<string, string> = {
-      portrait: 'portrait',
-      landscapeLeft: 'landscape left',
-      landscapeRight: 'landscape right',
-      portraitUpsideDown: 'portrait upside down',
+    // Map each requested orientation to the closest Device-menu item name.
+    // "Rotate Left" and "Rotate Right" are the only orientation-related items
+    // available in all Xcode versions — no absolute-orientation menu items exist.
+    const menuItemMap: Record<string, string> = {
+      landscapeLeft:      'Rotate Left',
+      landscapeRight:     'Rotate Right',
+      portrait:           'Rotate Right',  // best-effort relative rotation
+      portraitUpsideDown: 'Rotate Left',   // best-effort relative rotation
     };
 
-    const simctlOrientation = orientationMap[orientation];
-    if (!simctlOrientation) {
-      const validOrientations = Object.keys(orientationMap);
+    const menuItem = menuItemMap[orientation];
+    if (!menuItem) {
       throw new Error(
-        `Invalid orientation: ${orientation}. Valid options: ${validOrientations.join(', ')}`,
+        `Invalid orientation: "${orientation}". ` +
+        `Valid options: ${Object.keys(menuItemMap).join(', ')}`,
       );
     }
 
-    await exec(
-      SIMCTL,
-      ['simctl', 'orientation', udid, simctlOrientation],
-      XCRUN_EXEC_OPTIONS,
-    );
+    const script = `
+      tell application "System Events"
+        tell process "Simulator"
+          set frontmost to true
+          click menu item "${menuItem}" of menu 1 of menu bar item "Device" of menu bar 1
+        end tell
+      end tell
+    `;
+
+    await exec('osascript', ['-e', script]);
     log(`Orientation set to "${orientation}" on device ${udid}`);
   }
 
   /**
-   * Trigger a shake gesture on the device.
-   * Uses: `xcrun simctl ui <udid> shake` (available in Xcode 15+).
+   * Trigger a shake gesture on the device via AppleScript.
    *
-   * Note: This command may not be available in all Xcode versions.
-   * If it fails, a descriptive error is thrown rather than silently swallowed.
+   * `xcrun simctl ui <udid> shake` does not exist — `simctl ui` only supports
+   * `appearance`, `increase_contrast`, and `content_size`.  Instead this
+   * method sends the Simulator.app keyboard shortcut for Device > Shake:
+   * Ctrl+Cmd+Z.
    *
-   * @param udid - The device UDID.
+   * Simulator.app must be running and connected to the device.
+   *
+   * @param udid - The device UDID (used for logging).
    */
   async shake(udid: string): Promise<void> {
     log(`Triggering shake gesture on device ${udid}`);
-    await this.assertSimctlAvailable();
 
-    try {
-      await exec(SIMCTL, ['simctl', 'ui', udid, 'shake'], XCRUN_EXEC_OPTIONS);
-      log(`Shake gesture triggered on device ${udid}`);
-    } catch (error: unknown) {
-      // Shake may not be supported in older Xcode versions — surface a clear message.
-      warn(`Shake gesture failed (may not be supported): ${String(error)}`);
-      throw new Error('Shake gesture is not supported in this Xcode version.');
-    }
+    // Simulator.app Device > Shake (Ctrl+Cmd+Z)
+    const script = `
+      tell application "System Events"
+        tell process "Simulator"
+          set frontmost to true
+          keystroke "z" using {command down, control down}
+        end tell
+      end tell
+    `;
+
+    await exec('osascript', ['-e', script]);
+    log(`Shake gesture triggered on device ${udid}`);
   }
 
   /**
@@ -662,6 +723,11 @@ export class IOSSimulatorService {
    * Required for input injection (tap, swipe, keyboard) since there is no
    * CLI-based input API — Simulator.app acts as the IndigoHID bridge.
    *
+   * Before launching, device bezels (hardware chrome overlays) are disabled
+   * via `defaults write com.apple.iphonesimulator ShowChrome -int 0`. This
+   * makes the window content area exactly equal to the device screen, which
+   * simplifies coordinate mapping for tap and swipe input.
+   *
    * Uses: `open -a Simulator --args -CurrentDeviceUDID <udid>`
    *
    * This is idempotent — calling it when Simulator.app is already running
@@ -671,11 +737,48 @@ export class IOSSimulatorService {
    */
   async openSimulatorApp(udid: string): Promise<void> {
     log(`Opening Simulator.app for device ${udid}`);
+
+    // Disable device bezels so the window content area matches the device
+    // screen exactly, simplifying coordinate mapping for tap/swipe input.
+    // This sets the Simulator.app preference before launch.
+    await exec('defaults', [
+      'write', 'com.apple.iphonesimulator', 'ShowChrome', '-int', '0',
+    ]);
+
     // `open` does not need DEVELOPER_DIR — it is a standard macOS utility.
     await exec('open', ['-a', 'Simulator', '--args', '-CurrentDeviceUDID', udid]);
     // Give Simulator.app time to connect to the booted device.
     await new Promise<void>(resolve => setTimeout(resolve, 2000));
-    log(`Simulator.app launched for device ${udid}`);
+
+    // Hide the Simulator toolbar to reduce chrome height in the captured stream.
+    // This is best-effort — if the toolbar script fails (e.g. the window hasn't
+    // fully rendered yet, or Accessibility permissions are not granted), we log a
+    // warning and continue rather than aborting session creation.
+    const toolbarScript = `
+  tell application "System Events"
+    tell process "Simulator"
+      if exists toolbar 1 of window 1 then
+        if visible of toolbar 1 of window 1 then
+          set visible of toolbar 1 of window 1 to false
+        end if
+      end if
+    end tell
+  end tell
+`;
+    let toolbarHidden = false;
+    try {
+      await exec('osascript', ['-e', toolbarScript]);
+      toolbarHidden = true;
+    } catch (err: unknown) {
+      warn(
+        `Could not hide Simulator toolbar for device ${udid} ` +
+        `(continuing — toolbar hide is cosmetic only): ${String(err)}`,
+      );
+    }
+    log(
+      `Simulator.app launched for device ${udid}` +
+      ` (bezels disabled${toolbarHidden ? ', toolbar hidden' : ''})`,
+    );
   }
 
   /**
@@ -709,57 +812,56 @@ export class IOSSimulatorService {
 
   /**
    * Send a tap at the given normalised coordinates on the iOS simulator.
-   * Uses AppleScript `click at {x, y}` targeting the Simulator.app window.
+   * Uses AppleScript `System Events click at {x, y}` to post a click at
+   * absolute screen coordinates — no focus change required.
+   *
+   * Requires Accessibility permission (same TCC grant used by keystroke/
+   * key-event calls). Fails visibly if permission is denied.
    *
    * Coordinate mapping:
    *   screenX = windowX + normX × windowWidth
-   *   screenY = windowY + TITLE_BAR_HEIGHT + normY × (windowHeight − TITLE_BAR_HEIGHT)
+   *   screenY = windowY + normY × windowHeight
    *
-   * Requires Simulator.app to be running and connected to the device.
-   *
-   * @param udid  - The device UDID (used for logging).
+   * @param udid  - The device UDID (used for logging only).
    * @param normX - Normalised X coordinate (0.0 = left edge, 1.0 = right edge).
    * @param normY - Normalised Y coordinate (0.0 = top edge, 1.0 = bottom edge).
-   * @throws If Simulator.app is not running or the AppleScript fails.
+   * @throws If the osascript click fails or geometry cannot be determined.
    */
   async sendTap(udid: string, normX: number, normY: number): Promise<void> {
     log(`Sending tap to device ${udid} at normalised (${normX.toFixed(3)}, ${normY.toFixed(3)})`);
 
-    const geo = await this.getSimulatorWindowGeometry();
-    const titleBarHeight = 28; // Standard macOS window title-bar height in points.
-    const contentHeight = geo.height - titleBarHeight;
+    const content = await this.getSimulatorContentGeometry();
 
-    const screenX = Math.round(geo.x + normX * geo.width);
-    const screenY = Math.round(geo.y + titleBarHeight + normY * contentHeight);
+    const screenX = Math.round(content.windowX + normX * content.windowWidth);
+    const screenY = Math.round(content.windowY + normY * content.windowHeight);
 
-    const script = `
-      tell application "System Events"
-        tell process "Simulator"
-          click at {${screenX}, ${screenY}}
-        end tell
-      end tell
-    `;
-
-    await exec('osascript', ['-e', script]);
+    const tapScript = `tell application "System Events" to click at {${screenX}, ${screenY}}`;
+    await exec('osascript', ['-e', tapScript]);
     log(`Tap sent to device ${udid} at screen (${screenX}, ${screenY})`);
   }
 
   /**
    * Send a swipe gesture on the iOS simulator.
-   * Uses a Python 3 / Quartz CGEvent sequence (mouse-down → drag → mouse-up)
-   * posted to the HID event tap.  Simulator.app must be the frontmost app so
-   * that the events are routed to it.
+   * Uses a Swift / CoreGraphics CGEvent sequence (mouse-down → drag → mouse-up)
+   * posted via `post(tap: .cghidEventTap)` after activating Simulator.app.
    *
-   * Coordinate mapping uses the same formula as {@link sendTap}.
+   * Unlike `postToPid`, `post(tap: .cghidEventTap)` requires Accessibility
+   * permission (not Input Monitoring). Simulator.app is brought to the
+   * foreground before events are posted so they are routed to it.
    *
-   * @param udid       - The device UDID (used for logging).
+   * Coordinate mapping:
+   *   startX = windowX + normX1 × windowWidth   (absolute screen coordinates)
+   *   startY = windowY + normY1 × windowHeight
+   *   endX   = windowX + normX2 × windowWidth
+   *   endY   = windowY + normY2 × windowHeight
+   *
+   * @param udid       - The device UDID (used for logging only).
    * @param normX1     - Normalised start X (0.0–1.0).
    * @param normY1     - Normalised start Y (0.0–1.0).
    * @param normX2     - Normalised end X (0.0–1.0).
    * @param normY2     - Normalised end Y (0.0–1.0).
    * @param durationMs - Duration of the swipe in milliseconds (default 300).
-   * @throws If Simulator.app is not running, Python 3 is unavailable, or the
-   *         pyobjc-framework-Quartz module is not installed.
+   * @throws If Simulator.app is not running or Swift is unavailable.
    */
   async sendSwipe(
     udid: string,
@@ -775,61 +877,55 @@ export class IOSSimulatorService {
       `(${normX2.toFixed(3)},${normY2.toFixed(3)})`,
     );
 
-    const geo = await this.getSimulatorWindowGeometry();
-    const titleBarHeight = 28;
-    const contentHeight = geo.height - titleBarHeight;
+    const content = await this.getSimulatorContentGeometry();
 
-    const startX = Math.round(geo.x + normX1 * geo.width);
-    const startY = Math.round(geo.y + titleBarHeight + normY1 * contentHeight);
-    const endX = Math.round(geo.x + normX2 * geo.width);
-    const endY = Math.round(geo.y + titleBarHeight + normY2 * contentHeight);
+    const startX = Math.round(content.windowX + normX1 * content.windowWidth);
+    const startY = Math.round(content.windowY + normY1 * content.windowHeight);
+    const endX   = Math.round(content.windowX + normX2 * content.windowWidth);
+    const endY   = Math.round(content.windowY + normY2 * content.windowHeight);
 
-    // Number of intermediate drag steps — roughly one per 30 ms of duration.
     const steps = Math.max(5, Math.round(durationMs / 30));
-    // Per-step delay in seconds (AppleScript / Python time.sleep uses seconds).
     const stepDelaySecs = (durationMs / 1000) / steps;
 
-    // Bring Simulator.app to the front before posting CGEvents so the events
-    // are delivered to the correct window.
-    await exec('osascript', ['-e', 'tell application "Simulator" to activate']);
-    await new Promise<void>(resolve => setTimeout(resolve, 100));
+    const swiftScript = `
+import CoreGraphics
+import Foundation
+import AppKit
 
-    // Build the Python 3 drag script using the Quartz CGEvent API.
-    // pyobjc-framework-Quartz ships with Xcode Command Line Tools on macOS 12+.
-    const pythonScript = `
-import sys, time
-try:
-    from Quartz import (
-        CGEventCreateMouseEvent, CGEventPost,
-        kCGEventLeftMouseDown, kCGEventLeftMouseDragged, kCGEventLeftMouseUp,
-        kCGMouseButtonLeft, kCGHIDEventTap,
-    )
-except ImportError:
-    print("ERROR: pyobjc-framework-Quartz not available", file=sys.stderr)
-    sys.exit(1)
+let apps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.iphonesimulator")
+guard let simulator = apps.first else {
+    fputs("ERROR: Simulator.app not running\\n", stderr)
+    exit(1)
+}
 
-def post(event_type, x, y):
-    event = CGEventCreateMouseEvent(None, event_type, (x, y), kCGMouseButtonLeft)
-    CGEventPost(kCGHIDEventTap, event)
+// Bring Simulator to the foreground so HID events are routed to it.
+simulator.activate(options: .activateIgnoringOtherApps)
+Thread.sleep(forTimeInterval: 0.1)
 
-steps = ${steps}
-step_delay = ${stepDelaySecs}
+func post(_ type: CGEventType, _ x: Double, _ y: Double) {
+    let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: CGPoint(x: x, y: y), mouseButton: .left)
+    event?.post(tap: .cghidEventTap)
+}
 
-post(kCGEventLeftMouseDown, ${startX}, ${startY})
-time.sleep(0.02)
+let steps = ${steps}
+let stepDelay: Double = ${stepDelaySecs}
 
-for i in range(1, steps + 1):
-    t = i / steps
-    ix = ${startX} + (${endX} - ${startX}) * t
-    iy = ${startY} + (${endY} - ${startY}) * t
-    post(kCGEventLeftMouseDragged, ix, iy)
-    time.sleep(step_delay)
+post(.leftMouseDown, ${startX}, ${startY})
+Thread.sleep(forTimeInterval: 0.02)
 
-post(kCGEventLeftMouseUp, ${endX}, ${endY})
+for i in 1...steps {
+    let t = Double(i) / Double(steps)
+    let ix = ${startX} + (${endX} - ${startX}) * t
+    let iy = ${startY} + (${endY} - ${startY}) * t
+    post(.leftMouseDragged, ix, iy)
+    Thread.sleep(forTimeInterval: stepDelay)
+}
+
+post(.leftMouseUp, ${endX}, ${endY})
 `;
 
-    await exec('python3', ['-c', pythonScript]);
-    log(`Swipe sent to device ${udid}`);
+    await exec('swift', ['-e', swiftScript]);
+    log(`Swipe sent to device ${udid} from (${startX}, ${startY}) to (${endX}, ${endY})`);
   }
 
   /**
@@ -904,43 +1000,115 @@ post(kCGEventLeftMouseUp, ${endX}, ${endY})
   // -------------------------------------------------------------------------
 
   /**
-   * Get the Simulator.app window geometry via AppleScript.
+   * Get the Simulator.app **window and content area** geometry via AppleScript.
    *
-   * Queries `System Events` for the position and size of the first Simulator
-   * window.  The result is used to map normalised (0–1) device coordinates
-   * to absolute screen coordinates for `click at` and CGEvent drag operations.
+   * Issues a single batched AppleScript call that fetches both the full window
+   * frame (`window 1`) and the device-screen content area (`group 1 of window 1`)
+   * in one round-trip, returning 8 comma-separated integers:
+   * `winX,winY,winW,winH,contentX,contentY,contentW,contentH`.
    *
-   * @returns Object with `x`, `y` (window origin in screen coordinates) and
-   *          `width`, `height` (window size including the title bar).
-   * @throws If Simulator.app is not running, has no open windows, or the
-   *         AppleScript output cannot be parsed.
+   * The full window frame matches the reference frame of the captured screen
+   * stream (which includes the macOS title bar and the Simulator toolbar), so
+   * normalised coordinates sent from the browser can be mapped directly via:
+   *
+   *   screenX = windowX + normX × windowWidth
+   *   screenY = windowY + normY × windowHeight
+   *
+   * Each integer returned by AppleScript is explicitly coerced to `text` before
+   * `&` concatenation to prevent the `&` operator from building a list instead
+   * of a string (which would produce spurious commas in the output).
+   *
+   * **Fallback**: if the batched query fails (e.g. `group 1 of window 1` is
+   * unavailable on older Xcode versions), the method falls back to a single
+   * window-frame-only AppleScript query and derives the content area origin
+   * using a hardcoded 28 px title-bar offset, emitting a warning so the caller
+   * is aware of reduced accuracy.
+   *
+   * @returns Object with:
+   *   - `x`, `y` — content area origin in screen coordinates
+   *   - `width`, `height` — content area size (excludes window chrome)
+   *   - `windowX`, `windowY` — full window origin in screen coordinates
+   *   - `windowWidth`, `windowHeight` — full window size (includes title bar + toolbar)
+   * @throws If Simulator.app is not running, has no open windows, or both the
+   *         batched and window-frame AppleScript queries fail.
    */
-  private async getSimulatorWindowGeometry(): Promise<{
+  private async getSimulatorContentGeometry(): Promise<{
     x: number;
     y: number;
     width: number;
     height: number;
+    windowX: number;
+    windowY: number;
+    windowWidth: number;
+    windowHeight: number;
   }> {
-    const script = `
+    // --- Primary: single batched query — window frame + content area ---
+    const batchedScript = `
       tell application "System Events"
         tell process "Simulator"
           set winPos to position of window 1
           set winSize to size of window 1
-          return (item 1 of winPos) & "," & (item 2 of winPos) & "," & (item 1 of winSize) & "," & (item 2 of winSize)
+          set contentArea to group 1 of window 1
+          set contentPos to position of contentArea
+          set contentSize to size of contentArea
+          return ((item 1 of winPos) as text) & "," & ((item 2 of winPos) as text) & "," & ((item 1 of winSize) as text) & "," & ((item 2 of winSize) as text) & "," & ((item 1 of contentPos) as text) & "," & ((item 2 of contentPos) as text) & "," & ((item 1 of contentSize) as text) & "," & ((item 2 of contentSize) as text)
         end tell
       end tell
     `;
 
-    const { stdout } = await exec('osascript', ['-e', script]);
-    const parts = stdout.trim().split(',').map(s => parseInt(s.trim(), 10));
+    try {
+      const { stdout } = await exec('osascript', ['-e', batchedScript]);
+      const parts = stdout.trim().split(',').map(s => parseInt(s.trim(), 10));
 
-    if (parts.length < 4 || parts.some(n => isNaN(n))) {
-      throw new Error(
-        `Failed to parse Simulator window geometry from AppleScript output: "${stdout.trim()}"`,
+      if (parts.length >= 8 && parts.every(n => !isNaN(n))) {
+        return {
+          windowX: parts[0]!, windowY: parts[1]!, windowWidth: parts[2]!, windowHeight: parts[3]!,
+          x: parts[4]!, y: parts[5]!, width: parts[6]!, height: parts[7]!,
+        };
+      }
+
+      warn(
+        `Content-area geometry query returned unexpected output: "${stdout.trim()}". ` +
+        'Falling back to window frame with hardcoded title-bar offset.',
+      );
+    } catch (err) {
+      warn(
+        `Content-area geometry query failed (${(err as Error).message}). ` +
+        'Falling back to window frame with hardcoded title-bar offset.',
       );
     }
 
-    return { x: parts[0]!, y: parts[1]!, width: parts[2]!, height: parts[3]! };
+    // --- Fallback: window frame only + hardcoded title-bar offset ---
+    const windowScript = `
+      tell application "System Events"
+        tell process "Simulator"
+          set winPos to position of window 1
+          set winSize to size of window 1
+          return ((item 1 of winPos) as text) & "," & ((item 2 of winPos) as text) & "," & ((item 1 of winSize) as text) & "," & ((item 2 of winSize) as text)
+        end tell
+      end tell
+    `;
+
+    const { stdout: fallbackStdout } = await exec('osascript', ['-e', windowScript]);
+    const fallbackParts = fallbackStdout.trim().split(',').map(s => parseInt(s.trim(), 10));
+
+    if (fallbackParts.length < 4 || fallbackParts.some(n => isNaN(n))) {
+      throw new Error(
+        `Failed to parse Simulator window geometry from AppleScript output: "${fallbackStdout.trim()}"`,
+      );
+    }
+
+    const titleBarHeight = 28; // Hardcoded fallback offset — less accurate than batched query.
+    return {
+      windowX: fallbackParts[0]!,
+      windowY: fallbackParts[1]!,
+      windowWidth: fallbackParts[2]!,
+      windowHeight: fallbackParts[3]!,
+      x: fallbackParts[0]!,
+      y: fallbackParts[1]! + titleBarHeight,
+      width: fallbackParts[2]!,
+      height: fallbackParts[3]! - titleBarHeight,
+    };
   }
 
   /**

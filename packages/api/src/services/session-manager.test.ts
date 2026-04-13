@@ -24,6 +24,7 @@ const mockConfig = {
   maxSessionsPerPlatform: 0,
   sessionMemoryEvictionMs: 15 * 60 * 1000,
   androidSdkRoot: '/mock/android/sdk',
+  iosWarmPoolSize: 0,
 };
 vi.mock('../config.js', () => ({
   get config() {
@@ -39,6 +40,7 @@ vi.mock('./ios-simulator.js', () => ({
     shutdownDevice: vi.fn(),
     deleteDevice: vi.fn(),
     listDevices: vi.fn(),
+    openSimulatorApp: vi.fn(),
   },
 }));
 
@@ -182,6 +184,7 @@ describe('SessionManagerService', () => {
     mockConfig.maxConcurrentSessions = 6;
     mockConfig.maxSessionsPerPlatform = 0;
     mockConfig.sessionMemoryEvictionMs = 15 * 60 * 1000;
+    mockConfig.iosWarmPoolSize = 0;
 
     // Suppress noisy console output during tests
     vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -1106,6 +1109,220 @@ describe('SessionManagerService', () => {
       const err = new SessionCapacityError('oops', 'CAPACITY_GLOBAL', 6, 6);
       expect(err).toBeInstanceOf(Error);
       expect(err).toBeInstanceOf(SessionCapacityError);
+    });
+  });
+
+  // =========================================================================
+  // 12. iOS warm device pool
+  // =========================================================================
+
+  describe('iOS warm device pool', () => {
+    // Helper: access the internal iosPool map directly.
+    function getPool(
+      svc: SessionManagerService,
+    ): Map<string, Array<{ udid: string; deviceName: string }>> {
+      return (svc as unknown as { iosPool: Map<string, Array<{ udid: string; deviceName: string }>> }).iosPool;
+    }
+
+    beforeEach(() => {
+      // Enable pool (size 1) for all tests in this suite.
+      mockConfig.iosWarmPoolSize = 1;
+
+      // Standard iOS mock setup.
+      asMock(iosSimulatorService.createDevice).mockResolvedValue('WARM-UDID-0001');
+      asMock(iosSimulatorService.bootDevice).mockResolvedValue(undefined);
+      asMock(iosSimulatorService.shutdownDevice).mockResolvedValue(undefined);
+      asMock(iosSimulatorService.deleteDevice).mockResolvedValue(undefined);
+    });
+
+    it('does NOT call shutdownDevice/deleteDevice when terminating an iOS session with pool space', async () => {
+      const session = await service.createSession(IOS_REQUEST);
+
+      asMock(screenCaptureService.stopCapture).mockReturnValue(undefined);
+      vi.clearAllMocks(); // clear creation call counts
+
+      await service.terminateSession(session.id);
+
+      expect(asMock(iosSimulatorService.shutdownDevice)).not.toHaveBeenCalled();
+      expect(asMock(iosSimulatorService.deleteDevice)).not.toHaveBeenCalled();
+    });
+
+    it('adds the device UDID to the pool after termination', async () => {
+      const session = await service.createSession(IOS_REQUEST);
+      asMock(screenCaptureService.stopCapture).mockReturnValue(undefined);
+
+      await service.terminateSession(session.id);
+
+      const pool = getPool(service);
+      const key = `${IOS_REQUEST.deviceTypeId}:${IOS_REQUEST.runtimeId}`;
+      expect(pool.has(key)).toBe(true);
+      expect(pool.get(key)![0]!.udid).toBe('WARM-UDID-0001');
+    });
+
+    it('reuses the pooled device on the next createSession — skips createDevice and bootDevice', async () => {
+      // Create + terminate session 1 (fills the pool).
+      const s1 = await service.createSession(IOS_REQUEST);
+      asMock(screenCaptureService.stopCapture).mockReturnValue(undefined);
+      await service.terminateSession(s1.id);
+
+      // Clear call counts so we can check session 2 in isolation.
+      vi.clearAllMocks();
+
+      // Create session 2 — should hit pool.
+      const s2 = await service.createSession(IOS_REQUEST);
+
+      expect(asMock(iosSimulatorService.createDevice)).not.toHaveBeenCalled();
+      expect(asMock(iosSimulatorService.bootDevice)).not.toHaveBeenCalled();
+      expect(asMock(iosSimulatorService.openSimulatorApp)).not.toHaveBeenCalled();
+      expect(s2.status).toBe('active');
+      expect(s2.device.platformDeviceId).toBe('WARM-UDID-0001');
+    });
+
+    it('passes the original deviceName to startCapture when reusing from pool', async () => {
+      const s1 = await service.createSession(IOS_REQUEST);
+      // Capture the deviceName that was used in the first startCapture call.
+      const firstCaptureCall = asMock(screenCaptureService.startCapture).mock.calls[0]!;
+      const originalDeviceName = firstCaptureCall[4] as string; // 5th arg
+
+      asMock(screenCaptureService.stopCapture).mockReturnValue(undefined);
+      await service.terminateSession(s1.id);
+
+      vi.clearAllMocks();
+      await service.createSession(IOS_REQUEST);
+
+      const secondCaptureCall = asMock(screenCaptureService.startCapture).mock.calls[0]!;
+      const reusedDeviceName = secondCaptureCall[4] as string;
+
+      expect(reusedDeviceName).toBe(originalDeviceName);
+    });
+
+    it('calls teardownDevice (shutdownDevice + deleteDevice) when pool is full', async () => {
+      // Create two sessions back-to-back while pool is empty so both go
+      // through the cold path (pool has no entries to claim yet).
+      asMock(iosSimulatorService.createDevice).mockResolvedValue('COLD-UDID-0001');
+      const s1 = await service.createSession(IOS_REQUEST);
+
+      asMock(iosSimulatorService.createDevice).mockResolvedValue('COLD-UDID-0002');
+      const s2 = await service.createSession(IOS_REQUEST);
+
+      asMock(screenCaptureService.stopCapture).mockReturnValue(undefined);
+
+      // Terminate s1 first — goes to pool (pool now full at size=1).
+      await service.terminateSession(s1.id);
+
+      vi.clearAllMocks();
+      asMock(screenCaptureService.stopCapture).mockReturnValue(undefined);
+      asMock(iosSimulatorService.shutdownDevice).mockResolvedValue(undefined);
+      asMock(iosSimulatorService.deleteDevice).mockResolvedValue(undefined);
+
+      // Terminate s2 — pool is full, so s2's device must be torn down.
+      await service.terminateSession(s2.id);
+
+      expect(asMock(iosSimulatorService.shutdownDevice)).toHaveBeenCalledWith('COLD-UDID-0002');
+      expect(asMock(iosSimulatorService.deleteDevice)).toHaveBeenCalledWith('COLD-UDID-0002');
+    });
+
+    it('calls teardownDevice normally when iosWarmPoolSize=0 (pool disabled)', async () => {
+      mockConfig.iosWarmPoolSize = 0;
+
+      const session = await service.createSession(IOS_REQUEST);
+
+      vi.clearAllMocks();
+      asMock(screenCaptureService.stopCapture).mockReturnValue(undefined);
+      asMock(iosSimulatorService.shutdownDevice).mockResolvedValue(undefined);
+      asMock(iosSimulatorService.deleteDevice).mockResolvedValue(undefined);
+      await service.terminateSession(session.id);
+
+      expect(asMock(iosSimulatorService.shutdownDevice)).toHaveBeenCalledWith('WARM-UDID-0001');
+      expect(asMock(iosSimulatorService.deleteDevice)).toHaveBeenCalledWith('WARM-UDID-0001');
+    });
+
+    it('does NOT reuse pool when runtimeId differs', async () => {
+      // Session 1 uses IOS_REQUEST runtimeId.
+      const s1 = await service.createSession(IOS_REQUEST);
+      asMock(screenCaptureService.stopCapture).mockReturnValue(undefined);
+      await service.terminateSession(s1.id);
+
+      vi.clearAllMocks();
+      asMock(iosSimulatorService.createDevice).mockResolvedValue('NEW-UDID-DIFF');
+      asMock(iosSimulatorService.bootDevice).mockResolvedValue(undefined);
+
+      // Session 2 uses a different runtimeId.
+      const differentRequest = { ...IOS_REQUEST, runtimeId: 'com.apple.CoreSimulator.SimRuntime.iOS-18-0' };
+      const s2 = await service.createSession(differentRequest);
+
+      // Should have gone through the cold path.
+      expect(asMock(iosSimulatorService.createDevice)).toHaveBeenCalled();
+      expect(asMock(iosSimulatorService.bootDevice)).toHaveBeenCalled();
+      expect(s2.device.platformDeviceId).toBe('NEW-UDID-DIFF');
+    });
+
+    it('cleanupOrphanIOSDevices skips pooled devices', async () => {
+      // Fill the pool.
+      const s1 = await service.createSession(IOS_REQUEST);
+      asMock(screenCaptureService.stopCapture).mockReturnValue(undefined);
+      await service.terminateSession(s1.id);
+
+      vi.clearAllMocks();
+
+      // Simulate simctl output that includes the pooled UDID.
+      const SIMCTL_WITH_POOLED = {
+        devices: {
+          'com.apple.CoreSimulator.SimRuntime.iOS-17-5': [
+            {
+              udid: 'WARM-UDID-0001', // pooled — must be skipped
+              name: 'wms-session-warmtest',
+              state: 'Booted',
+              isAvailable: true,
+            },
+            {
+              udid: 'ORPHAN-UDID-9999', // real orphan — must be cleaned
+              name: 'wms-session-orphan',
+              state: 'Shutdown',
+              isAvailable: true,
+            },
+          ],
+        },
+      };
+      const { execJSON } = await import('../utils/exec.js');
+      asMock(execJSON).mockResolvedValue(SIMCTL_WITH_POOLED);
+      asMock(iosSimulatorService.shutdownDevice).mockResolvedValue(undefined);
+      asMock(iosSimulatorService.deleteDevice).mockResolvedValue(undefined);
+
+      await service.cleanupOrphanDevices();
+
+      expect(asMock(iosSimulatorService.deleteDevice)).not.toHaveBeenCalledWith('WARM-UDID-0001');
+      expect(asMock(iosSimulatorService.deleteDevice)).toHaveBeenCalledWith('ORPHAN-UDID-9999');
+    });
+
+    it('cleanup() drains the warm pool (calls shutdownDevice + deleteDevice for pooled devices)', async () => {
+      // Fill the pool.
+      const s1 = await service.createSession(IOS_REQUEST);
+      asMock(screenCaptureService.stopCapture).mockReturnValue(undefined);
+      await service.terminateSession(s1.id);
+
+      vi.clearAllMocks();
+      asMock(iosSimulatorService.shutdownDevice).mockResolvedValue(undefined);
+      asMock(iosSimulatorService.deleteDevice).mockResolvedValue(undefined);
+
+      await service.cleanup();
+
+      expect(asMock(iosSimulatorService.shutdownDevice)).toHaveBeenCalledWith('WARM-UDID-0001');
+      expect(asMock(iosSimulatorService.deleteDevice)).toHaveBeenCalledWith('WARM-UDID-0001');
+    });
+
+    it('pool is empty after cleanup()', async () => {
+      const s1 = await service.createSession(IOS_REQUEST);
+      asMock(screenCaptureService.stopCapture).mockReturnValue(undefined);
+      await service.terminateSession(s1.id);
+
+      asMock(iosSimulatorService.shutdownDevice).mockResolvedValue(undefined);
+      asMock(iosSimulatorService.deleteDevice).mockResolvedValue(undefined);
+
+      await service.cleanup();
+
+      const pool = getPool(service);
+      expect(pool.size).toBe(0);
     });
   });
 });

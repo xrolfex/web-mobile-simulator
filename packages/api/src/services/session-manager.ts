@@ -88,8 +88,30 @@ export interface SessionStatusChangedPayload {
 interface InternalSession extends Session {
   /** iOS Simulator UDID — present only for `platform === 'ios'` sessions. */
   _iosUdid?: string;
+  /** Original WMS device name for the iOS Simulator — used by the warm pool. */
+  _iosDeviceName?: string;
   /** Android AVD name — present only for `platform === 'android'` sessions. */
   _androidAvdName?: string;
+}
+
+/**
+ * An entry in the iOS warm device pool.  The device is booted and
+ * Simulator.app is running; it is waiting to be claimed by the next
+ * matching `createSession` call.
+ */
+interface IOSPoolEntry {
+  /** UDID of the booted Simulator. */
+  udid: string;
+  /**
+   * The WMS device name (e.g. "wms-session-abcd1234") used when the device
+   * was originally created.  Passed to `startCapture` so the Swift capture
+   * binary can match the correct Simulator.app window.
+   */
+  deviceName: string;
+  /** Device-type identifier used as the pool key. */
+  deviceTypeId: string;
+  /** Runtime identifier used as the pool key. */
+  runtimeId: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +156,13 @@ export class SessionCapacityError extends Error {
 export class SessionManagerService {
   /** In-memory session store keyed by session ID. */
   private readonly sessions = new Map<string, InternalSession>();
+
+  /**
+   * In-memory warm pool for idle (booted) iOS Simulators, keyed by
+   * `"${deviceTypeId}:${runtimeId}"`.  Each value is an ordered list of
+   * available pool entries (FIFO claim order).
+   */
+  private readonly iosPool = new Map<string, IOSPoolEntry[]>();
 
   /** Handle for the periodic timeout-checker interval. */
   private timeoutCheckInterval: ReturnType<typeof setInterval> | null = null;
@@ -340,10 +369,16 @@ export class SessionManagerService {
     // Stop screen capture first — safe to call even if no capture was started.
     screenCaptureService.stopCapture(id);
 
-    // Shut down and delete the platform device.
-    await this.teardownDevice(session).catch((err: unknown) => {
-      warn(`Device teardown failed for session ${id}: ${String(err)}`);
-    });
+    // For iOS: try to return the device to the warm pool instead of shutting it
+    // down.  If the pool is full, disabled, or the session is not iOS, fall back
+    // to the normal shutdown+delete path.
+    const returnedToPool = this.tryReturnToPool(session);
+    if (!returnedToPool) {
+      // Shut down and delete the platform device.
+      await this.teardownDevice(session).catch((err: unknown) => {
+        warn(`Device teardown failed for session ${id}: ${String(err)}`);
+      });
+    }
 
     session.status = 'terminated';
     session.updatedAt = now();
@@ -384,6 +419,10 @@ export class SessionManagerService {
         }),
       ),
     );
+
+    // Drain the iOS warm pool — sessions terminated above may have been returned
+    // to the pool; drain it to ensure nothing is left booted after shutdown.
+    await this.drainPool();
 
     // Stop any remaining screen captures (e.g. captures whose session was
     // not in the active list due to a state mismatch).
@@ -575,7 +614,62 @@ export class SessionManagerService {
     request: CreateSessionRequest,
   ): Promise<Session> {
     const { id: sessionId } = session;
+
+    // --- Attempt to claim a warm device from the pool ---
+    const poolEntry = this.tryClaimFromPool(request.deviceTypeId, request.runtimeId);
+
+    if (poolEntry) {
+      log(
+        `[${sessionId}] Reusing warm pool device ${poolEntry.udid} ` +
+        `(${poolEntry.deviceName}) — skipping create/boot/open.`,
+      );
+
+      const { udid, deviceName } = poolEntry;
+      session._iosUdid = udid;
+      session._iosDeviceName = deviceName;
+
+      const deviceType: DeviceType = {
+        id: request.deviceTypeId,
+        name: request.deviceTypeId,
+        platform: 'ios',
+        modelName: request.deviceTypeId,
+        modelIdentifier: request.deviceTypeId,
+      };
+      const runtime: Runtime = {
+        id: request.runtimeId,
+        platform: 'ios',
+        version: request.runtimeId,
+        identifier: request.runtimeId,
+        status: 'installed',
+      };
+      const device: SimulatorDevice = {
+        id: udid,
+        platformDeviceId: udid,
+        platform: 'ios',
+        deviceType,
+        runtime,
+        state: 'booted',
+      };
+      session.device = device;
+
+      // Start screen capture (Simulator.app is already running for this device).
+      log(`[${sessionId}] Starting screen capture for warm device ${udid}…`);
+      screenCaptureService.startCapture(sessionId, 'ios', udid, undefined, deviceName);
+      const wsUrl = `/ws/stream/${sessionId}`;
+
+      session.status = 'active';
+      session.streamUrl = wsUrl;
+      session.updatedAt = now();
+      this.persistSession(session, 'update');
+
+      log(`[${sessionId}] iOS session active (warm) — stream: ${wsUrl}`);
+      this.emitStatusChange(session, 'creating');
+      return session;
+    }
+
+    // --- Normal (cold) creation path ---
     const deviceName = `${WMS_IOS_DEVICE_NAME_PREFIX}${shortId(sessionId)}`;
+    session._iosDeviceName = deviceName;
 
     // Step 1 — Create the Simulator device.
     log(`[${sessionId}] Creating iOS Simulator "${deviceName}"…`);
@@ -624,7 +718,7 @@ export class SessionManagerService {
 
     // Step 3 — Start screen capture.
     log(`[${sessionId}] Starting screen capture for iOS Simulator ${udid}…`);
-    screenCaptureService.startCapture(sessionId, 'ios', udid);
+    screenCaptureService.startCapture(sessionId, 'ios', udid, undefined, deviceName);
     const wsUrl = `/ws/stream/${sessionId}`;
 
     // Step 4 — Finalise and activate the session.
@@ -778,6 +872,109 @@ export class SessionManagerService {
   }
 
   // -------------------------------------------------------------------------
+  // Private — iOS warm pool
+  // -------------------------------------------------------------------------
+
+  /**
+   * Attempt to claim an idle device from the warm pool for the given
+   * device-type / runtime combination.  Returns and removes the first
+   * available entry (FIFO), or `undefined` if the pool has no match.
+   *
+   * @param deviceTypeId - Device-type identifier.
+   * @param runtimeId    - Runtime identifier.
+   */
+  private tryClaimFromPool(deviceTypeId: string, runtimeId: string): IOSPoolEntry | undefined {
+    const key = `${deviceTypeId}:${runtimeId}`;
+    const entries = this.iosPool.get(key);
+    if (!entries || entries.length === 0) return undefined;
+
+    const entry = entries.shift()!;
+    if (entries.length === 0) {
+      this.iosPool.delete(key);
+    }
+    return entry;
+  }
+
+  /**
+   * Attempt to return an iOS session's device to the warm pool instead of
+   * shutting it down.  Returns `true` if the device was successfully added to
+   * the pool, `false` if the pool is full, disabled, or the session is not iOS.
+   *
+   * The device stays booted; only the screen capture has been stopped before
+   * this is called.
+   *
+   * @param session - The session whose device should be returned to the pool.
+   */
+  private tryReturnToPool(session: InternalSession): boolean {
+    if (
+      session.device.platform !== 'ios' ||
+      !session._iosUdid ||
+      !session._iosDeviceName ||
+      config.iosWarmPoolSize <= 0
+    ) {
+      return false;
+    }
+
+    const deviceTypeId = session.device.deviceType.id;
+    const runtimeId = session.device.runtime.id;
+    const key = `${deviceTypeId}:${runtimeId}`;
+
+    const entries = this.iosPool.get(key) ?? [];
+    if (entries.length >= config.iosWarmPoolSize) {
+      // Pool is full for this device type — caller must tear down normally.
+      return false;
+    }
+
+    entries.push({
+      udid: session._iosUdid,
+      deviceName: session._iosDeviceName,
+      deviceTypeId,
+      runtimeId,
+    });
+    this.iosPool.set(key, entries);
+
+    log(
+      `[${session.id}] Returned device ${session._iosUdid} (${session._iosDeviceName}) ` +
+      `to warm pool — key="${key}", pool size now ${entries.length}.`,
+    );
+    return true;
+  }
+
+  /**
+   * Shut down and delete all devices currently held in the warm pool.
+   * Called during server shutdown (`cleanup`) to ensure no orphans are left.
+   */
+  private async drainPool(): Promise<void> {
+    let total = 0;
+    for (const entries of this.iosPool.values()) {
+      total += entries.length;
+    }
+
+    if (total === 0) return;
+
+    log(`Draining iOS warm pool (${total} device(s))…`);
+
+    const drainPromises: Promise<void>[] = [];
+
+    for (const entries of this.iosPool.values()) {
+      for (const entry of entries) {
+        drainPromises.push(
+          iosSimulatorService
+            .shutdownDevice(entry.udid)
+            .then(() => iosSimulatorService.deleteDevice(entry.udid))
+            .catch((err: unknown) => {
+              warn(`drainPool: failed to clean up ${entry.udid}: ${String(err)}`);
+            }),
+        );
+      }
+    }
+
+    await Promise.allSettled(drainPromises);
+    this.iosPool.clear();
+    log('iOS warm pool drained.');
+  }
+
+  // -------------------------------------------------------------------------
   // Private — cleanup helpers
   // -------------------------------------------------------------------------
 
@@ -859,10 +1056,17 @@ export class SessionManagerService {
           .map((s) => s._iosUdid!),
       );
 
+      // Also skip devices currently held in the warm pool — they are managed
+      // deliberately and must not be treated as orphans.
+      const pooledUdids = new Set(
+        [...this.iosPool.values()].flatMap((entries) => entries.map((e) => e.udid)),
+      );
+
       for (const runtimeDevices of Object.values(output.devices)) {
         for (const device of runtimeDevices) {
           if (!device.name.startsWith(WMS_IOS_DEVICE_NAME_PREFIX)) continue;
           if (trackedUdids.has(device.udid)) continue;
+          if (pooledUdids.has(device.udid)) continue;
 
           // Matches our naming convention but is not tracked — it's an orphan.
           log(

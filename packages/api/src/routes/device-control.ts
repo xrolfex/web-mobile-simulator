@@ -247,14 +247,13 @@ const deviceControlRoutes: FastifyPluginAsync = async (fastify) => {
    * Trigger a shake gesture on the session's iOS simulator.
    *
    * Note: Shake is iOS-only. Android sessions receive a 400 with
-   * `UNSUPPORTED_ACTION`. The shake command also requires Xcode 15+ — an
-   * appropriate 502 is returned for older installations.
+   * `UNSUPPORTED_ACTION`.
    *
    * Responds with:
    * - 200 OK           — shake triggered successfully
    * - 400 Bad Request  — session not active or Android session
    * - 404 Not Found    — session does not exist
-   * - 502 Bad Gateway  — simctl command failed or not supported
+   * - 502 Bad Gateway  — device command failed
    */
   fastify.post(
     '/api/sessions/:id/control/shake',

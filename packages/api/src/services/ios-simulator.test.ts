@@ -656,72 +656,89 @@ describe('IOSSimulatorService', () => {
   // -------------------------------------------------------------------------
 
   describe('pressButton(udid, button)', () => {
-    macosOnly('calls xcrun simctl ui <udid> pressButton home', async () => {
-      // First call: assertSimctlAvailable() → xcrun --find simctl
-      // Second call: the actual pressButton command
-      mockExec
-        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+    macosOnly('calls osascript with Cmd+Shift+H for home button', async () => {
+      // Arrange — pressButton does NOT call assertSimctlAvailable; only 1 exec call needed
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
+      // Act
       await service.pressButton('TEST-UDID', 'home');
 
-      expect(mockExec.mock.calls[1]).toEqual([
-        'xcrun',
-        ['simctl', 'ui', 'TEST-UDID', 'pressButton', 'home'],
-        expect.any(Object),
+      // Assert — exec called with osascript and a script containing the home shortcut
+      expect(mockExec.mock.calls[0]).toEqual([
+        'osascript',
+        ['-e', expect.stringContaining('keystroke "h" using {command down, shift down}')],
       ]);
     });
 
-    macosOnly('calls xcrun simctl ui <udid> pressButton lock', async () => {
-      mockExec
-        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+    macosOnly('calls osascript with Device menu click for lock button', async () => {
+      // Arrange
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
+      // Act
       await service.pressButton('TEST-UDID', 'lock');
 
-      expect(mockExec.mock.calls[1]).toEqual([
-        'xcrun',
-        ['simctl', 'ui', 'TEST-UDID', 'pressButton', 'lock'],
-        expect.any(Object),
-      ]);
+      // Assert — script contains the Lock Screen menu item click (not a keyboard shortcut)
+      const scriptArg = mockExec.mock.calls[0]![1] as string[];
+      expect(scriptArg[1]).toContain('click menu item "Lock Screen"');
+      expect(scriptArg[1]).toContain('menu bar item "Device"');
     });
 
-    macosOnly('calls xcrun simctl ui <udid> pressButton volumeUp', async () => {
-      mockExec
-        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+    macosOnly('calls osascript with menu click for volumeUp', async () => {
+      // Arrange
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
+      // Act
       await service.pressButton('TEST-UDID', 'volumeUp');
 
-      expect(mockExec.mock.calls[1]).toEqual([
-        'xcrun',
-        ['simctl', 'ui', 'TEST-UDID', 'pressButton', 'volumeUp'],
-        expect.any(Object),
-      ]);
+      // Assert — script contains a click on the Volume Up menu item
+      const scriptArg = mockExec.mock.calls[0]![1] as string[];
+      expect(scriptArg[1]).toContain('Volume Up');
     });
 
-    macosOnly('calls xcrun simctl ui <udid> pressButton volumeDown', async () => {
-      mockExec
-        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+    macosOnly('calls osascript with menu click for volumeDown', async () => {
+      // Arrange
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
+      // Act
       await service.pressButton('TEST-UDID', 'volumeDown');
 
-      expect(mockExec.mock.calls[1]).toEqual([
-        'xcrun',
-        ['simctl', 'ui', 'TEST-UDID', 'pressButton', 'volumeDown'],
-        expect.any(Object),
-      ]);
+      // Assert — script contains a click on the Volume Down menu item
+      const scriptArg = mockExec.mock.calls[0]![1] as string[];
+      expect(scriptArg[1]).toContain('Volume Down');
     });
 
-    macosOnly('exec is called exactly twice (simctl check + pressButton command)', async () => {
-      mockExec
-        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+    macosOnly('exec is called exactly once (no assertSimctlAvailable)', async () => {
+      // Arrange
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
+      // Act
       await service.pressButton('TEST-UDID', 'home');
 
-      expect(mockExec).toHaveBeenCalledTimes(2);
+      // Assert — exactly 1 exec call: just the osascript invocation
+      expect(mockExec).toHaveBeenCalledTimes(1);
+    });
+
+    macosOnly('the AppleScript targets System Events and Simulator process', async () => {
+      // Arrange
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+      // Act
+      await service.pressButton('TEST-UDID', 'home');
+
+      // Assert — the script references both System Events and the Simulator process
+      const scriptArg = mockExec.mock.calls[0]![1] as string[];
+      expect(scriptArg[1]).toContain('System Events');
+      expect(scriptArg[1]).toContain('process "Simulator"');
+    });
+
+    macosOnly('propagates exec failures as thrown errors', async () => {
+      // Arrange — make the single osascript call reject
+      mockExec.mockRejectedValueOnce(new Error('osascript: execution error'));
+
+      // Act & Assert
+      await expect(service.pressButton('TEST-UDID', 'home')).rejects.toThrow(
+        'osascript: execution error',
+      );
     });
   });
 
@@ -730,60 +747,89 @@ describe('IOSSimulatorService', () => {
   // -------------------------------------------------------------------------
 
   describe('setOrientation(udid, orientation)', () => {
-    macosOnly('maps "portrait" to the "portrait" simctl string', async () => {
-      mockExec
-        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+    macosOnly('clicks "Rotate Left" for landscapeLeft', async () => {
+      // Arrange — setOrientation does NOT call assertSimctlAvailable; only 1 exec call needed
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
-      await service.setOrientation('TEST-UDID', 'portrait');
-
-      expect(mockExec.mock.calls[1]).toEqual([
-        'xcrun',
-        ['simctl', 'orientation', 'TEST-UDID', 'portrait'],
-        expect.any(Object),
-      ]);
-    });
-
-    macosOnly('maps "landscapeLeft" to the "landscape left" simctl string', async () => {
-      mockExec
-        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });
-
+      // Act
       await service.setOrientation('TEST-UDID', 'landscapeLeft');
 
-      expect(mockExec.mock.calls[1]).toEqual([
-        'xcrun',
-        ['simctl', 'orientation', 'TEST-UDID', 'landscape left'],
-        expect.any(Object),
+      // Assert — script contains the "Rotate Left" menu item click
+      expect(mockExec.mock.calls[0]).toEqual([
+        'osascript',
+        ['-e', expect.stringContaining('Rotate Left')],
       ]);
     });
 
-    macosOnly('maps "landscapeRight" to the "landscape right" simctl string', async () => {
-      mockExec
-        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+    macosOnly('clicks "Rotate Right" for landscapeRight', async () => {
+      // Arrange
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
+      // Act
       await service.setOrientation('TEST-UDID', 'landscapeRight');
 
-      expect(mockExec.mock.calls[1]).toEqual([
-        'xcrun',
-        ['simctl', 'orientation', 'TEST-UDID', 'landscape right'],
-        expect.any(Object),
+      // Assert — script contains the "Rotate Right" menu item click
+      expect(mockExec.mock.calls[0]).toEqual([
+        'osascript',
+        ['-e', expect.stringContaining('Rotate Right')],
       ]);
     });
 
-    macosOnly('maps "portraitUpsideDown" to the "portrait upside down" simctl string', async () => {
-      mockExec
-        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+    macosOnly('clicks "Rotate Right" for portrait (best-effort)', async () => {
+      // Arrange
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
+      // Act
+      await service.setOrientation('TEST-UDID', 'portrait');
+
+      // Assert — portrait maps to a best-effort "Rotate Right" click
+      const scriptArg = mockExec.mock.calls[0]![1] as string[];
+      expect(scriptArg[1]).toContain('Rotate Right');
+    });
+
+    macosOnly('clicks "Rotate Left" for portraitUpsideDown (best-effort)', async () => {
+      // Arrange
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+      // Act
       await service.setOrientation('TEST-UDID', 'portraitUpsideDown');
 
-      expect(mockExec.mock.calls[1]).toEqual([
-        'xcrun',
-        ['simctl', 'orientation', 'TEST-UDID', 'portrait upside down'],
-        expect.any(Object),
-      ]);
+      // Assert — portraitUpsideDown maps to a best-effort "Rotate Left" click
+      const scriptArg = mockExec.mock.calls[0]![1] as string[];
+      expect(scriptArg[1]).toContain('Rotate Left');
+    });
+
+    macosOnly('exec is called exactly once (no assertSimctlAvailable)', async () => {
+      // Arrange
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+      // Act
+      await service.setOrientation('TEST-UDID', 'landscapeLeft');
+
+      // Assert — exactly 1 exec call: just the osascript invocation
+      expect(mockExec).toHaveBeenCalledTimes(1);
+    });
+
+    macosOnly('the AppleScript clicks via the Device menu bar item', async () => {
+      // Arrange
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+      // Act
+      await service.setOrientation('TEST-UDID', 'landscapeLeft');
+
+      // Assert — the script references the Device menu bar item
+      const scriptArg = mockExec.mock.calls[0]![1] as string[];
+      expect(scriptArg[1]).toContain('menu bar item "Device"');
+    });
+
+    macosOnly('propagates exec failures as thrown errors', async () => {
+      // Arrange — make the single osascript call reject
+      mockExec.mockRejectedValueOnce(new Error('osascript: execution error'));
+
+      // Act & Assert
+      await expect(service.setOrientation('TEST-UDID', 'landscapeLeft')).rejects.toThrow(
+        'osascript: execution error',
+      );
     });
   });
 
@@ -792,28 +838,61 @@ describe('IOSSimulatorService', () => {
   // -------------------------------------------------------------------------
 
   describe('shake(udid)', () => {
-    macosOnly('calls xcrun simctl ui <udid> shake', async () => {
-      mockExec
-        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+    macosOnly('calls osascript with Ctrl+Cmd+Z for Device > Shake', async () => {
+      // Arrange — shake does NOT call assertSimctlAvailable; only 1 exec call needed
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
+      // Act
       await service.shake('TEST-UDID');
 
-      expect(mockExec.mock.calls[1]).toEqual([
-        'xcrun',
-        ['simctl', 'ui', 'TEST-UDID', 'shake'],
-        expect.any(Object),
+      // Assert — exec called with osascript and the Ctrl+Cmd+Z shake shortcut
+      expect(mockExec.mock.calls[0]).toEqual([
+        'osascript',
+        ['-e', expect.stringContaining('keystroke "z" using {command down, control down}')],
       ]);
     });
 
-    macosOnly('throws with "Shake gesture is not supported" message when exec fails', async () => {
-      mockExec
-        .mockResolvedValueOnce({ stdout: '/usr/bin/simctl\n', stderr: '' })
-        .mockRejectedValueOnce(new Error('Command failed: xcrun simctl ui TEST-UDID shake'));
+    macosOnly('exec is called exactly once (no assertSimctlAvailable)', async () => {
+      // Arrange
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
-      await expect(service.shake('TEST-UDID')).rejects.toThrow(
-        'Shake gesture is not supported',
-      );
+      // Act
+      await service.shake('TEST-UDID');
+
+      // Assert — exactly 1 exec call: just the osascript invocation
+      expect(mockExec).toHaveBeenCalledTimes(1);
+    });
+
+    macosOnly('propagates exec failures directly (no custom error message)', async () => {
+      // Arrange — make the single osascript call reject with a raw error
+      mockExec.mockRejectedValueOnce(new Error('osascript error'));
+
+      // Act — capture the thrown error
+      let thrownError: unknown;
+      try {
+        await service.shake('TEST-UDID');
+      } catch (err) {
+        thrownError = err;
+      }
+
+      // Assert — error propagates as-is: message is 'osascript error',
+      // NOT wrapped in "Shake gesture is not supported"
+      expect(thrownError).toBeInstanceOf(Error);
+      expect((thrownError as Error).message).toBe('osascript error');
+      expect((thrownError as Error).message).not.toContain('Shake gesture is not supported');
+    });
+
+    macosOnly('the AppleScript targets System Events and Simulator process', async () => {
+      // Arrange
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+      // Act
+      await service.shake('TEST-UDID');
+
+      // Assert — the script references both System Events and the Simulator process
+      const scriptArg = mockExec.mock.calls[0]![1] as string[];
+      expect(scriptArg[1]).toContain('System Events');
+      expect(scriptArg[1]).toContain('process "Simulator"');
     });
   });
 
@@ -1160,7 +1239,7 @@ describe('IOSSimulatorService', () => {
   // -------------------------------------------------------------------------
 
   describe('openSimulatorApp(udid)', () => {
-    macosOnly('calls exec with "open" and the correct Simulator.app arguments', async () => {
+    macosOnly('calls exec with "defaults write" to disable bezels, then "open" with the correct Simulator.app arguments', async () => {
       // Arrange — use fake timers to skip the 2-second wait
       vi.useFakeTimers();
       mockExec.mockResolvedValue({ stdout: '', stderr: '' });
@@ -1170,16 +1249,28 @@ describe('IOSSimulatorService', () => {
       await vi.runAllTimersAsync();
       await promise;
 
-      // Assert
+      // Assert — first call disables bezels via defaults write
+      expect(mockExec).toHaveBeenCalledWith(
+        'defaults',
+        ['write', 'com.apple.iphonesimulator', 'ShowChrome', '-int', '0'],
+      );
+
+      // Assert — second call launches Simulator.app
       expect(mockExec).toHaveBeenCalledWith(
         'open',
         ['-a', 'Simulator', '--args', '-CurrentDeviceUDID', 'TEST-UDID'],
       );
 
+      // Assert — third call hides the Simulator toolbar
+      expect(mockExec).toHaveBeenCalledWith(
+        'osascript',
+        ['-e', expect.stringContaining('set visible of toolbar 1 of window 1 to false')],
+      );
+
       vi.useRealTimers();
     });
 
-    macosOnly('exec is called exactly once (no assertSimctlAvailable before open)', async () => {
+    macosOnly('exec is called exactly twice: once for defaults write and once for open', async () => {
       // Arrange
       vi.useFakeTimers();
       mockExec.mockResolvedValue({ stdout: '', stderr: '' });
@@ -1189,8 +1280,8 @@ describe('IOSSimulatorService', () => {
       await vi.runAllTimersAsync();
       await promise;
 
-      // Assert — only 1 exec call (the `open` command)
-      expect(mockExec).toHaveBeenCalledTimes(1);
+      // Assert — 3 exec calls: defaults write, open, osascript (toolbar hide)
+      expect(mockExec).toHaveBeenCalledTimes(3);
 
       vi.useRealTimers();
     });
@@ -1205,13 +1296,13 @@ describe('IOSSimulatorService', () => {
       await vi.runAllTimersAsync();
       await promise;
 
-      // Assert — exec called with exactly 2 args (no options object)
+      // Assert — open call is calls[1] (calls[0] is `defaults write`)
       expect(mockExec).toHaveBeenCalledWith(
         'open',
         ['-a', 'Simulator', '--args', '-CurrentDeviceUDID', 'TEST-UDID'],
       );
-      // Specifically, the call should NOT have a 3rd argument (no options)
-      expect(mockExec.mock.calls[0]).toHaveLength(2);
+      // Specifically, the `open` call should NOT have a 3rd argument (no options)
+      expect(mockExec.mock.calls[1]).toHaveLength(2);
 
       vi.useRealTimers();
     });
@@ -1219,7 +1310,9 @@ describe('IOSSimulatorService', () => {
     macosOnly('propagates exec failures as thrown errors', async () => {
       // Arrange
       vi.useFakeTimers();
-      mockExec.mockRejectedValueOnce(new Error('open: cannot find application Simulator'));
+      mockExec
+        .mockResolvedValueOnce({ stdout: '', stderr: '' })           // defaults write succeeds
+        .mockRejectedValueOnce(new Error('open: cannot find application Simulator')); // open fails
 
       // Act & Assert
       await expect(service.openSimulatorApp('TEST-UDID')).rejects.toThrow(
@@ -1240,9 +1333,44 @@ describe('IOSSimulatorService', () => {
       await vi.runAllTimersAsync();
       await promise;
 
-      // Assert — UDID appears as the last argument
-      const callArgs = mockExec.mock.calls[0]![1] as string[];
+      // Assert — UDID appears as the last argument of the `open` call (calls[1])
+      const callArgs = mockExec.mock.calls[1]![1] as string[];
       expect(callArgs[callArgs.length - 1]).toBe(customUdid);
+
+      vi.useRealTimers();
+    });
+
+    macosOnly('hides the Simulator toolbar via osascript after launch', async () => {
+      // Arrange
+      vi.useFakeTimers();
+      mockExec.mockResolvedValue({ stdout: '', stderr: '' });
+
+      // Act
+      const promise = service.openSimulatorApp('TEST-UDID');
+      await vi.runAllTimersAsync();
+      await promise;
+
+      // Assert — third call is osascript to hide toolbar
+      expect(mockExec.mock.calls[2]![0]).toBe('osascript');
+      const osascriptArgs = mockExec.mock.calls[2]![1] as string[];
+      expect(osascriptArgs[0]).toBe('-e');
+      expect(osascriptArgs[1]).toContain('set visible of toolbar 1 of window 1 to false');
+
+      vi.useRealTimers();
+    });
+
+    macosOnly('resolves successfully even when the toolbar osascript call throws (best-effort)', async () => {
+      // Arrange — defaults write and open succeed; osascript (toolbar) throws
+      vi.useFakeTimers();
+      mockExec
+        .mockResolvedValueOnce({ stdout: '', stderr: '' })  // defaults write
+        .mockResolvedValueOnce({ stdout: '', stderr: '' })  // open -a Simulator
+        .mockRejectedValueOnce(new Error('osascript: execution error: System Events got an error: Can\'t get window 1 of process "Simulator".'));  // toolbar hide fails
+
+      // Act — should resolve, not reject
+      const promise = service.openSimulatorApp('TEST-UDID');
+      await vi.runAllTimersAsync();
+      await expect(promise).resolves.toBeUndefined();
 
       vi.useRealTimers();
     });
@@ -1253,15 +1381,17 @@ describe('IOSSimulatorService', () => {
   // -------------------------------------------------------------------------
 
   describe('sendTap(udid, normX, normY)', () => {
-    // Window geometry: x=100, y=200, width=400, height=800
-    // titleBarHeight=28, contentHeight=800-28=772
-    const GEO_STDOUT = '100,200,400,800';
+    // Window geometry (used for normalization): x=100, y=150, width=400, height=880
+    // Content geometry (informational only):    x=100, y=230, width=400, height=800
+    // Window: x=100, y=150, w=400, h=880  (full window including title bar + toolbar)
+    // Content: x=100, y=230, w=400, h=800  (content area inside window)
+    const GEO_STDOUT = '100,150,400,880,100,230,400,800';
 
-    macosOnly('calls exec exactly twice: once for geometry and once for the click script', async () => {
+    macosOnly('calls exec exactly 2 times: geometry + osascript click', async () => {
       // Arrange
       mockExec
-        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' }) // getSimulatorWindowGeometry
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });         // click at {x, y}
+        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' }) // getSimulatorContentGeometry
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });         // osascript click
 
       // Act
       await service.sendTap('TEST-UDID', 0.5, 0.5);
@@ -1270,10 +1400,10 @@ describe('IOSSimulatorService', () => {
       expect(mockExec).toHaveBeenCalledTimes(2);
     });
 
-    macosOnly('computes correct screen coordinates for center point (0.5, 0.5)', async () => {
+    macosOnly('computes correct screen coords for center point (0.5, 0.5)', async () => {
       // Arrange
       // screenX = 100 + 0.5 * 400 = 300
-      // screenY = 200 + 28 + 0.5 * (800-28) = 200 + 28 + 386 = 614
+      // screenY = 150 + 0.5 * 880 = 590
       mockExec
         .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' })
         .mockResolvedValueOnce({ stdout: '', stderr: '' });
@@ -1281,15 +1411,16 @@ describe('IOSSimulatorService', () => {
       // Act
       await service.sendTap('TEST-UDID', 0.5, 0.5);
 
-      // Assert — the click script in the second exec call contains the computed coords
-      const clickScript = mockExec.mock.calls[1]![1] as string[];
-      expect(clickScript[1]).toContain('click at {300, 614}');
+      // Assert — second exec call is osascript click with computed screen coords
+      const osascriptArgs = mockExec.mock.calls[1]![1] as string[];
+      expect(osascriptArgs[0]).toBe('-e');
+      expect(osascriptArgs[1]).toContain('click at {300, 590}');
     });
 
-    macosOnly('computes correct screen coordinates for top-left corner (0, 0)', async () => {
+    macosOnly('computes correct screen coords for top-left corner (0, 0)', async () => {
       // Arrange
-      // screenX = 100 + 0.0 * 400 = 100
-      // screenY = 200 + 28 + 0.0 * 772 = 228
+      // screenX = 100 + 0 * 400 = 100
+      // screenY = 150 + 0 * 880 = 150
       mockExec
         .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' })
         .mockResolvedValueOnce({ stdout: '', stderr: '' });
@@ -1298,14 +1429,15 @@ describe('IOSSimulatorService', () => {
       await service.sendTap('TEST-UDID', 0, 0);
 
       // Assert
-      const clickScript = mockExec.mock.calls[1]![1] as string[];
-      expect(clickScript[1]).toContain('click at {100, 228}');
+      const osascriptArgs = mockExec.mock.calls[1]![1] as string[];
+      expect(osascriptArgs[0]).toBe('-e');
+      expect(osascriptArgs[1]).toContain('click at {100, 150}');
     });
 
-    macosOnly('computes correct screen coordinates for bottom-right corner (1, 1)', async () => {
+    macosOnly('computes correct screen coords for bottom-right corner (1, 1)', async () => {
       // Arrange
-      // screenX = 100 + 1.0 * 400 = 500
-      // screenY = 200 + 28 + 1.0 * 772 = 1000
+      // screenX = 100 + 1 * 400 = 500
+      // screenY = 150 + 1 * 880 = 1030
       mockExec
         .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' })
         .mockResolvedValueOnce({ stdout: '', stderr: '' });
@@ -1314,11 +1446,12 @@ describe('IOSSimulatorService', () => {
       await service.sendTap('TEST-UDID', 1, 1);
 
       // Assert
-      const clickScript = mockExec.mock.calls[1]![1] as string[];
-      expect(clickScript[1]).toContain('click at {500, 1000}');
+      const osascriptArgs = mockExec.mock.calls[1]![1] as string[];
+      expect(osascriptArgs[0]).toBe('-e');
+      expect(osascriptArgs[1]).toContain('click at {500, 1030}');
     });
 
-    macosOnly('the click script targets the Simulator process via System Events', async () => {
+    macosOnly('second exec call uses osascript (no activate call)', async () => {
       // Arrange
       mockExec
         .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' })
@@ -1327,14 +1460,16 @@ describe('IOSSimulatorService', () => {
       // Act
       await service.sendTap('TEST-UDID', 0.5, 0.5);
 
-      // Assert — the click script references "Simulator" process
-      const clickScript = mockExec.mock.calls[1]![1] as string[];
-      expect(clickScript[1]).toContain('tell process "Simulator"');
+      // Assert — second call is osascript (no intermediate activate)
+      expect(mockExec.mock.calls[1]![0]).toBe('osascript');
     });
 
-    macosOnly('throws when getSimulatorWindowGeometry returns unparseable output', async () => {
-      // Arrange — first exec call returns invalid geometry output
-      mockExec.mockResolvedValueOnce({ stdout: 'invalid output', stderr: '' });
+    macosOnly('throws when getSimulatorContentGeometry returns unparseable output on both primary and fallback paths', async () => {
+      // Arrange — primary content-area query returns invalid output → falls back to window frame
+      //           fallback window-frame query also returns invalid output → throws
+      mockExec
+        .mockResolvedValueOnce({ stdout: 'invalid output', stderr: '' })  // content area query fails to parse → falls back
+        .mockResolvedValueOnce({ stdout: 'invalid output', stderr: '' }); // window frame query also fails to parse → throws
 
       // Act & Assert
       await expect(service.sendTap('TEST-UDID', 0.5, 0.5)).rejects.toThrow(
@@ -1342,14 +1477,37 @@ describe('IOSSimulatorService', () => {
       );
     });
 
-    macosOnly('throws when the geometry exec call itself fails', async () => {
-      // Arrange
-      mockExec.mockRejectedValueOnce(new Error('osascript: Simulator is not running'));
+    macosOnly('throws when both the primary and fallback geometry exec calls fail', async () => {
+      // Arrange — primary content-area query throws → falls back to window frame
+      //           fallback window-frame query also throws → error propagates
+      mockExec
+        .mockRejectedValueOnce(new Error('osascript: Simulator is not running'))  // content area query throws → falls back
+        .mockRejectedValueOnce(new Error('osascript: Simulator is not running')); // window frame query also throws → propagates
 
       // Act & Assert
       await expect(service.sendTap('TEST-UDID', 0.5, 0.5)).rejects.toThrow(
         'Simulator is not running',
       );
+    });
+
+    macosOnly('falls back to window frame + 28px offset when content-area query fails', async () => {
+      // Arrange: first exec (content-area query) rejects; second exec (window frame) succeeds;
+      // third exec is the osascript click call.
+      mockExec
+        .mockRejectedValueOnce(new Error('group 1 not found'))            // content area query fails
+        .mockResolvedValueOnce({ stdout: '100,200,400,800', stderr: '' }) // fallback window frame
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });               // osascript click
+
+      // Act
+      await service.sendTap('TEST-UDID', 0.5, 0.5);
+
+      // With fallback window frame (100, 200, 400, 800):
+      // windowX=100, windowY=200, windowWidth=400, windowHeight=800
+      // screenX = 100 + 0.5 * 400 = 300
+      // screenY = 200 + 0.5 * 800 = 600
+      const osascriptArgs = mockExec.mock.calls[2]![1] as string[];
+      expect(osascriptArgs[0]).toBe('-e');
+      expect(osascriptArgs[1]).toContain('click at {300, 600}');
     });
   });
 
@@ -1358,110 +1516,104 @@ describe('IOSSimulatorService', () => {
   // -------------------------------------------------------------------------
 
   describe('sendSwipe(udid, normX1, normY1, normX2, normY2, durationMs)', () => {
-    // Window geometry: x=100, y=200, width=400, height=800
-    // titleBarHeight=28, contentHeight=772
-    const GEO_STDOUT = '100,200,400,800';
+    // Window: x=100, y=150, w=400, h=880
+    // Content: x=100, y=230, w=400, h=800
+    const GEO_STDOUT = '100,150,400,880,100,230,400,800';
 
-    macosOnly('calls exec exactly 3 times: geometry + activate + python3', async () => {
+    macosOnly('calls exec exactly 2 times: geometry + swift CGEvent swipe', async () => {
       // Arrange
-      vi.useFakeTimers();
       mockExec
-        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' }) // getSimulatorWindowGeometry
-        .mockResolvedValueOnce({ stdout: '', stderr: '' })          // osascript activate
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });         // python3
+        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' }) // getSimulatorContentGeometry
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });         // swift CGEvent swipe
 
       // Act
-      const promise = service.sendSwipe('TEST-UDID', 0.0, 0.0, 1.0, 1.0, 300);
-      await vi.runAllTimersAsync();
-      await promise;
+      await service.sendSwipe('TEST-UDID', 0.0, 0.0, 1.0, 1.0, 300);
 
       // Assert
-      expect(mockExec).toHaveBeenCalledTimes(3);
-
-      vi.useRealTimers();
+      expect(mockExec).toHaveBeenCalledTimes(2);
     });
 
-    macosOnly('calls "tell application Simulator to activate" before running python3', async () => {
+    macosOnly('second exec call uses swift -e CGEvent drag', async () => {
       // Arrange
-      vi.useFakeTimers();
       mockExec
         .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' })
-        .mockResolvedValueOnce({ stdout: '', stderr: '' })
         .mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
-      const promise = service.sendSwipe('TEST-UDID', 0.0, 0.0, 1.0, 1.0);
-      await vi.runAllTimersAsync();
-      await promise;
+      await service.sendSwipe('TEST-UDID', 0.0, 0.0, 1.0, 1.0);
 
-      // Assert — second call is the activate AppleScript
-      expect(mockExec.mock.calls[1]).toEqual([
-        'osascript',
-        ['-e', 'tell application "Simulator" to activate'],
-      ]);
-      // Third call is python3
-      expect(mockExec.mock.calls[2]![0]).toBe('python3');
-
-      vi.useRealTimers();
+      // Assert — second call is swift (no intermediate activate)
+      expect(mockExec.mock.calls[1]![0]).toBe('swift');
     });
 
-    macosOnly('embeds correct start and end coordinates in the python3 script', async () => {
+    macosOnly('embeds correct screen coordinates in the swift swipe script', async () => {
       // Arrange
       // startX = round(100 + 0.0 * 400) = 100
-      // startY = round(200 + 28 + 0.0 * 772) = 228
+      // startY = round(150 + 0.0 * 880) = 150
       // endX   = round(100 + 1.0 * 400) = 500
-      // endY   = round(200 + 28 + 1.0 * 772) = 1000
-      vi.useFakeTimers();
+      // endY   = round(150 + 1.0 * 880) = 1030
       mockExec
         .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' })
-        .mockResolvedValueOnce({ stdout: '', stderr: '' })
         .mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
-      const promise = service.sendSwipe('TEST-UDID', 0.0, 0.0, 1.0, 1.0, 300);
-      await vi.runAllTimersAsync();
-      await promise;
+      await service.sendSwipe('TEST-UDID', 0.0, 0.0, 1.0, 1.0, 300);
 
-      // Assert — the python3 script contains the computed start and end coords
-      const pythonScript = mockExec.mock.calls[2]![1] as string[];
-      expect(pythonScript[1]).toContain('post(kCGEventLeftMouseDown, 100, 228)');
-      expect(pythonScript[1]).toContain('post(kCGEventLeftMouseUp, 500, 1000)');
-
-      vi.useRealTimers();
+      // Assert — second exec call is swift -e with computed screen coords in the script
+      const swiftArgs = mockExec.mock.calls[1]![1] as string[];
+      expect(swiftArgs[0]).toBe('-e');
+      expect(swiftArgs[1]).toContain('post(.leftMouseDown, 100, 150)');
+      expect(swiftArgs[1]).toContain('post(.leftMouseUp, 500, 1030)');
+      expect(swiftArgs[1]).toContain('post(tap: .cghidEventTap)');
+      expect(swiftArgs[1]).not.toContain('postToPid');
     });
 
-    macosOnly('python3 script uses -c flag to pass the inline script', async () => {
+    macosOnly('swift swipe script activates Simulator before posting events', async () => {
       // Arrange
-      vi.useFakeTimers();
       mockExec
         .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' })
-        .mockResolvedValueOnce({ stdout: '', stderr: '' })
         .mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
-      const promise = service.sendSwipe('TEST-UDID', 0.25, 0.25, 0.75, 0.75);
-      await vi.runAllTimersAsync();
-      await promise;
+      await service.sendSwipe('TEST-UDID', 0.0, 0.0, 1.0, 1.0, 300);
 
-      // Assert — python3 called with ['-c', <script>]
-      const python3Args = mockExec.mock.calls[2]![1] as string[];
-      expect(python3Args[0]).toBe('-c');
-      expect(typeof python3Args[1]).toBe('string');
+      // Assert — script activates Simulator so HID events are routed to it
+      const swiftArgs = mockExec.mock.calls[1]![1] as string[];
+      expect(swiftArgs[1]).toContain('activate(options:');
+    });
 
-      vi.useRealTimers();
+    macosOnly('falls back to window frame + 28px offset for swipe when content-area query fails', async () => {
+      // Arrange: content-area query rejects → falls back to window-frame query → succeeds
+      // Fallback window frame: x=100, y=200, w=400, h=800
+      // windowX=100, windowY=200, windowWidth=400, windowHeight=800
+      // startX = round(100 + 0.0 * 400) = 100
+      // startY = round(200 + 0.0 * 800) = 200
+      // endX   = round(100 + 1.0 * 400) = 500
+      // endY   = round(200 + 1.0 * 800) = 1000
+      mockExec
+        .mockRejectedValueOnce(new Error('group 1 not found'))            // content-area query fails
+        .mockResolvedValueOnce({ stdout: '100,200,400,800', stderr: '' }) // window frame fallback
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });               // swift CGEvent swipe
+
+      await service.sendSwipe('TEST-UDID', 0.0, 0.0, 1.0, 1.0, 300);
+
+      const swiftArgs = mockExec.mock.calls[2]![1] as string[];
+      expect(swiftArgs[0]).toBe('-e');
+      expect(swiftArgs[1]).toContain('post(.leftMouseDown, 100, 200)');
+      expect(swiftArgs[1]).toContain('post(.leftMouseUp, 500, 1000)');
     });
 
     macosOnly('propagates geometry exec failure as thrown error', async () => {
-      // Arrange
-      vi.useFakeTimers();
-      mockExec.mockRejectedValueOnce(new Error('osascript: Simulator not found'));
+      // Arrange — primary content-area query throws → falls back to window frame
+      //           fallback window-frame query also throws → error propagates
+      mockExec
+        .mockRejectedValueOnce(new Error('osascript: Simulator not found'))  // content area query
+        .mockRejectedValueOnce(new Error('osascript: Simulator not found')); // window frame query
 
       // Act & Assert
       await expect(
         service.sendSwipe('TEST-UDID', 0.0, 0.0, 1.0, 1.0),
       ).rejects.toThrow('Simulator not found');
-
-      vi.useRealTimers();
     });
   });
 

@@ -2,6 +2,7 @@ import dotenv from 'dotenv';
 import { homedir } from 'node:os';
 import {
   DEFAULT_API_PORT,
+  DEFAULT_IOS_WARM_POOL_SIZE,
   DEFAULT_MAX_CONCURRENT_SESSIONS,
   DEFAULT_MAX_SESSIONS_PER_PLATFORM,
   DEFAULT_SESSION_MEMORY_EVICTION_MS,
@@ -46,6 +47,17 @@ export const config = {
    */
   sessionMemoryEvictionMs: parseInt(
     process.env.SESSION_MEMORY_EVICTION_MS || String(DEFAULT_SESSION_MEMORY_EVICTION_MS),
+    10,
+  ),
+
+  /**
+   * Maximum number of warm (booted but idle) iOS Simulators kept in the
+   * in-memory pool per (deviceTypeId, runtimeId) combination.
+   * 0 = pool disabled (always teardown on session end).
+   * Env: `IOS_WARM_POOL_SIZE`.
+   */
+  iosWarmPoolSize: parseInt(
+    process.env.IOS_WARM_POOL_SIZE || String(DEFAULT_IOS_WARM_POOL_SIZE),
     10,
   ),
 } as const;

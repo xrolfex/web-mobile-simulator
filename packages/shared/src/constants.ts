@@ -53,3 +53,11 @@ export const ALLOWED_APP_EXTENSIONS: Record<'ios' | 'android', string[]> = {
   ios: ['.app', '.ipa'],
   android: ['.apk'],
 } as const;
+
+/**
+ * Default maximum number of warm (booted but idle) iOS Simulators kept in the
+ * in-memory pool between sessions.  0 = pool disabled (always teardown).
+ * Per (deviceTypeId, runtimeId) combination.
+ * Env: `IOS_WARM_POOL_SIZE`.
+ */
+export const DEFAULT_IOS_WARM_POOL_SIZE = 1;
