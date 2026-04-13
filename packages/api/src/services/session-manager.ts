@@ -616,6 +616,12 @@ export class SessionManagerService {
     await iosSimulatorService.bootDevice(udid);
     session.device = { ...session.device, state: 'booted' };
 
+    // Step 2b — Launch Simulator.app so input injection (tap, swipe, keyboard)
+    // works.  Simulator.app bridges macOS mouse/keyboard events into iOS
+    // touch/keyboard events via its internal IndigoHID bridge.
+    log(`[${sessionId}] Launching Simulator.app for device ${udid}…`);
+    await iosSimulatorService.openSimulatorApp(udid);
+
     // Step 3 — Start screen capture.
     log(`[${sessionId}] Starting screen capture for iOS Simulator ${udid}…`);
     screenCaptureService.startCapture(sessionId, 'ios', udid);

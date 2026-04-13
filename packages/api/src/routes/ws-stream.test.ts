@@ -14,10 +14,15 @@ vi.mock('../services/index.js', () => ({
   sessionManagerService: {
     getSession: vi.fn(),
   },
-  iosSimulatorService: {},
+  iosSimulatorService: {
+    sendTap: vi.fn(),
+    sendSwipe: vi.fn(),
+    sendKeyEvent: vi.fn(),
+  },
   androidEmulatorService: {
     sendTap: vi.fn(),
     sendSwipe: vi.fn(),
+    sendKeyEvent: vi.fn(),
   },
 }));
 
@@ -26,6 +31,7 @@ import {
   screenCaptureService,
   sessionManagerService,
   androidEmulatorService,
+  iosSimulatorService,
 } from '../services/index.js';
 
 // ---------------------------------------------------------------------------
@@ -36,6 +42,10 @@ const mockGetSession = vi.mocked(sessionManagerService.getSession);
 const mockGetEmitter = vi.mocked(screenCaptureService.getEmitter);
 const mockSendTap = vi.mocked(androidEmulatorService.sendTap);
 const mockSendSwipe = vi.mocked(androidEmulatorService.sendSwipe);
+const mockAndroidSendKeyEvent = vi.mocked(androidEmulatorService.sendKeyEvent);
+const mockIosSendTap = vi.mocked(iosSimulatorService.sendTap);
+const mockIosSendSwipe = vi.mocked(iosSimulatorService.sendSwipe);
+const mockIosSendKeyEvent = vi.mocked(iosSimulatorService.sendKeyEvent);
 
 // ---------------------------------------------------------------------------
 // Test infrastructure — mock WebSocket and Fastify-like instance
@@ -625,23 +635,28 @@ describe('touch input — tap', () => {
     expect(mockSendTap).toHaveBeenCalledWith('WMS_AVD_custom99', 100, 200);
   });
 
-  it('should NOT call sendTap() for iOS sessions — just logs', async () => {
+  it('should call iosSimulatorService.sendTap() with normalized coords and NOT call Android sendTap() for iOS tap events', async () => {
     // Arrange
     mockGetSession.mockReturnValue(makeIosSession());
     mockGetEmitter.mockReturnValue(new EventEmitter());
+    mockIosSendTap.mockResolvedValue(undefined);
     const socket = createMockSocket();
 
     handler(socket, createMockRequest('session-ios-001'));
 
+    // iOS tap message includes both normalized (x/y) and device pixel (deviceX/deviceY) coords
     const tapMsg = Buffer.from(
-      JSON.stringify({ type: 'touch', action: 'tap', deviceX: 320, deviceY: 480 }),
+      JSON.stringify({ type: 'touch', action: 'tap', x: 0.5, y: 0.3125, deviceX: 320, deviceY: 480 }),
     );
 
     // Act
     socket._handlers.message.forEach((fn) => fn(tapMsg));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    // Assert
+    // Assert — iOS service called with normalized coordinates
+    expect(mockIosSendTap).toHaveBeenCalledOnce();
+    expect(mockIosSendTap).toHaveBeenCalledWith('UDID-0001', 0.5, 0.3125);
+    // Android service must NOT be called for an iOS session
     expect(mockSendTap).not.toHaveBeenCalled();
   });
 
@@ -807,18 +822,24 @@ describe('touch input — swipe', () => {
     );
   });
 
-  it('should NOT call sendSwipe() for iOS sessions', async () => {
+  it('should call iosSimulatorService.sendSwipe() with normalized coords and NOT call Android sendSwipe() for iOS swipe events', async () => {
     // Arrange
     mockGetSession.mockReturnValue(makeIosSession());
     mockGetEmitter.mockReturnValue(new EventEmitter());
+    mockIosSendSwipe.mockResolvedValue(undefined);
     const socket = createMockSocket();
 
     handler(socket, createMockRequest('session-ios-001'));
 
+    // iOS swipe message includes both normalized (startX/startY/endX/endY) and device pixel coords
     const swipeMsg = Buffer.from(
       JSON.stringify({
         type: 'touch',
         action: 'swipe',
+        startX: 0.1,
+        startY: 0.5,
+        endX: 0.9,
+        endY: 0.5,
         deviceStartX: 108,
         deviceStartY: 960,
         deviceEndX: 972,
@@ -830,7 +851,10 @@ describe('touch input — swipe', () => {
     socket._handlers.message.forEach((fn) => fn(swipeMsg));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    // Assert
+    // Assert — iOS service called with normalized coordinates
+    expect(mockIosSendSwipe).toHaveBeenCalledOnce();
+    expect(mockIosSendSwipe).toHaveBeenCalledWith('UDID-0001', 0.1, 0.5, 0.9, 0.5);
+    // Android service must NOT be called for an iOS session
     expect(mockSendSwipe).not.toHaveBeenCalled();
   });
 
@@ -1070,5 +1094,319 @@ describe('happy path — successful connection setup', () => {
     expect(emitter.listenerCount('frame')).toBe(1);
     // At least one error listener registered by the route itself
     expect(emitter.listenerCount('error')).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 9. Key input forwarding
+// ---------------------------------------------------------------------------
+
+describe('key input forwarding', () => {
+  it('should call androidEmulatorService.sendKeyEvent() for Android key events', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(makeAndroidSession());
+    mockGetEmitter.mockReturnValue(new EventEmitter());
+    mockAndroidSendKeyEvent.mockResolvedValue(undefined);
+    const socket = createMockSocket();
+
+    handler(socket, createMockRequest('session-android-001'));
+
+    const keyMsg = Buffer.from(
+      JSON.stringify({ type: 'key', key: 'Enter', code: 'Enter' }),
+    );
+
+    // Act
+    socket._handlers.message.forEach((fn) => fn(keyMsg));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Assert
+    expect(mockAndroidSendKeyEvent).toHaveBeenCalledOnce();
+    expect(mockAndroidSendKeyEvent).toHaveBeenCalledWith('WMS_AVD_abc123', 'Enter', 'Enter');
+    expect(mockIosSendKeyEvent).not.toHaveBeenCalled();
+  });
+
+  it('should call iosSimulatorService.sendKeyEvent() for iOS key events', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(makeIosSession());
+    mockGetEmitter.mockReturnValue(new EventEmitter());
+    mockIosSendKeyEvent.mockResolvedValue(undefined);
+    const socket = createMockSocket();
+
+    handler(socket, createMockRequest('session-ios-001'));
+
+    const keyMsg = Buffer.from(
+      JSON.stringify({ type: 'key', key: 'a', code: 'KeyA' }),
+    );
+
+    // Act
+    socket._handlers.message.forEach((fn) => fn(keyMsg));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Assert
+    expect(mockIosSendKeyEvent).toHaveBeenCalledOnce();
+    expect(mockIosSendKeyEvent).toHaveBeenCalledWith('UDID-0001', 'a', 'KeyA');
+    expect(mockAndroidSendKeyEvent).not.toHaveBeenCalled();
+  });
+
+  it('should silently ignore key messages with empty key', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(makeAndroidSession());
+    mockGetEmitter.mockReturnValue(new EventEmitter());
+    const socket = createMockSocket();
+
+    handler(socket, createMockRequest('session-android-001'));
+
+    const keyMsg = Buffer.from(
+      JSON.stringify({ type: 'key', key: '', code: 'KeyA' }),
+    );
+
+    // Act
+    socket._handlers.message.forEach((fn) => fn(keyMsg));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Assert — empty key is rejected before any service call
+    expect(mockAndroidSendKeyEvent).not.toHaveBeenCalled();
+    expect(mockIosSendKeyEvent).not.toHaveBeenCalled();
+  });
+
+  it('should silently ignore key messages with non-string key', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(makeAndroidSession());
+    mockGetEmitter.mockReturnValue(new EventEmitter());
+    const socket = createMockSocket();
+
+    handler(socket, createMockRequest('session-android-001'));
+
+    const keyMsg = Buffer.from(
+      JSON.stringify({ type: 'key', key: 123, code: 'KeyA' }),
+    );
+
+    // Act
+    socket._handlers.message.forEach((fn) => fn(keyMsg));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Assert — numeric key value must be rejected silently
+    expect(mockAndroidSendKeyEvent).not.toHaveBeenCalled();
+    expect(mockIosSendKeyEvent).not.toHaveBeenCalled();
+  });
+
+  it('should handle sendKeyEvent() rejection without throwing for Android', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(makeAndroidSession());
+    mockGetEmitter.mockReturnValue(new EventEmitter());
+    mockAndroidSendKeyEvent.mockRejectedValue(new Error('key failed'));
+    const socket = createMockSocket();
+
+    handler(socket, createMockRequest('session-android-001'));
+
+    const keyMsg = Buffer.from(
+      JSON.stringify({ type: 'key', key: 'Enter', code: 'Enter' }),
+    );
+
+    // Act & Assert — must not throw synchronously
+    expect(() => {
+      socket._handlers.message.forEach((fn) => fn(keyMsg));
+    }).not.toThrow();
+
+    // Let the rejection settle — it is caught by .catch() inside the route
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  it('should handle sendKeyEvent() rejection and send error message to socket for iOS', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(makeIosSession());
+    mockGetEmitter.mockReturnValue(new EventEmitter());
+    mockIosSendKeyEvent.mockRejectedValue(new Error('AppleScript key failed'));
+    const socket = createMockSocket();
+
+    handler(socket, createMockRequest('session-ios-001'));
+
+    const keyMsg = Buffer.from(
+      JSON.stringify({ type: 'key', key: 'Escape', code: 'Escape' }),
+    );
+
+    // Act
+    socket._handlers.message.forEach((fn) => fn(keyMsg));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Assert — error is caught and forwarded to the socket as JSON
+    expect(socket.send).toHaveBeenCalledWith(
+      expect.stringContaining('Key event failed'),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 10. iOS tap forwarding (additional coverage)
+// ---------------------------------------------------------------------------
+
+describe('iOS tap forwarding', () => {
+  it('should call iosSimulatorService.sendTap() with normalized coordinates for iOS tap events', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(makeIosSession());
+    mockGetEmitter.mockReturnValue(new EventEmitter());
+    mockIosSendTap.mockResolvedValue(undefined);
+    const socket = createMockSocket();
+
+    handler(socket, createMockRequest('session-ios-001'));
+
+    const tapMsg = Buffer.from(
+      JSON.stringify({ type: 'touch', action: 'tap', x: 0.5, y: 0.25, deviceX: 540, deviceY: 480 }),
+    );
+
+    // Act
+    socket._handlers.message.forEach((fn) => fn(tapMsg));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Assert
+    expect(mockIosSendTap).toHaveBeenCalledOnce();
+    expect(mockIosSendTap).toHaveBeenCalledWith('UDID-0001', 0.5, 0.25);
+    expect(mockSendTap).not.toHaveBeenCalled();
+  });
+
+  it('should silently ignore iOS tap when normalized coords (x/y) are missing', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(makeIosSession());
+    mockGetEmitter.mockReturnValue(new EventEmitter());
+    const socket = createMockSocket();
+
+    handler(socket, createMockRequest('session-ios-001'));
+
+    // No x or y — only device pixel coords
+    const tapMsg = Buffer.from(
+      JSON.stringify({ type: 'touch', action: 'tap', deviceX: 540, deviceY: 480 }),
+    );
+
+    // Act
+    socket._handlers.message.forEach((fn) => fn(tapMsg));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Assert — missing normalized coords causes early return before calling iOS service
+    expect(mockIosSendTap).not.toHaveBeenCalled();
+  });
+
+  it('should handle iOS sendTap() rejection and send error to socket', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(makeIosSession());
+    mockGetEmitter.mockReturnValue(new EventEmitter());
+    mockIosSendTap.mockRejectedValue(new Error('AppleScript failed'));
+    const socket = createMockSocket();
+
+    handler(socket, createMockRequest('session-ios-001'));
+
+    const tapMsg = Buffer.from(
+      JSON.stringify({ type: 'touch', action: 'tap', x: 0.5, y: 0.25, deviceX: 540, deviceY: 480 }),
+    );
+
+    // Act
+    socket._handlers.message.forEach((fn) => fn(tapMsg));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Assert — error propagated back to the socket as JSON with "Tap failed"
+    expect(socket.send).toHaveBeenCalledWith(
+      expect.stringContaining('Tap failed'),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 11. iOS swipe forwarding (additional coverage)
+// ---------------------------------------------------------------------------
+
+describe('iOS swipe forwarding', () => {
+  it('should call iosSimulatorService.sendSwipe() with normalized coordinates for iOS swipe events', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(makeIosSession());
+    mockGetEmitter.mockReturnValue(new EventEmitter());
+    mockIosSendSwipe.mockResolvedValue(undefined);
+    const socket = createMockSocket();
+
+    handler(socket, createMockRequest('session-ios-001'));
+
+    const swipeMsg = Buffer.from(
+      JSON.stringify({
+        type: 'touch',
+        action: 'swipe',
+        startX: 0.1,
+        startY: 0.5,
+        endX: 0.9,
+        endY: 0.5,
+        deviceStartX: 108,
+        deviceStartY: 960,
+        deviceEndX: 972,
+        deviceEndY: 960,
+      }),
+    );
+
+    // Act
+    socket._handlers.message.forEach((fn) => fn(swipeMsg));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Assert
+    expect(mockIosSendSwipe).toHaveBeenCalledOnce();
+    expect(mockIosSendSwipe).toHaveBeenCalledWith('UDID-0001', 0.1, 0.5, 0.9, 0.5);
+    expect(mockSendSwipe).not.toHaveBeenCalled();
+  });
+
+  it('should silently ignore iOS swipe when normalized coords (startX/startY/endX/endY) are missing', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(makeIosSession());
+    mockGetEmitter.mockReturnValue(new EventEmitter());
+    const socket = createMockSocket();
+
+    handler(socket, createMockRequest('session-ios-001'));
+
+    // Only device pixel coords present — no normalized startX/startY/endX/endY
+    const swipeMsg = Buffer.from(
+      JSON.stringify({
+        type: 'touch',
+        action: 'swipe',
+        deviceStartX: 108,
+        deviceStartY: 960,
+        deviceEndX: 972,
+        deviceEndY: 960,
+      }),
+    );
+
+    // Act
+    socket._handlers.message.forEach((fn) => fn(swipeMsg));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Assert — missing normalized coords causes early return before calling iOS service
+    expect(mockIosSendSwipe).not.toHaveBeenCalled();
+  });
+
+  it('should handle iOS sendSwipe() rejection and send error to socket', async () => {
+    // Arrange
+    mockGetSession.mockReturnValue(makeIosSession());
+    mockGetEmitter.mockReturnValue(new EventEmitter());
+    mockIosSendSwipe.mockRejectedValue(new Error('AppleScript swipe failed'));
+    const socket = createMockSocket();
+
+    handler(socket, createMockRequest('session-ios-001'));
+
+    const swipeMsg = Buffer.from(
+      JSON.stringify({
+        type: 'touch',
+        action: 'swipe',
+        startX: 0.1,
+        startY: 0.5,
+        endX: 0.9,
+        endY: 0.5,
+        deviceStartX: 108,
+        deviceStartY: 960,
+        deviceEndX: 972,
+        deviceEndY: 960,
+      }),
+    );
+
+    // Act
+    socket._handlers.message.forEach((fn) => fn(swipeMsg));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Assert — error propagated back to the socket as JSON with "Swipe failed"
+    expect(socket.send).toHaveBeenCalledWith(
+      expect.stringContaining('Swipe failed'),
+    );
   });
 });

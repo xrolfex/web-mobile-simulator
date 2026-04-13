@@ -110,13 +110,16 @@ const wsStreamRoutes: FastifyPluginAsync = async (fastify) => {
           if (msg.type === 'touch' && msg.action === 'tap') {
             const deviceX = msg.deviceX as number;
             const deviceY = msg.deviceY as number;
+            // Normalised 0–1 coordinates sent by the frontend alongside device pixels.
+            const normX = msg.x as number;
+            const normY = msg.y as number;
 
             if (typeof deviceX !== 'number' || typeof deviceY !== 'number') {
               return; // Silently ignore malformed messages
             }
 
             if (session.device.platform === 'android' && session.device.platformDeviceId) {
-              // For Android: platformDeviceId is the AVD name — use adb input tap
+              // For Android: use device pixel coordinates with adb input tap.
               androidEmulatorService.sendTap(
                 session.device.platformDeviceId,
                 deviceX,
@@ -129,10 +132,12 @@ const wsStreamRoutes: FastifyPluginAsync = async (fastify) => {
                 }
               });
             } else if (session.device.platform === 'ios' && session.device.platformDeviceId) {
+              // For iOS: use normalised coordinates for AppleScript window-relative mapping.
+              if (typeof normX !== 'number' || typeof normY !== 'number') return;
               iosSimulatorService.sendTap(
                 session.device.platformDeviceId,
-                deviceX,
-                deviceY,
+                normX,
+                normY,
               ).catch((err: unknown) => {
                 const errMsg = err instanceof Error ? err.message : String(err);
                 warn(`Failed to forward tap for session ${sessionId}: ${errMsg}`);
@@ -146,6 +151,11 @@ const wsStreamRoutes: FastifyPluginAsync = async (fastify) => {
             const deviceStartY = msg.deviceStartY as number;
             const deviceEndX = msg.deviceEndX as number;
             const deviceEndY = msg.deviceEndY as number;
+            // Normalised 0–1 coordinates sent by the frontend alongside device pixels.
+            const normStartX = msg.startX as number;
+            const normStartY = msg.startY as number;
+            const normEndX = msg.endX as number;
+            const normEndY = msg.endY as number;
 
             if (
               typeof deviceStartX !== 'number' || typeof deviceStartY !== 'number' ||
@@ -155,6 +165,7 @@ const wsStreamRoutes: FastifyPluginAsync = async (fastify) => {
             }
 
             if (session.device.platform === 'android' && session.device.platformDeviceId) {
+              // For Android: use device pixel coordinates.
               androidEmulatorService.sendSwipe(
                 session.device.platformDeviceId,
                 deviceStartX, deviceStartY,
@@ -167,10 +178,15 @@ const wsStreamRoutes: FastifyPluginAsync = async (fastify) => {
                 }
               });
             } else if (session.device.platform === 'ios' && session.device.platformDeviceId) {
+              // For iOS: use normalised coordinates for AppleScript window-relative mapping.
+              if (
+                typeof normStartX !== 'number' || typeof normStartY !== 'number' ||
+                typeof normEndX !== 'number' || typeof normEndY !== 'number'
+              ) return;
               iosSimulatorService.sendSwipe(
                 session.device.platformDeviceId,
-                deviceStartX, deviceStartY,
-                deviceEndX, deviceEndY,
+                normStartX, normStartY,
+                normEndX, normEndY,
               ).catch((err: unknown) => {
                 const errMsg = err instanceof Error ? err.message : String(err);
                 warn(`Failed to forward swipe for session ${sessionId}: ${errMsg}`);

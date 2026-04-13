@@ -658,162 +658,290 @@ export class IOSSimulatorService {
   }
 
   /**
+   * Launch Simulator.app and connect it to the given device.
+   * Required for input injection (tap, swipe, keyboard) since there is no
+   * CLI-based input API — Simulator.app acts as the IndigoHID bridge.
+   *
+   * Uses: `open -a Simulator --args -CurrentDeviceUDID <udid>`
+   *
+   * This is idempotent — calling it when Simulator.app is already running
+   * and connected to the device has no adverse effect.
+   *
+   * @param udid - The device UDID (must already be booted).
+   */
+  async openSimulatorApp(udid: string): Promise<void> {
+    log(`Opening Simulator.app for device ${udid}`);
+    // `open` does not need DEVELOPER_DIR — it is a standard macOS utility.
+    await exec('open', ['-a', 'Simulator', '--args', '-CurrentDeviceUDID', udid]);
+    // Give Simulator.app time to connect to the booted device.
+    await new Promise<void>(resolve => setTimeout(resolve, 2000));
+    log(`Simulator.app launched for device ${udid}`);
+  }
+
+  /**
    * Type text into the currently focused text field on the device.
-   * Uses: `xcrun simctl io <udid> type <text>`
+   * Uses AppleScript `keystroke` via Simulator.app — no `xcrun simctl` command
+   * exists for typing text.
    *
-   * NOTE: This requires Xcode 15+ and only works when a text field is focused.
-   * If no text field is focused, simctl may fail silently or error.
+   * Requires Simulator.app to be running and connected to the device.
    *
-   * @param udid - The device UDID.
+   * @param udid - The device UDID (used for logging).
    * @param text - The text string to type.
    */
   async sendText(udid: string, text: string): Promise<void> {
     log(`Sending text to device ${udid}: "${text.substring(0, 50)}${text.length > 50 ? '…' : ''}"`);
-    await this.assertSimctlAvailable();
 
-    // simctl io type expects the text as trailing arguments.
-    // We pass it as a single argument — simctl handles spaces correctly.
-    await exec(
-      SIMCTL,
-      ['simctl', 'io', udid, 'type', text],
-      XCRUN_EXEC_OPTIONS,
-    );
+    // Escape characters that are special inside an AppleScript double-quoted string.
+    const escaped = text.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+
+    const script = `
+      tell application "System Events"
+        tell process "Simulator"
+          set frontmost to true
+          keystroke "${escaped}"
+        end tell
+      end tell
+    `;
+
+    await exec('osascript', ['-e', script]);
     log(`Text sent to device ${udid}`);
   }
 
   /**
-   * Send a tap (touch down + up) at the given pixel coordinates on the iOS simulator.
-   * Uses: `xcrun simctl io <udid> sendTouchEvent down|up <x> <y>` (Xcode 15+).
+   * Send a tap at the given normalised coordinates on the iOS simulator.
+   * Uses AppleScript `click at {x, y}` targeting the Simulator.app window.
    *
-   * @param udid - The device UDID.
-   * @param x    - X pixel coordinate on the device screen.
-   * @param y    - Y pixel coordinate on the device screen.
-   * @throws If the simulator is not running or the command fails.
+   * Coordinate mapping:
+   *   screenX = windowX + normX × windowWidth
+   *   screenY = windowY + TITLE_BAR_HEIGHT + normY × (windowHeight − TITLE_BAR_HEIGHT)
+   *
+   * Requires Simulator.app to be running and connected to the device.
+   *
+   * @param udid  - The device UDID (used for logging).
+   * @param normX - Normalised X coordinate (0.0 = left edge, 1.0 = right edge).
+   * @param normY - Normalised Y coordinate (0.0 = top edge, 1.0 = bottom edge).
+   * @throws If Simulator.app is not running or the AppleScript fails.
    */
-  async sendTap(udid: string, x: number, y: number): Promise<void> {
-    log(`Sending tap to device ${udid} at (${x}, ${y})`);
-    await this.assertSimctlAvailable();
+  async sendTap(udid: string, normX: number, normY: number): Promise<void> {
+    log(`Sending tap to device ${udid} at normalised (${normX.toFixed(3)}, ${normY.toFixed(3)})`);
 
-    const px = String(Math.round(x));
-    const py = String(Math.round(y));
+    const geo = await this.getSimulatorWindowGeometry();
+    const titleBarHeight = 28; // Standard macOS window title-bar height in points.
+    const contentHeight = geo.height - titleBarHeight;
 
-    await exec(SIMCTL, ['simctl', 'io', udid, 'sendTouchEvent', 'began', px, py], XCRUN_EXEC_OPTIONS);
-    // Brief delay between began and ended to simulate a real tap
-    await new Promise<void>(resolve => setTimeout(resolve, 50));
-    await exec(SIMCTL, ['simctl', 'io', udid, 'sendTouchEvent', 'ended', px, py], XCRUN_EXEC_OPTIONS);
+    const screenX = Math.round(geo.x + normX * geo.width);
+    const screenY = Math.round(geo.y + titleBarHeight + normY * contentHeight);
 
-    log(`Tap sent to device ${udid} at (${x}, ${y})`);
+    const script = `
+      tell application "System Events"
+        tell process "Simulator"
+          click at {${screenX}, ${screenY}}
+        end tell
+      end tell
+    `;
+
+    await exec('osascript', ['-e', script]);
+    log(`Tap sent to device ${udid} at screen (${screenX}, ${screenY})`);
   }
 
   /**
-   * Send a swipe gesture from one point to another on the iOS simulator.
-   * Uses a series of `sendTouchEvent` commands: began → moved (interpolated) → ended.
+   * Send a swipe gesture on the iOS simulator.
+   * Uses a Python 3 / Quartz CGEvent sequence (mouse-down → drag → mouse-up)
+   * posted to the HID event tap.  Simulator.app must be the frontmost app so
+   * that the events are routed to it.
    *
-   * @param udid       - The device UDID.
-   * @param x1         - Starting X pixel coordinate.
-   * @param y1         - Starting Y pixel coordinate.
-   * @param x2         - Ending X pixel coordinate.
-   * @param y2         - Ending Y pixel coordinate.
-   * @param durationMs - Approximate duration of the swipe in milliseconds (default 300).
-   * @throws If the simulator is not running or the command fails.
+   * Coordinate mapping uses the same formula as {@link sendTap}.
+   *
+   * @param udid       - The device UDID (used for logging).
+   * @param normX1     - Normalised start X (0.0–1.0).
+   * @param normY1     - Normalised start Y (0.0–1.0).
+   * @param normX2     - Normalised end X (0.0–1.0).
+   * @param normY2     - Normalised end Y (0.0–1.0).
+   * @param durationMs - Duration of the swipe in milliseconds (default 300).
+   * @throws If Simulator.app is not running, Python 3 is unavailable, or the
+   *         pyobjc-framework-Quartz module is not installed.
    */
   async sendSwipe(
     udid: string,
-    x1: number,
-    y1: number,
-    x2: number,
-    y2: number,
+    normX1: number,
+    normY1: number,
+    normX2: number,
+    normY2: number,
     durationMs: number = 300,
   ): Promise<void> {
-    log(`Sending swipe to device ${udid} from (${x1},${y1}) to (${x2},${y2})`);
-    await this.assertSimctlAvailable();
+    log(
+      `Sending swipe to device ${udid} from ` +
+      `(${normX1.toFixed(3)},${normY1.toFixed(3)}) to ` +
+      `(${normX2.toFixed(3)},${normY2.toFixed(3)})`,
+    );
 
-    // Number of intermediate move steps for a smooth swipe
+    const geo = await this.getSimulatorWindowGeometry();
+    const titleBarHeight = 28;
+    const contentHeight = geo.height - titleBarHeight;
+
+    const startX = Math.round(geo.x + normX1 * geo.width);
+    const startY = Math.round(geo.y + titleBarHeight + normY1 * contentHeight);
+    const endX = Math.round(geo.x + normX2 * geo.width);
+    const endY = Math.round(geo.y + titleBarHeight + normY2 * contentHeight);
+
+    // Number of intermediate drag steps — roughly one per 30 ms of duration.
     const steps = Math.max(5, Math.round(durationMs / 30));
-    const stepDelay = durationMs / steps;
+    // Per-step delay in seconds (AppleScript / Python time.sleep uses seconds).
+    const stepDelaySecs = (durationMs / 1000) / steps;
 
-    // Touch down at start point
-    await exec(SIMCTL, ['simctl', 'io', udid, 'sendTouchEvent', 'began',
-      String(Math.round(x1)), String(Math.round(y1))], XCRUN_EXEC_OPTIONS);
+    // Bring Simulator.app to the front before posting CGEvents so the events
+    // are delivered to the correct window.
+    await exec('osascript', ['-e', 'tell application "Simulator" to activate']);
+    await new Promise<void>(resolve => setTimeout(resolve, 100));
 
-    // Interpolate move events
-    for (let i = 1; i <= steps; i++) {
-      const t = i / steps;
-      const ix = Math.round(x1 + (x2 - x1) * t);
-      const iy = Math.round(y1 + (y2 - y1) * t);
-      await new Promise<void>(resolve => setTimeout(resolve, stepDelay));
-      await exec(SIMCTL, ['simctl', 'io', udid, 'sendTouchEvent', 'moved',
-        String(ix), String(iy)], XCRUN_EXEC_OPTIONS);
-    }
+    // Build the Python 3 drag script using the Quartz CGEvent API.
+    // pyobjc-framework-Quartz ships with Xcode Command Line Tools on macOS 12+.
+    const pythonScript = `
+import sys, time
+try:
+    from Quartz import (
+        CGEventCreateMouseEvent, CGEventPost,
+        kCGEventLeftMouseDown, kCGEventLeftMouseDragged, kCGEventLeftMouseUp,
+        kCGMouseButtonLeft, kCGHIDEventTap,
+    )
+except ImportError:
+    print("ERROR: pyobjc-framework-Quartz not available", file=sys.stderr)
+    sys.exit(1)
 
-    // Touch up at end point
-    await exec(SIMCTL, ['simctl', 'io', udid, 'sendTouchEvent', 'ended',
-      String(Math.round(x2)), String(Math.round(y2))], XCRUN_EXEC_OPTIONS);
+def post(event_type, x, y):
+    event = CGEventCreateMouseEvent(None, event_type, (x, y), kCGMouseButtonLeft)
+    CGEventPost(kCGHIDEventTap, event)
 
+steps = ${steps}
+step_delay = ${stepDelaySecs}
+
+post(kCGEventLeftMouseDown, ${startX}, ${startY})
+time.sleep(0.02)
+
+for i in range(1, steps + 1):
+    t = i / steps
+    ix = ${startX} + (${endX} - ${startX}) * t
+    iy = ${startY} + (${endY} - ${startY}) * t
+    post(kCGEventLeftMouseDragged, ix, iy)
+    time.sleep(step_delay)
+
+post(kCGEventLeftMouseUp, ${endX}, ${endY})
+`;
+
+    await exec('python3', ['-c', pythonScript]);
     log(`Swipe sent to device ${udid}`);
   }
 
   /**
-   * Send a key event to the iOS simulator.
+   * Send a key event to the iOS simulator via AppleScript.
    *
-   * For printable characters, uses `xcrun simctl io <udid> type <char>`.
-   * For special keys (Enter, Backspace, etc.), uses `xcrun simctl io <udid> sendKeyboardEvent <key>`
-   * which is available in Xcode 15+.
+   * - Special keys (Enter, Backspace, arrows, etc.) are sent using
+   *   `key code <macVirtualKeyCode>`.
+   * - Single printable characters are sent using `keystroke "<char>"`.
+   * - Multi-character keys not in the map (Shift, Control, etc.) are ignored.
    *
-   * @param udid - The device UDID.
-   * @param key  - The logical key value from KeyboardEvent.key (e.g. 'a', 'Enter', 'Backspace').
-   * @param code - The physical key code from KeyboardEvent.code (e.g. 'KeyA', 'Enter').
-   * @throws If the simulator is not running or the command fails.
+   * Requires Simulator.app to be running and connected to the device.
+   *
+   * @param udid - The device UDID (used for logging).
+   * @param key  - Logical key value from `KeyboardEvent.key`
+   *               (e.g. `'a'`, `'Enter'`, `'Backspace'`).
+   * @param code - Physical key code from `KeyboardEvent.code` (reserved, unused).
    */
   async sendKeyEvent(udid: string, key: string, code: string): Promise<void> {
-    await this.assertSimctlAvailable();
-
-    // Map browser key names to simctl keyboard event codes
-    // simctl io sendKeyboardEvent uses key codes from IOHIDUsageTables.h
+    // Map browser KeyboardEvent.key names → macOS virtual key codes.
+    // Reference: HIToolbox/Events.h (kVK_* constants).
     const specialKeyMap: Record<string, number> = {
-      'Enter': 0x28,        // kHIDUsage_KeyboardReturnOrEnter
-      'Backspace': 0x2A,    // kHIDUsage_KeyboardDeleteOrBackspace
-      'Delete': 0x4C,       // kHIDUsage_KeyboardDeleteForward
-      'Tab': 0x2B,          // kHIDUsage_KeyboardTab
-      'Escape': 0x29,       // kHIDUsage_KeyboardEscape
-      'ArrowUp': 0x52,      // kHIDUsage_KeyboardUpArrow
-      'ArrowDown': 0x51,    // kHIDUsage_KeyboardDownArrow
-      'ArrowLeft': 0x50,    // kHIDUsage_KeyboardLeftArrow
-      'ArrowRight': 0x4F,   // kHIDUsage_KeyboardRightArrow
-      ' ': 0x2C,            // kHIDUsage_KeyboardSpacebar
-      'Home': 0x4A,         // kHIDUsage_KeyboardHome
-      'End': 0x4D,          // kHIDUsage_KeyboardEnd
-      'PageUp': 0x4B,       // kHIDUsage_KeyboardPageUp
-      'PageDown': 0x4E,     // kHIDUsage_KeyboardPageDown
+      'Enter':      36,  // kVK_Return
+      'Backspace':  51,  // kVK_Delete (backspace)
+      'Delete':    117,  // kVK_ForwardDelete
+      'Tab':        48,  // kVK_Tab
+      'Escape':     53,  // kVK_Escape
+      'ArrowUp':   126,  // kVK_UpArrow
+      'ArrowDown': 125,  // kVK_DownArrow
+      'ArrowLeft': 123,  // kVK_LeftArrow
+      'ArrowRight':124,  // kVK_RightArrow
+      ' ':          49,  // kVK_Space
+      'Home':      115,  // kVK_Home
+      'End':       119,  // kVK_End
+      'PageUp':    116,  // kVK_PageUp
+      'PageDown':  121,  // kVK_PageDown
     };
 
-    const hidCode = specialKeyMap[key];
-    if (hidCode !== undefined) {
-      // Use simctl keyboard event for special keys (Xcode 15+)
-      try {
-        await exec(
-          SIMCTL,
-          ['simctl', 'io', udid, 'sendKeyboardEvent', String(hidCode)],
-          XCRUN_EXEC_OPTIONS,
-        );
-      } catch {
-        // sendKeyboardEvent may not be available in older Xcode — log and skip
-        log(`sendKeyboardEvent not supported for key "${key}" (HID code 0x${hidCode.toString(16)})`);
-      }
+    const macKeyCode = specialKeyMap[key];
+    let script: string;
+
+    if (macKeyCode !== undefined) {
+      script = `
+        tell application "System Events"
+          tell process "Simulator"
+            set frontmost to true
+            key code ${macKeyCode}
+          end tell
+        end tell
+      `;
     } else if (key.length === 1) {
-      // Single printable character — use `simctl io type`
-      await exec(
-        SIMCTL,
-        ['simctl', 'io', udid, 'type', key],
-        XCRUN_EXEC_OPTIONS,
-      );
+      // Escape characters that are special inside an AppleScript double-quoted string.
+      const escaped = key.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      script = `
+        tell application "System Events"
+          tell process "Simulator"
+            set frontmost to true
+            keystroke "${escaped}"
+          end tell
+        end tell
+      `;
+    } else {
+      // Multi-character keys not in the map (Shift, Control, Alt, Meta, etc.) — ignore.
+      log(`Ignoring unsupported key: "${key}" (code: "${code}")`);
+      return;
     }
-    // Multi-character keys not in the map are silently ignored
+
+    await exec('osascript', ['-e', script]);
   }
 
   // -------------------------------------------------------------------------
   // Private helpers
   // -------------------------------------------------------------------------
+
+  /**
+   * Get the Simulator.app window geometry via AppleScript.
+   *
+   * Queries `System Events` for the position and size of the first Simulator
+   * window.  The result is used to map normalised (0–1) device coordinates
+   * to absolute screen coordinates for `click at` and CGEvent drag operations.
+   *
+   * @returns Object with `x`, `y` (window origin in screen coordinates) and
+   *          `width`, `height` (window size including the title bar).
+   * @throws If Simulator.app is not running, has no open windows, or the
+   *         AppleScript output cannot be parsed.
+   */
+  private async getSimulatorWindowGeometry(): Promise<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }> {
+    const script = `
+      tell application "System Events"
+        tell process "Simulator"
+          set winPos to position of window 1
+          set winSize to size of window 1
+          return (item 1 of winPos) & "," & (item 2 of winPos) & "," & (item 1 of winSize) & "," & (item 2 of winSize)
+        end tell
+      end tell
+    `;
+
+    const { stdout } = await exec('osascript', ['-e', script]);
+    const parts = stdout.trim().split(',').map(s => parseInt(s.trim(), 10));
+
+    if (parts.length < 4 || parts.some(n => isNaN(n))) {
+      throw new Error(
+        `Failed to parse Simulator window geometry from AppleScript output: "${stdout.trim()}"`,
+      );
+    }
+
+    return { x: parts[0]!, y: parts[1]!, width: parts[2]!, height: parts[3]! };
+  }
 
   /**
    * Verify that `xcrun` can locate `simctl` inside the configured Xcode.app.
