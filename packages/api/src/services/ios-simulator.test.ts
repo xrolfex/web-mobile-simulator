@@ -1387,11 +1387,11 @@ describe('IOSSimulatorService', () => {
     // Content: x=100, y=230, w=400, h=800  (content area inside window)
     const GEO_STDOUT = '100,150,400,880,100,230,400,800';
 
-    macosOnly('calls exec exactly 2 times: geometry + osascript click', async () => {
+    macosOnly('calls exec exactly 2 times: geometry + swift CGEvent tap', async () => {
       // Arrange
       mockExec
         .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' }) // getSimulatorContentGeometry
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });         // osascript click
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });         // swift CGEvent tap
 
       // Act
       await service.sendTap('TEST-UDID', 0.5, 0.5);
@@ -1411,10 +1411,11 @@ describe('IOSSimulatorService', () => {
       // Act
       await service.sendTap('TEST-UDID', 0.5, 0.5);
 
-      // Assert — second exec call is osascript click with computed screen coords
-      const osascriptArgs = mockExec.mock.calls[1]![1] as string[];
-      expect(osascriptArgs[0]).toBe('-e');
-      expect(osascriptArgs[1]).toContain('click at {300, 590}');
+      // Assert — second exec call is swift CGEvent tap with computed screen coords
+      const swiftArgs = mockExec.mock.calls[1]![1] as string[];
+      expect(swiftArgs[0]).toBe('-e');
+      expect(swiftArgs[1]).toContain('post(.leftMouseDown, 300, 590)');
+      expect(swiftArgs[1]).toContain('post(.leftMouseUp, 300, 590)');
     });
 
     macosOnly('computes correct screen coords for top-left corner (0, 0)', async () => {
@@ -1429,9 +1430,10 @@ describe('IOSSimulatorService', () => {
       await service.sendTap('TEST-UDID', 0, 0);
 
       // Assert
-      const osascriptArgs = mockExec.mock.calls[1]![1] as string[];
-      expect(osascriptArgs[0]).toBe('-e');
-      expect(osascriptArgs[1]).toContain('click at {100, 150}');
+      const swiftArgs = mockExec.mock.calls[1]![1] as string[];
+      expect(swiftArgs[0]).toBe('-e');
+      expect(swiftArgs[1]).toContain('post(.leftMouseDown, 100, 150)');
+      expect(swiftArgs[1]).toContain('post(.leftMouseUp, 100, 150)');
     });
 
     macosOnly('computes correct screen coords for bottom-right corner (1, 1)', async () => {
@@ -1446,12 +1448,13 @@ describe('IOSSimulatorService', () => {
       await service.sendTap('TEST-UDID', 1, 1);
 
       // Assert
-      const osascriptArgs = mockExec.mock.calls[1]![1] as string[];
-      expect(osascriptArgs[0]).toBe('-e');
-      expect(osascriptArgs[1]).toContain('click at {500, 1030}');
+      const swiftArgs = mockExec.mock.calls[1]![1] as string[];
+      expect(swiftArgs[0]).toBe('-e');
+      expect(swiftArgs[1]).toContain('post(.leftMouseDown, 500, 1030)');
+      expect(swiftArgs[1]).toContain('post(.leftMouseUp, 500, 1030)');
     });
 
-    macosOnly('second exec call uses osascript (no activate call)', async () => {
+    macosOnly('second exec call uses swift CGEvent (not osascript click)', async () => {
       // Arrange
       mockExec
         .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' })
@@ -1460,8 +1463,12 @@ describe('IOSSimulatorService', () => {
       // Act
       await service.sendTap('TEST-UDID', 0.5, 0.5);
 
-      // Assert — second call is osascript (no intermediate activate)
-      expect(mockExec.mock.calls[1]![0]).toBe('osascript');
+      // Assert — second call is swift (not osascript), and the script activates
+      // Simulator.app and posts events via .cghidEventTap
+      expect(mockExec.mock.calls[1]![0]).toBe('swift');
+      const swiftArgs = mockExec.mock.calls[1]![1] as string[];
+      expect(swiftArgs[1]).toContain('activate(options:');
+      expect(swiftArgs[1]).toContain('post(tap: .cghidEventTap)');
     });
 
     macosOnly('throws when getSimulatorContentGeometry returns unparseable output on both primary and fallback paths', async () => {
@@ -1492,11 +1499,11 @@ describe('IOSSimulatorService', () => {
 
     macosOnly('falls back to window frame + 28px offset when content-area query fails', async () => {
       // Arrange: first exec (content-area query) rejects; second exec (window frame) succeeds;
-      // third exec is the osascript click call.
+      // third exec is the swift CGEvent tap call.
       mockExec
         .mockRejectedValueOnce(new Error('group 1 not found'))            // content area query fails
         .mockResolvedValueOnce({ stdout: '100,200,400,800', stderr: '' }) // fallback window frame
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });               // osascript click
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });               // swift CGEvent tap
 
       // Act
       await service.sendTap('TEST-UDID', 0.5, 0.5);
@@ -1505,9 +1512,10 @@ describe('IOSSimulatorService', () => {
       // windowX=100, windowY=200, windowWidth=400, windowHeight=800
       // screenX = 100 + 0.5 * 400 = 300
       // screenY = 200 + 0.5 * 800 = 600
-      const osascriptArgs = mockExec.mock.calls[2]![1] as string[];
-      expect(osascriptArgs[0]).toBe('-e');
-      expect(osascriptArgs[1]).toContain('click at {300, 600}');
+      const swiftArgs = mockExec.mock.calls[2]![1] as string[];
+      expect(swiftArgs[0]).toBe('-e');
+      expect(swiftArgs[1]).toContain('post(.leftMouseDown, 300, 600)');
+      expect(swiftArgs[1]).toContain('post(.leftMouseUp, 300, 600)');
     });
   });
 

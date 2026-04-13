@@ -812,11 +812,13 @@ export class IOSSimulatorService {
 
   /**
    * Send a tap at the given normalised coordinates on the iOS simulator.
-   * Uses AppleScript `System Events click at {x, y}` to post a click at
-   * absolute screen coordinates — no focus change required.
+   * Uses a Swift / CoreGraphics CGEvent sequence (mouse-down → mouse-up)
+   * posted via `post(tap: .cghidEventTap)` after activating Simulator.app.
    *
-   * Requires Accessibility permission (same TCC grant used by keystroke/
-   * key-event calls). Fails visibly if permission is denied.
+   * Unlike the legacy AppleScript `System Events click at {x, y}` approach,
+   * this avoids macOS TCC errors (-25211, -25204) that arise from the global
+   * `click at` command. Simulator.app is brought to the foreground before
+   * events are posted so they are routed to it.
    *
    * Coordinate mapping:
    *   screenX = windowX + normX × windowWidth
@@ -825,7 +827,7 @@ export class IOSSimulatorService {
    * @param udid  - The device UDID (used for logging only).
    * @param normX - Normalised X coordinate (0.0 = left edge, 1.0 = right edge).
    * @param normY - Normalised Y coordinate (0.0 = top edge, 1.0 = bottom edge).
-   * @throws If the osascript click fails or geometry cannot be determined.
+   * @throws If Simulator.app is not running or Swift is unavailable.
    */
   async sendTap(udid: string, normX: number, normY: number): Promise<void> {
     log(`Sending tap to device ${udid} at normalised (${normX.toFixed(3)}, ${normY.toFixed(3)})`);
@@ -835,8 +837,32 @@ export class IOSSimulatorService {
     const screenX = Math.round(content.windowX + normX * content.windowWidth);
     const screenY = Math.round(content.windowY + normY * content.windowHeight);
 
-    const tapScript = `tell application "System Events" to click at {${screenX}, ${screenY}}`;
-    await exec('osascript', ['-e', tapScript]);
+    const swiftScript = `
+import CoreGraphics
+import Foundation
+import AppKit
+
+let apps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.iphonesimulator")
+guard let simulator = apps.first else {
+    fputs("ERROR: Simulator.app not running\\n", stderr)
+    exit(1)
+}
+
+// Bring Simulator to the foreground so HID events are routed to it.
+simulator.activate(options: .activateIgnoringOtherApps)
+Thread.sleep(forTimeInterval: 0.05)
+
+func post(_ type: CGEventType, _ x: Double, _ y: Double) {
+    let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: CGPoint(x: x, y: y), mouseButton: .left)
+    event?.post(tap: .cghidEventTap)
+}
+
+post(.leftMouseDown, ${screenX}, ${screenY})
+Thread.sleep(forTimeInterval: 0.05)
+post(.leftMouseUp, ${screenX}, ${screenY})
+`;
+
+    await exec('swift', ['-e', swiftScript]);
     log(`Tap sent to device ${udid} at screen (${screenX}, ${screenY})`);
   }
 
