@@ -21,13 +21,27 @@ vi.mock('node:child_process', async (importOriginal) => {
   };
 });
 
+vi.mock('node:fs', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...original,
+    existsSync: vi.fn(),
+    readFileSync: vi.fn(),
+    writeFileSync: vi.fn(),
+  };
+});
+
 import { IOSSimulatorService } from './ios-simulator.js';
 import { exec, execJSON } from '../utils/exec.js';
 import { spawn } from 'node:child_process';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 
 const mockExec = exec as ReturnType<typeof vi.fn>;
 const mockExecJSON = execJSON as ReturnType<typeof vi.fn>;
 const mockSpawn = spawn as ReturnType<typeof vi.fn>;
+const mockExistsSync = existsSync as ReturnType<typeof vi.fn>;
+const mockReadFileSync = readFileSync as ReturnType<typeof vi.fn>;
+const mockWriteFileSync = writeFileSync as ReturnType<typeof vi.fn>;
 
 // ---------------------------------------------------------------------------
 // Realistic sample data mirroring xcrun simctl output
@@ -190,6 +204,12 @@ describe('IOSSimulatorService', () => {
     // mockRejectedValueOnce AFTER the xcrun --find simctl call completes.
     mockExec.mockResolvedValue({ stdout: '/Applications/Xcode.app/Contents/Developer/usr/bin/simctl\n', stderr: '' });
     service = new IOSSimulatorService();
+    // Prevent cached geometry from leaking between tests.
+    service.invalidateGeometryCache();
+    // Make ensureInputBinary() believe the binary is already compiled so it
+    // doesn't add an extra exec('swiftc', …) call in tests that don't need it.
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue('4'); // Current version matches INPUT_BINARY_VERSION
   });
 
   // -------------------------------------------------------------------------
@@ -656,55 +676,60 @@ describe('IOSSimulatorService', () => {
   // -------------------------------------------------------------------------
 
   describe('pressButton(udid, button)', () => {
-    macosOnly('calls osascript with Cmd+Shift+H for home button', async () => {
+    macosOnly('calls precompiled binary with shortcut cmd,shift+H for home button', async () => {
       // Arrange — pressButton does NOT call assertSimctlAvailable; only 1 exec call needed
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.pressButton('TEST-UDID', 'home');
 
-      // Assert — exec called with osascript and a script containing the home shortcut
-      expect(mockExec.mock.calls[0]).toEqual([
-        'osascript',
-        ['-e', expect.stringContaining('keystroke "h" using {command down, shift down}')],
-      ]);
+      // Assert — exec called with binary and shortcut args for home (kVK_ANSI_H = 4, cmd+shift)
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const args = mockExec.mock.calls[0]![1] as string[];
+      expect(args).toEqual(['shortcut', '4', 'cmd,shift']);
     });
 
-    macosOnly('calls osascript with Device menu click for lock button', async () => {
+    macosOnly('calls precompiled binary with shortcut cmd+L for lock button', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.pressButton('TEST-UDID', 'lock');
 
-      // Assert — script contains the Lock Screen menu item click (not a keyboard shortcut)
-      const scriptArg = mockExec.mock.calls[0]![1] as string[];
-      expect(scriptArg[1]).toContain('click menu item "Lock Screen"');
-      expect(scriptArg[1]).toContain('menu bar item "Device"');
+      // Assert — binary called with shortcut for Lock Screen (kVK_ANSI_L = 37, cmd)
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const args = mockExec.mock.calls[0]![1] as string[];
+      expect(args).toEqual(['shortcut', '37', 'cmd']);
     });
 
-    macosOnly('calls osascript with menu click for volumeUp', async () => {
+    macosOnly('calls precompiled binary with shortcut cmd+Up for volumeUp', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.pressButton('TEST-UDID', 'volumeUp');
 
-      // Assert — script contains a click on the Volume Up menu item
-      const scriptArg = mockExec.mock.calls[0]![1] as string[];
-      expect(scriptArg[1]).toContain('Volume Up');
+      // Assert — binary called with shortcut for Volume Up (kVK_UpArrow = 126, cmd)
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const args = mockExec.mock.calls[0]![1] as string[];
+      expect(args).toEqual(['shortcut', '126', 'cmd']);
     });
 
-    macosOnly('calls osascript with menu click for volumeDown', async () => {
+    macosOnly('calls precompiled binary with shortcut cmd+Down for volumeDown', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.pressButton('TEST-UDID', 'volumeDown');
 
-      // Assert — script contains a click on the Volume Down menu item
-      const scriptArg = mockExec.mock.calls[0]![1] as string[];
-      expect(scriptArg[1]).toContain('Volume Down');
+      // Assert — binary called with shortcut for Volume Down (kVK_DownArrow = 125, cmd)
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const args = mockExec.mock.calls[0]![1] as string[];
+      expect(args).toEqual(['shortcut', '125', 'cmd']);
     });
 
     macosOnly('exec is called exactly once (no assertSimctlAvailable)', async () => {
@@ -714,30 +739,31 @@ describe('IOSSimulatorService', () => {
       // Act
       await service.pressButton('TEST-UDID', 'home');
 
-      // Assert — exactly 1 exec call: just the osascript invocation
+      // Assert — exactly 1 exec call: just the binary shortcut invocation
       expect(mockExec).toHaveBeenCalledTimes(1);
     });
 
-    macosOnly('the AppleScript targets System Events and Simulator process', async () => {
+    macosOnly('uses precompiled binary with shortcut command', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.pressButton('TEST-UDID', 'home');
 
-      // Assert — the script references both System Events and the Simulator process
-      const scriptArg = mockExec.mock.calls[0]![1] as string[];
-      expect(scriptArg[1]).toContain('System Events');
-      expect(scriptArg[1]).toContain('process "Simulator"');
+      // Assert — the binary path contains 'wms-ios-input' and first arg is 'shortcut'
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const args = mockExec.mock.calls[0]![1] as string[];
+      expect(args[0]).toBe('shortcut');
     });
 
     macosOnly('propagates exec failures as thrown errors', async () => {
-      // Arrange — make the single osascript call reject
-      mockExec.mockRejectedValueOnce(new Error('osascript: execution error'));
+      // Arrange — make the single binary call reject
+      mockExec.mockRejectedValueOnce(new Error('binary: execution error'));
 
       // Act & Assert
       await expect(service.pressButton('TEST-UDID', 'home')).rejects.toThrow(
-        'osascript: execution error',
+        'binary: execution error',
       );
     });
   });
@@ -747,56 +773,60 @@ describe('IOSSimulatorService', () => {
   // -------------------------------------------------------------------------
 
   describe('setOrientation(udid, orientation)', () => {
-    macosOnly('clicks "Rotate Left" for landscapeLeft', async () => {
+    macosOnly('calls precompiled binary with shortcut cmd+Left (123) for landscapeLeft', async () => {
       // Arrange — setOrientation does NOT call assertSimctlAvailable; only 1 exec call needed
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.setOrientation('TEST-UDID', 'landscapeLeft');
 
-      // Assert — script contains the "Rotate Left" menu item click
-      expect(mockExec.mock.calls[0]).toEqual([
-        'osascript',
-        ['-e', expect.stringContaining('Rotate Left')],
-      ]);
+      // Assert — binary called with shortcut for Rotate Left (kVK_LeftArrow = 123, cmd)
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const args = mockExec.mock.calls[0]![1] as string[];
+      expect(args).toEqual(['shortcut', '123', 'cmd']);
     });
 
-    macosOnly('clicks "Rotate Right" for landscapeRight', async () => {
+    macosOnly('calls precompiled binary with shortcut cmd+Right (124) for landscapeRight', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.setOrientation('TEST-UDID', 'landscapeRight');
 
-      // Assert — script contains the "Rotate Right" menu item click
-      expect(mockExec.mock.calls[0]).toEqual([
-        'osascript',
-        ['-e', expect.stringContaining('Rotate Right')],
-      ]);
+      // Assert — binary called with shortcut for Rotate Right (kVK_RightArrow = 124, cmd)
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const args = mockExec.mock.calls[0]![1] as string[];
+      expect(args).toEqual(['shortcut', '124', 'cmd']);
     });
 
-    macosOnly('clicks "Rotate Right" for portrait (best-effort)', async () => {
+    macosOnly('calls precompiled binary with shortcut cmd+Right (124) for portrait (best-effort)', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.setOrientation('TEST-UDID', 'portrait');
 
-      // Assert — portrait maps to a best-effort "Rotate Right" click
-      const scriptArg = mockExec.mock.calls[0]![1] as string[];
-      expect(scriptArg[1]).toContain('Rotate Right');
+      // Assert — portrait maps to a best-effort Rotate Right (kVK_RightArrow = 124, cmd)
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const args = mockExec.mock.calls[0]![1] as string[];
+      expect(args).toEqual(['shortcut', '124', 'cmd']);
     });
 
-    macosOnly('clicks "Rotate Left" for portraitUpsideDown (best-effort)', async () => {
+    macosOnly('calls precompiled binary with shortcut cmd+Left (123) for portraitUpsideDown (best-effort)', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.setOrientation('TEST-UDID', 'portraitUpsideDown');
 
-      // Assert — portraitUpsideDown maps to a best-effort "Rotate Left" click
-      const scriptArg = mockExec.mock.calls[0]![1] as string[];
-      expect(scriptArg[1]).toContain('Rotate Left');
+      // Assert — portraitUpsideDown maps to a best-effort Rotate Left (kVK_LeftArrow = 123, cmd)
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const args = mockExec.mock.calls[0]![1] as string[];
+      expect(args).toEqual(['shortcut', '123', 'cmd']);
     });
 
     macosOnly('exec is called exactly once (no assertSimctlAvailable)', async () => {
@@ -806,29 +836,32 @@ describe('IOSSimulatorService', () => {
       // Act
       await service.setOrientation('TEST-UDID', 'landscapeLeft');
 
-      // Assert — exactly 1 exec call: just the osascript invocation
+      // Assert — exactly 1 exec call: just the binary shortcut invocation
       expect(mockExec).toHaveBeenCalledTimes(1);
     });
 
-    macosOnly('the AppleScript clicks via the Device menu bar item', async () => {
+    macosOnly('uses precompiled binary with shortcut command and cmd modifier', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.setOrientation('TEST-UDID', 'landscapeLeft');
 
-      // Assert — the script references the Device menu bar item
-      const scriptArg = mockExec.mock.calls[0]![1] as string[];
-      expect(scriptArg[1]).toContain('menu bar item "Device"');
+      // Assert — the binary path contains 'wms-ios-input', first arg is 'shortcut', third is 'cmd'
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const args = mockExec.mock.calls[0]![1] as string[];
+      expect(args[0]).toBe('shortcut');
+      expect(args[2]).toBe('cmd');
     });
 
     macosOnly('propagates exec failures as thrown errors', async () => {
-      // Arrange — make the single osascript call reject
-      mockExec.mockRejectedValueOnce(new Error('osascript: execution error'));
+      // Arrange — make the single binary call reject
+      mockExec.mockRejectedValueOnce(new Error('binary: execution error'));
 
       // Act & Assert
       await expect(service.setOrientation('TEST-UDID', 'landscapeLeft')).rejects.toThrow(
-        'osascript: execution error',
+        'binary: execution error',
       );
     });
   });
@@ -838,18 +871,18 @@ describe('IOSSimulatorService', () => {
   // -------------------------------------------------------------------------
 
   describe('shake(udid)', () => {
-    macosOnly('calls osascript with Ctrl+Cmd+Z for Device > Shake', async () => {
+    macosOnly('calls precompiled binary with shortcut cmd,ctrl+Z (6) for Device > Shake', async () => {
       // Arrange — shake does NOT call assertSimctlAvailable; only 1 exec call needed
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.shake('TEST-UDID');
 
-      // Assert — exec called with osascript and the Ctrl+Cmd+Z shake shortcut
-      expect(mockExec.mock.calls[0]).toEqual([
-        'osascript',
-        ['-e', expect.stringContaining('keystroke "z" using {command down, control down}')],
-      ]);
+      // Assert — binary called with shortcut for Shake (kVK_ANSI_Z = 6, cmd+ctrl)
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const args = mockExec.mock.calls[0]![1] as string[];
+      expect(args).toEqual(['shortcut', '6', 'cmd,ctrl']);
     });
 
     macosOnly('exec is called exactly once (no assertSimctlAvailable)', async () => {
@@ -859,13 +892,13 @@ describe('IOSSimulatorService', () => {
       // Act
       await service.shake('TEST-UDID');
 
-      // Assert — exactly 1 exec call: just the osascript invocation
+      // Assert — exactly 1 exec call: just the binary shortcut invocation
       expect(mockExec).toHaveBeenCalledTimes(1);
     });
 
     macosOnly('propagates exec failures directly (no custom error message)', async () => {
-      // Arrange — make the single osascript call reject with a raw error
-      mockExec.mockRejectedValueOnce(new Error('osascript error'));
+      // Arrange — make the single binary call reject with a raw error
+      mockExec.mockRejectedValueOnce(new Error('binary error'));
 
       // Act — capture the thrown error
       let thrownError: unknown;
@@ -875,24 +908,25 @@ describe('IOSSimulatorService', () => {
         thrownError = err;
       }
 
-      // Assert — error propagates as-is: message is 'osascript error',
+      // Assert — error propagates as-is: message is 'binary error',
       // NOT wrapped in "Shake gesture is not supported"
       expect(thrownError).toBeInstanceOf(Error);
-      expect((thrownError as Error).message).toBe('osascript error');
+      expect((thrownError as Error).message).toBe('binary error');
       expect((thrownError as Error).message).not.toContain('Shake gesture is not supported');
     });
 
-    macosOnly('the AppleScript targets System Events and Simulator process', async () => {
+    macosOnly('uses precompiled binary with shortcut command', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.shake('TEST-UDID');
 
-      // Assert — the script references both System Events and the Simulator process
-      const scriptArg = mockExec.mock.calls[0]![1] as string[];
-      expect(scriptArg[1]).toContain('System Events');
-      expect(scriptArg[1]).toContain('process "Simulator"');
+      // Assert — the binary path contains 'wms-ios-input' and first arg is 'shortcut'
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const args = mockExec.mock.calls[0]![1] as string[];
+      expect(args[0]).toBe('shortcut');
     });
   });
 
@@ -1164,73 +1198,73 @@ describe('IOSSimulatorService', () => {
   // -------------------------------------------------------------------------
 
   describe('sendText(udid, text)', () => {
-    macosOnly('calls osascript with a keystroke script (not xcrun simctl)', async () => {
+    macosOnly('calls precompiled binary with type command (not xcrun simctl)', async () => {
       // Arrange — sendText does NOT call assertSimctlAvailable, so only 1 exec call needed
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendText('TEST-UDID', 'Hello World');
 
-      // Assert — first (and only) call is osascript with -e and a keystroke script
-      expect(mockExec.mock.calls[0]).toEqual([
-        'osascript',
-        ['-e', expect.stringContaining('keystroke')],
-      ]);
+      // Assert — first (and only) call is the precompiled binary with 'type' command
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const args = mockExec.mock.calls[0]![1] as string[];
+      expect(args).toEqual(['type', 'Hello World']);
     });
 
-    macosOnly('the AppleScript contains the text embedded inside keystroke (preserving spaces)', async () => {
+    macosOnly('passes the full text as a single argument to the binary type command (preserving spaces)', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendText('TEST-UDID', 'hello world test');
 
-      // Assert — the script passed to -e contains the text as a keystroke argument
-      const scriptArg = mockExec.mock.calls[0]![1] as string[];
-      expect(scriptArg[1]).toContain('keystroke "hello world test"');
+      // Assert — the binary is called with ['type', 'hello world test']
+      const args = mockExec.mock.calls[0]![1] as string[];
+      expect(args).toEqual(['type', 'hello world test']);
     });
 
-    macosOnly('exec is called exactly once (no assertSimctlAvailable, just osascript)', async () => {
+    macosOnly('exec is called exactly once (no assertSimctlAvailable, just binary type)', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendText('TEST-UDID', 'hello');
 
-      // Assert — only 1 exec call: the osascript keystroke
+      // Assert — only 1 exec call: the binary type command
       expect(mockExec).toHaveBeenCalledTimes(1);
     });
 
-    macosOnly('escapes backslash characters in the AppleScript string', async () => {
+    macosOnly('passes text with backslashes raw to the binary (no escaping needed)', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendText('TEST-UDID', 'path\\to\\file');
 
-      // Assert — single backslash → double backslash inside AppleScript string
-      const scriptArg = mockExec.mock.calls[0]![1] as string[];
-      expect(scriptArg[1]).toContain('keystroke "path\\\\to\\\\file"');
+      // Assert — text is passed as-is to the binary (no AppleScript escaping)
+      const args = mockExec.mock.calls[0]![1] as string[];
+      expect(args).toEqual(['type', 'path\\to\\file']);
     });
 
-    macosOnly('escapes double-quote characters in the AppleScript string', async () => {
+    macosOnly('passes text with double-quotes raw to the binary (no escaping needed)', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendText('TEST-UDID', 'say "hello"');
 
-      // Assert — " → \" inside AppleScript string
-      const scriptArg = mockExec.mock.calls[0]![1] as string[];
-      expect(scriptArg[1]).toContain('keystroke "say \\"hello\\""');
+      // Assert — text is passed as-is to the binary (no AppleScript escaping)
+      const args = mockExec.mock.calls[0]![1] as string[];
+      expect(args).toEqual(['type', 'say "hello"']);
     });
 
     macosOnly('propagates exec failures as thrown errors', async () => {
       // Arrange — sendText makes exactly 1 exec call; make it reject
-      mockExec.mockRejectedValueOnce(new Error('osascript: execution error'));
+      mockExec.mockRejectedValueOnce(new Error('binary: execution error'));
 
       // Act & Assert
-      await expect(service.sendText('TEST-UDID', 'hello')).rejects.toThrow('osascript');
+      await expect(service.sendText('TEST-UDID', 'hello')).rejects.toThrow('binary: execution error');
     });
   });
 
@@ -1261,16 +1295,17 @@ describe('IOSSimulatorService', () => {
         ['-a', 'Simulator', '--args', '-CurrentDeviceUDID', 'TEST-UDID'],
       );
 
-      // Assert — third call hides the Simulator toolbar
+      // Assert — third call hides the Simulator toolbar via the precompiled binary
       expect(mockExec).toHaveBeenCalledWith(
-        'osascript',
-        ['-e', expect.stringContaining('set visible of toolbar 1 of window 1 to false')],
+        expect.stringContaining('wms-ios-input'),
+        ['toolbar-hide'],
+        { timeout: 5_000 },
       );
 
       vi.useRealTimers();
     });
 
-    macosOnly('exec is called exactly twice: once for defaults write and once for open', async () => {
+    macosOnly('exec is called exactly three times: defaults write, open, and binary toolbar hide', async () => {
       // Arrange
       vi.useFakeTimers();
       mockExec.mockResolvedValue({ stdout: '', stderr: '' });
@@ -1280,7 +1315,7 @@ describe('IOSSimulatorService', () => {
       await vi.runAllTimersAsync();
       await promise;
 
-      // Assert — 3 exec calls: defaults write, open, osascript (toolbar hide)
+      // Assert — 3 exec calls: defaults write, open, binary (toolbar hide)
       expect(mockExec).toHaveBeenCalledTimes(3);
 
       vi.useRealTimers();
@@ -1340,7 +1375,7 @@ describe('IOSSimulatorService', () => {
       vi.useRealTimers();
     });
 
-    macosOnly('hides the Simulator toolbar via osascript after launch', async () => {
+    macosOnly('hides the Simulator toolbar via precompiled binary after launch', async () => {
       // Arrange
       vi.useFakeTimers();
       mockExec.mockResolvedValue({ stdout: '', stderr: '' });
@@ -1350,22 +1385,21 @@ describe('IOSSimulatorService', () => {
       await vi.runAllTimersAsync();
       await promise;
 
-      // Assert — third call is osascript to hide toolbar
-      expect(mockExec.mock.calls[2]![0]).toBe('osascript');
-      const osascriptArgs = mockExec.mock.calls[2]![1] as string[];
-      expect(osascriptArgs[0]).toBe('-e');
-      expect(osascriptArgs[1]).toContain('set visible of toolbar 1 of window 1 to false');
+      // Assert — third call is the precompiled binary with toolbar-hide command
+      expect(mockExec.mock.calls[2]![0]).toContain('wms-ios-input');
+      const toolbarArgs = mockExec.mock.calls[2]![1] as string[];
+      expect(toolbarArgs).toEqual(['toolbar-hide']);
 
       vi.useRealTimers();
     });
 
-    macosOnly('resolves successfully even when the toolbar osascript call throws (best-effort)', async () => {
-      // Arrange — defaults write and open succeed; osascript (toolbar) throws
+    macosOnly('resolves successfully even when the toolbar binary call throws (best-effort)', async () => {
+      // Arrange — defaults write and open succeed; binary (toolbar) throws
       vi.useFakeTimers();
       mockExec
         .mockResolvedValueOnce({ stdout: '', stderr: '' })  // defaults write
         .mockResolvedValueOnce({ stdout: '', stderr: '' })  // open -a Simulator
-        .mockRejectedValueOnce(new Error('osascript: execution error: System Events got an error: Can\'t get window 1 of process "Simulator".'));  // toolbar hide fails
+        .mockRejectedValueOnce(new Error('binary: execution error: Simulator window not ready'));  // toolbar hide fails
 
       // Act — should resolve, not reject
       const promise = service.openSimulatorApp('TEST-UDID');
@@ -1381,11 +1415,10 @@ describe('IOSSimulatorService', () => {
   // -------------------------------------------------------------------------
 
   describe('sendTap(udid, normX, normY)', () => {
-    // Window geometry (used for normalization): x=100, y=150, width=400, height=880
-    // Content geometry (informational only):    x=100, y=230, width=400, height=800
-    // Window: x=100, y=150, w=400, h=880  (full window including title bar + toolbar)
-    // Content: x=100, y=230, w=400, h=800  (content area inside window)
-    const GEO_STDOUT = '100,150,400,880,100,230,400,800';
+    // Window geometry returned by binary: windowX=100, windowY=150, windowWidth=400, windowHeight=880
+    // screenX = windowX + normX * windowWidth
+    // screenY = windowY + normY * windowHeight
+    const GEO_STDOUT = '100,150,400,880';
 
     macosOnly('calls exec exactly 2 times: geometry + swift CGEvent tap', async () => {
       // Arrange
@@ -1411,11 +1444,11 @@ describe('IOSSimulatorService', () => {
       // Act
       await service.sendTap('TEST-UDID', 0.5, 0.5);
 
-      // Assert — second exec call is swift CGEvent tap with computed screen coords
-      const swiftArgs = mockExec.mock.calls[1]![1] as string[];
-      expect(swiftArgs[0]).toBe('-e');
-      expect(swiftArgs[1]).toContain('post(.leftMouseDown, 300, 590)');
-      expect(swiftArgs[1]).toContain('post(.leftMouseUp, 300, 590)');
+      // Assert — second exec call is the precompiled binary with computed screen coords
+      const binaryPath = mockExec.mock.calls[1]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const tapArgs = mockExec.mock.calls[1]![1] as string[];
+      expect(tapArgs).toEqual(['tap', '300', '590']);
     });
 
     macosOnly('computes correct screen coords for top-left corner (0, 0)', async () => {
@@ -1429,11 +1462,11 @@ describe('IOSSimulatorService', () => {
       // Act
       await service.sendTap('TEST-UDID', 0, 0);
 
-      // Assert
-      const swiftArgs = mockExec.mock.calls[1]![1] as string[];
-      expect(swiftArgs[0]).toBe('-e');
-      expect(swiftArgs[1]).toContain('post(.leftMouseDown, 100, 150)');
-      expect(swiftArgs[1]).toContain('post(.leftMouseUp, 100, 150)');
+      // Assert — second exec call is the precompiled binary with computed screen coords
+      const binaryPath = mockExec.mock.calls[1]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const tapArgs = mockExec.mock.calls[1]![1] as string[];
+      expect(tapArgs).toEqual(['tap', '100', '150']);
     });
 
     macosOnly('computes correct screen coords for bottom-right corner (1, 1)', async () => {
@@ -1447,14 +1480,14 @@ describe('IOSSimulatorService', () => {
       // Act
       await service.sendTap('TEST-UDID', 1, 1);
 
-      // Assert
-      const swiftArgs = mockExec.mock.calls[1]![1] as string[];
-      expect(swiftArgs[0]).toBe('-e');
-      expect(swiftArgs[1]).toContain('post(.leftMouseDown, 500, 1030)');
-      expect(swiftArgs[1]).toContain('post(.leftMouseUp, 500, 1030)');
+      // Assert — second exec call is the precompiled binary with computed screen coords
+      const binaryPath = mockExec.mock.calls[1]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const tapArgs = mockExec.mock.calls[1]![1] as string[];
+      expect(tapArgs).toEqual(['tap', '500', '1030']);
     });
 
-    macosOnly('second exec call uses swift CGEvent (not osascript click)', async () => {
+    macosOnly('second exec call uses precompiled CGEvent binary (not osascript click)', async () => {
       // Arrange
       mockExec
         .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' })
@@ -1463,20 +1496,17 @@ describe('IOSSimulatorService', () => {
       // Act
       await service.sendTap('TEST-UDID', 0.5, 0.5);
 
-      // Assert — second call is swift (not osascript), and the script activates
-      // Simulator.app and posts events via .cghidEventTap
-      expect(mockExec.mock.calls[1]![0]).toBe('swift');
-      const swiftArgs = mockExec.mock.calls[1]![1] as string[];
-      expect(swiftArgs[1]).toContain('activate(options:');
-      expect(swiftArgs[1]).toContain('post(tap: .cghidEventTap)');
+      // Assert — second call is the precompiled binary (not swift -e or osascript)
+      const binaryPath = mockExec.mock.calls[1]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const tapArgs = mockExec.mock.calls[1]![1] as string[];
+      expect(tapArgs[0]).toBe('tap');
     });
 
-    macosOnly('throws when getSimulatorContentGeometry returns unparseable output on both primary and fallback paths', async () => {
-      // Arrange — primary content-area query returns invalid output → falls back to window frame
-      //           fallback window-frame query also returns invalid output → throws
+    macosOnly('throws when geometry binary returns unparseable output', async () => {
+      // Arrange — geometry call returns invalid output → throws immediately (no fallback)
       mockExec
-        .mockResolvedValueOnce({ stdout: 'invalid output', stderr: '' })  // content area query fails to parse → falls back
-        .mockResolvedValueOnce({ stdout: 'invalid output', stderr: '' }); // window frame query also fails to parse → throws
+        .mockResolvedValueOnce({ stdout: 'invalid output', stderr: '' }); // geometry fails to parse → throws
 
       // Act & Assert
       await expect(service.sendTap('TEST-UDID', 0.5, 0.5)).rejects.toThrow(
@@ -1484,12 +1514,10 @@ describe('IOSSimulatorService', () => {
       );
     });
 
-    macosOnly('throws when both the primary and fallback geometry exec calls fail', async () => {
-      // Arrange — primary content-area query throws → falls back to window frame
-      //           fallback window-frame query also throws → error propagates
+    macosOnly('throws when the geometry exec call fails', async () => {
+      // Arrange — geometry query rejects → error propagates (no fallback)
       mockExec
-        .mockRejectedValueOnce(new Error('osascript: Simulator is not running'))  // content area query throws → falls back
-        .mockRejectedValueOnce(new Error('osascript: Simulator is not running')); // window frame query also throws → propagates
+        .mockRejectedValueOnce(new Error('binary: Simulator is not running')); // geometry throws → propagates
 
       // Act & Assert
       await expect(service.sendTap('TEST-UDID', 0.5, 0.5)).rejects.toThrow(
@@ -1497,25 +1525,62 @@ describe('IOSSimulatorService', () => {
       );
     });
 
-    macosOnly('falls back to window frame + 28px offset when content-area query fails', async () => {
-      // Arrange: first exec (content-area query) rejects; second exec (window frame) succeeds;
-      // third exec is the swift CGEvent tap call.
+    macosOnly('correctly uses 4-value geometry output (windowX, windowY, windowWidth, windowHeight)', async () => {
+      // Arrange: geometry returns 4 values; verify coordinate mapping
+      // screenX = windowX + normX * windowWidth = 100 + 0.5 * 400 = 300
+      // screenY = windowY + normY * windowHeight = 150 + 0.5 * 880 = 590
       mockExec
-        .mockRejectedValueOnce(new Error('group 1 not found'))            // content area query fails
-        .mockResolvedValueOnce({ stdout: '100,200,400,800', stderr: '' }) // fallback window frame
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });               // swift CGEvent tap
+        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' }) // geometry
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });         // precompiled binary tap
 
       // Act
       await service.sendTap('TEST-UDID', 0.5, 0.5);
 
-      // With fallback window frame (100, 200, 400, 800):
-      // windowX=100, windowY=200, windowWidth=400, windowHeight=800
-      // screenX = 100 + 0.5 * 400 = 300
-      // screenY = 200 + 0.5 * 800 = 600
-      const swiftArgs = mockExec.mock.calls[2]![1] as string[];
-      expect(swiftArgs[0]).toBe('-e');
-      expect(swiftArgs[1]).toContain('post(.leftMouseDown, 300, 600)');
-      expect(swiftArgs[1]).toContain('post(.leftMouseUp, 300, 600)');
+      // Assert — the tap call uses coordinates derived from the 4-value geometry
+      const binaryPath = mockExec.mock.calls[1]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const tapArgs = mockExec.mock.calls[1]![1] as string[];
+      expect(tapArgs).toEqual(['tap', '300', '590']);
+    });
+
+    macosOnly('compiles the input binary when it is not cached', async () => {
+      // Arrange — binary does not exist; flow: swiftc → geometry → tap
+      mockExistsSync.mockReturnValue(false);
+      mockExec
+        .mockResolvedValueOnce({ stdout: '', stderr: '' })         // swiftc compilation
+        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' }) // geometry
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });        // binary tap
+
+      // Act
+      await service.sendTap('TEST-UDID', 0.5, 0.5);
+
+      // Assert — swiftc was called to compile (first exec call)
+      expect(mockExec).toHaveBeenCalledTimes(3);
+      expect(mockExec.mock.calls[0]![0]).toBe('swiftc');
+      // writeFileSync was called to write source and version
+      expect(mockWriteFileSync).toHaveBeenCalled();
+    });
+
+    macosOnly('recompiles when binary exists but version is stale', async () => {
+      // Arrange — binary exists but version doesn't match; flow: swiftc → geometry → tap
+      mockExistsSync.mockReturnValue(true);
+      mockReadFileSync.mockReturnValue('0'); // stale version (current is '2')
+      mockExec
+        .mockResolvedValueOnce({ stdout: '', stderr: '' })          // swiftc recompilation
+        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' }) // geometry
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });         // binary tap
+
+      // Act
+      await service.sendTap('TEST-UDID', 0.5, 0.5);
+
+      // Assert — swiftc was called to recompile (first exec call)
+      expect(mockExec).toHaveBeenCalledTimes(3);
+      expect(mockExec.mock.calls[0]![0]).toBe('swiftc');
+      expect(mockWriteFileSync).toHaveBeenCalled();
+
+      // Restore defaults for other tests
+      mockExistsSync.mockReturnValue(true);
+      mockReadFileSync.mockReturnValue('4');
     });
   });
 
@@ -1525,8 +1590,7 @@ describe('IOSSimulatorService', () => {
 
   describe('sendSwipe(udid, normX1, normY1, normX2, normY2, durationMs)', () => {
     // Window: x=100, y=150, w=400, h=880
-    // Content: x=100, y=230, w=400, h=800
-    const GEO_STDOUT = '100,150,400,880,100,230,400,800';
+    const GEO_STDOUT = '100,150,400,880';
 
     macosOnly('calls exec exactly 2 times: geometry + swift CGEvent swipe', async () => {
       // Arrange
@@ -1541,7 +1605,7 @@ describe('IOSSimulatorService', () => {
       expect(mockExec).toHaveBeenCalledTimes(2);
     });
 
-    macosOnly('second exec call uses swift -e CGEvent drag', async () => {
+    macosOnly('second exec call uses precompiled CGEvent binary', async () => {
       // Arrange
       mockExec
         .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' })
@@ -1550,16 +1614,19 @@ describe('IOSSimulatorService', () => {
       // Act
       await service.sendSwipe('TEST-UDID', 0.0, 0.0, 1.0, 1.0);
 
-      // Assert — second call is swift (no intermediate activate)
-      expect(mockExec.mock.calls[1]![0]).toBe('swift');
+      // Assert — second call is the precompiled binary (not swift -e)
+      const binaryPath = mockExec.mock.calls[1]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
     });
 
-    macosOnly('embeds correct screen coordinates in the swift swipe script', async () => {
+    macosOnly('passes correct screen coordinates to the precompiled binary', async () => {
       // Arrange
       // startX = round(100 + 0.0 * 400) = 100
       // startY = round(150 + 0.0 * 880) = 150
       // endX   = round(100 + 1.0 * 400) = 500
       // endY   = round(150 + 1.0 * 880) = 1030
+      // steps     = Math.max(5, Math.round(300 / 30)) = 10
+      // stepDelay = (300 / 1000) / 10 = 0.03
       mockExec
         .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' })
         .mockResolvedValueOnce({ stdout: '', stderr: '' });
@@ -1567,16 +1634,14 @@ describe('IOSSimulatorService', () => {
       // Act
       await service.sendSwipe('TEST-UDID', 0.0, 0.0, 1.0, 1.0, 300);
 
-      // Assert — second exec call is swift -e with computed screen coords in the script
-      const swiftArgs = mockExec.mock.calls[1]![1] as string[];
-      expect(swiftArgs[0]).toBe('-e');
-      expect(swiftArgs[1]).toContain('post(.leftMouseDown, 100, 150)');
-      expect(swiftArgs[1]).toContain('post(.leftMouseUp, 500, 1030)');
-      expect(swiftArgs[1]).toContain('post(tap: .cghidEventTap)');
-      expect(swiftArgs[1]).not.toContain('postToPid');
+      // Assert — second exec call is precompiled binary with correct args
+      const binaryPath = mockExec.mock.calls[1]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const swipeArgs = mockExec.mock.calls[1]![1] as string[];
+      expect(swipeArgs).toEqual(['swipe', '100', '150', '500', '1030', '10', '0.03']);
     });
 
-    macosOnly('swift swipe script activates Simulator before posting events', async () => {
+    macosOnly('calls precompiled binary with swipe command', async () => {
       // Arrange
       mockExec
         .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' })
@@ -1585,38 +1650,40 @@ describe('IOSSimulatorService', () => {
       // Act
       await service.sendSwipe('TEST-UDID', 0.0, 0.0, 1.0, 1.0, 300);
 
-      // Assert — script activates Simulator so HID events are routed to it
-      const swiftArgs = mockExec.mock.calls[1]![1] as string[];
-      expect(swiftArgs[1]).toContain('activate(options:');
+      // Assert — binary is called with 'swipe' as the first argument.
+      // (Simulator activation is baked into the precompiled binary itself.)
+      const binaryPath = mockExec.mock.calls[1]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const swipeArgs = mockExec.mock.calls[1]![1] as string[];
+      expect(swipeArgs[0]).toBe('swipe');
     });
 
-    macosOnly('falls back to window frame + 28px offset for swipe when content-area query fails', async () => {
-      // Arrange: content-area query rejects → falls back to window-frame query → succeeds
-      // Fallback window frame: x=100, y=200, w=400, h=800
-      // windowX=100, windowY=200, windowWidth=400, windowHeight=800
+    macosOnly('correctly uses 4-value geometry output for swipe coordinate mapping', async () => {
+      // Arrange: geometry returns 4 values; verify coordinate mapping for swipe
       // startX = round(100 + 0.0 * 400) = 100
-      // startY = round(200 + 0.0 * 800) = 200
+      // startY = round(150 + 0.0 * 880) = 150
       // endX   = round(100 + 1.0 * 400) = 500
-      // endY   = round(200 + 1.0 * 800) = 1000
+      // endY   = round(150 + 1.0 * 880) = 1030
+      // steps     = Math.max(5, Math.round(300 / 30)) = 10
+      // stepDelay = (300 / 1000) / 10 = 0.03
       mockExec
-        .mockRejectedValueOnce(new Error('group 1 not found'))            // content-area query fails
-        .mockResolvedValueOnce({ stdout: '100,200,400,800', stderr: '' }) // window frame fallback
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });               // swift CGEvent swipe
+        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' }) // geometry (4 values)
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });         // precompiled binary swipe
 
+      // Act
       await service.sendSwipe('TEST-UDID', 0.0, 0.0, 1.0, 1.0, 300);
 
-      const swiftArgs = mockExec.mock.calls[2]![1] as string[];
-      expect(swiftArgs[0]).toBe('-e');
-      expect(swiftArgs[1]).toContain('post(.leftMouseDown, 100, 200)');
-      expect(swiftArgs[1]).toContain('post(.leftMouseUp, 500, 1000)');
+      // Assert — binary is called with swipe args derived from 4-value geometry
+      const binaryPath = mockExec.mock.calls[1]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const swipeArgs = mockExec.mock.calls[1]![1] as string[];
+      expect(swipeArgs).toEqual(['swipe', '100', '150', '500', '1030', '10', '0.03']);
     });
 
     macosOnly('propagates geometry exec failure as thrown error', async () => {
-      // Arrange — primary content-area query throws → falls back to window frame
-      //           fallback window-frame query also throws → error propagates
+      // Arrange — geometry query rejects → error propagates (no fallback)
       mockExec
-        .mockRejectedValueOnce(new Error('osascript: Simulator not found'))  // content area query
-        .mockRejectedValueOnce(new Error('osascript: Simulator not found')); // window frame query
+        .mockRejectedValueOnce(new Error('binary: Simulator not found')); // geometry throws → propagates
 
       // Act & Assert
       await expect(
@@ -1626,82 +1693,163 @@ describe('IOSSimulatorService', () => {
   });
 
   // -------------------------------------------------------------------------
+  // geometry caching (getSimulatorContentGeometry TTL)
+  // -------------------------------------------------------------------------
+
+  describe('geometry caching (getSimulatorContentGeometry TTL)', () => {
+    const GEO_STDOUT = '100,150,400,880';
+
+    macosOnly('reuses cached geometry on consecutive taps without re-querying', async () => {
+      // Arrange — provide geometry once, then binary calls
+      mockExec
+        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' }) // geometry (first tap)
+        .mockResolvedValueOnce({ stdout: '', stderr: '' })         // binary tap (first tap)
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });        // binary tap (second tap — no geometry query!)
+
+      // Act
+      await service.sendTap('TEST-UDID', 0.5, 0.5);
+      await service.sendTap('TEST-UDID', 0.3, 0.7);
+
+      // Assert — only 3 exec calls total (1 geometry + 2 taps), NOT 4 (2 geometry + 2 taps)
+      expect(mockExec).toHaveBeenCalledTimes(3);
+      // First call is geometry (precompiled binary)
+      expect(mockExec.mock.calls[0]![0]).toContain('wms-ios-input');
+      // Second call is first tap
+      const tap1Args = mockExec.mock.calls[1]![1] as string[];
+      expect(tap1Args[0]).toBe('tap');
+      // Third call is second tap (no geometry query before it!)
+      const tap2Args = mockExec.mock.calls[2]![1] as string[];
+      expect(tap2Args[0]).toBe('tap');
+    });
+
+    macosOnly('invalidateGeometryCache() forces re-query on next interaction', async () => {
+      // Arrange
+      mockExec
+        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' }) // geometry (first tap)
+        .mockResolvedValueOnce({ stdout: '', stderr: '' })         // binary tap
+        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' }) // geometry (re-query after invalidation)
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });        // binary tap
+
+      // Act
+      await service.sendTap('TEST-UDID', 0.5, 0.5);
+      service.invalidateGeometryCache();
+      await service.sendTap('TEST-UDID', 0.5, 0.5);
+
+      // Assert — 4 exec calls: geometry + tap + geometry + tap
+      expect(mockExec).toHaveBeenCalledTimes(4);
+      expect(mockExec.mock.calls[0]![0]).toContain('wms-ios-input');
+      expect(mockExec.mock.calls[2]![0]).toContain('wms-ios-input');
+    });
+
+    macosOnly('re-queries geometry after TTL expires (2 s)', async () => {
+      vi.useFakeTimers();
+      mockExec
+        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' }) // first geometry query
+        .mockResolvedValueOnce({ stdout: '', stderr: '' })          // tap 1 (binary call)
+        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' }) // second geometry query (post-TTL)
+        .mockResolvedValueOnce({ stdout: '', stderr: '' });         // tap 2 (binary call)
+
+      await service.sendTap('TEST-UDID', 0.5, 0.5);
+      vi.advanceTimersByTime(2001);                                 // TTL expired
+      await service.sendTap('TEST-UDID', 0.5, 0.5);
+
+      // 4 exec calls: geometry + tap + geometry + tap (geometry re-queried after TTL)
+      expect(mockExec).toHaveBeenCalledTimes(4);
+      expect(mockExec.mock.calls[0]![0]).toContain('wms-ios-input'); // first geometry
+      expect(mockExec.mock.calls[2]![0]).toContain('wms-ios-input'); // second geometry (re-queried)
+
+      vi.useRealTimers();
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // sendKeyEvent()
   // -------------------------------------------------------------------------
 
   describe('sendKeyEvent(udid, key, code)', () => {
-    macosOnly('sends "key code 36" for the Enter key', async () => {
+    macosOnly('sends key code 36 for the Enter key via precompiled binary', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendKeyEvent('TEST-UDID', 'Enter', 'Enter');
 
-      // Assert
+      // Assert — binary called with ['key', '36']
       expect(mockExec).toHaveBeenCalledTimes(1);
-      const scriptArg = mockExec.mock.calls[0]![1] as string[];
-      expect(scriptArg[1]).toContain('key code 36');
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const args = mockExec.mock.calls[0]![1] as string[];
+      expect(args).toEqual(['key', '36']);
     });
 
-    macosOnly('sends "key code 51" for the Backspace key', async () => {
+    macosOnly('sends key code 51 for the Backspace key via precompiled binary', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendKeyEvent('TEST-UDID', 'Backspace', 'Backspace');
 
-      // Assert
-      const scriptArg = mockExec.mock.calls[0]![1] as string[];
-      expect(scriptArg[1]).toContain('key code 51');
+      // Assert — binary called with ['key', '51']
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const args = mockExec.mock.calls[0]![1] as string[];
+      expect(args).toEqual(['key', '51']);
     });
 
-    macosOnly('sends "key code 126" for the ArrowUp key', async () => {
+    macosOnly('sends key code 126 for the ArrowUp key via precompiled binary', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendKeyEvent('TEST-UDID', 'ArrowUp', 'ArrowUp');
 
-      // Assert
-      const scriptArg = mockExec.mock.calls[0]![1] as string[];
-      expect(scriptArg[1]).toContain('key code 126');
+      // Assert — binary called with ['key', '126']
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const args = mockExec.mock.calls[0]![1] as string[];
+      expect(args).toEqual(['key', '126']);
     });
 
-    macosOnly('sends "key code 125" for the ArrowDown key', async () => {
+    macosOnly('sends key code 125 for the ArrowDown key via precompiled binary', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendKeyEvent('TEST-UDID', 'ArrowDown', 'ArrowDown');
 
-      // Assert
-      const scriptArg = mockExec.mock.calls[0]![1] as string[];
-      expect(scriptArg[1]).toContain('key code 125');
+      // Assert — binary called with ['key', '125']
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const args = mockExec.mock.calls[0]![1] as string[];
+      expect(args).toEqual(['key', '125']);
     });
 
-    macosOnly('sends "key code 53" for the Escape key', async () => {
+    macosOnly('sends key code 53 for the Escape key via precompiled binary', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendKeyEvent('TEST-UDID', 'Escape', 'Escape');
 
-      // Assert
-      const scriptArg = mockExec.mock.calls[0]![1] as string[];
-      expect(scriptArg[1]).toContain('key code 53');
+      // Assert — binary called with ['key', '53']
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const args = mockExec.mock.calls[0]![1] as string[];
+      expect(args).toEqual(['key', '53']);
     });
 
-    macosOnly('sends keystroke for a single printable character', async () => {
+    macosOnly('sends keystroke command for a single printable character', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendKeyEvent('TEST-UDID', 'a', 'KeyA');
 
-      // Assert — uses keystroke, not key code
-      const scriptArg = mockExec.mock.calls[0]![1] as string[];
-      expect(scriptArg[1]).toContain('keystroke "a"');
-      expect(scriptArg[1]).not.toContain('key code');
+      // Assert — binary called with ['keystroke', 'a'] (not key code)
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const args = mockExec.mock.calls[0]![1] as string[];
+      expect(args).toEqual(['keystroke', 'a']);
     });
 
     macosOnly('exec is called exactly once for valid keys (no assertSimctlAvailable)', async () => {
@@ -1741,22 +1889,23 @@ describe('IOSSimulatorService', () => {
       expect(mockExec).toHaveBeenCalledTimes(0);
     });
 
-    macosOnly('the AppleScript wraps the key event in a System Events tell block targeting Simulator', async () => {
+    macosOnly('uses precompiled binary with key command for special keys', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendKeyEvent('TEST-UDID', 'Enter', 'Enter');
 
-      // Assert
-      const scriptArg = mockExec.mock.calls[0]![1] as string[];
-      expect(scriptArg[1]).toContain('tell application "System Events"');
-      expect(scriptArg[1]).toContain('tell process "Simulator"');
+      // Assert — binary path contains 'wms-ios-input' and first arg is 'key'
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-ios-input');
+      const args = mockExec.mock.calls[0]![1] as string[];
+      expect(args[0]).toBe('key');
     });
 
     macosOnly('propagates exec failures as thrown errors', async () => {
-      // Arrange
-      mockExec.mockRejectedValueOnce(new Error('osascript: application not running'));
+      // Arrange — the binary call rejects
+      mockExec.mockRejectedValueOnce(new Error('binary: application not running'));
 
       // Act & Assert
       await expect(

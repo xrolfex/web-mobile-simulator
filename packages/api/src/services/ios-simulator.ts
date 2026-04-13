@@ -1,4 +1,7 @@
 import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type {
   DeviceType,
   DeviceState,
@@ -70,6 +73,28 @@ interface SimctlListOutput {
 const SIMCTL = 'xcrun';
 const LOG_PREFIX = '[IOSSimulatorService]';
 
+/** How long (ms) to cache Simulator window geometry before re-querying. */
+const GEOMETRY_CACHE_TTL_MS = 2000;
+
+/** Private temp directory for WMS iOS input binary (restrictive permissions). */
+const WMS_INPUT_TMP_DIR = join(tmpdir(), 'wms-ios-input-dir');
+
+// Create the directory eagerly at module load with 0o700 (owner-only access).
+// mkdirSync with recursive:true is idempotent — safe for module re-evaluation.
+mkdirSync(WMS_INPUT_TMP_DIR, { recursive: true, mode: 0o700 });
+
+/** Path where the compiled iOS input binary is cached. */
+const INPUT_BINARY_PATH = join(WMS_INPUT_TMP_DIR, 'wms-ios-input');
+
+/** Temp path for Swift source before compilation. */
+const INPUT_SWIFT_TMP_PATH = join(WMS_INPUT_TMP_DIR, 'wms-ios-input.swift');
+
+/** Version tag — increment to force recompilation. */
+const INPUT_BINARY_VERSION = '4';
+
+/** Sidecar file storing the version of the cached binary. */
+const INPUT_BINARY_VERSION_PATH = join(WMS_INPUT_TMP_DIR, 'wms-ios-input.ver');
+
 /**
  * Environment overrides for all `xcrun` calls.
  * Sets `DEVELOPER_DIR` so `xcrun` resolves tools (like `simctl`) from the
@@ -116,6 +141,258 @@ function mapSimctlState(rawState: string): DeviceState {
 const SUPPORTED_FAMILIES = new Set(['iPhone', 'iPad']);
 
 // ---------------------------------------------------------------------------
+// Embedded Swift source — iOS input helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Swift source for the reusable iOS input helper binary.
+ * Handles tap, swipe, key, type, keystroke, shortcut, geometry, and
+ * toolbar-hide via command-line arguments so the binary is compiled once and
+ * reused across many calls (avoiding ~80-150 ms Swift JIT overhead per
+ * invocation).
+ *
+ * Commands:
+ *   tap <x> <y>                         — mouse down/up at screen coords
+ *   swipe <x1> <y1> <x2> <y2> <steps> <stepDelay> — drag gesture
+ *   key <virtualKeyCode>                — CGEvent key down+up by macOS vkey
+ *   type <text…>                        — CGEvent Unicode posting per char
+ *   keystroke <char>                    — CGEvent Unicode single char
+ *   shortcut <keyCode> <modifiers>      — key press with modifier flags
+ *   geometry                            — print windowX,windowY,windowWidth,windowHeight
+ *   toolbar-hide                        — toggle Simulator toolbar (Cmd+Opt+T)
+ */
+const IOS_INPUT_SWIFT_SOURCE = `
+import CoreGraphics
+import Foundation
+import AppKit
+import Carbon
+
+// Parse command line
+let args = CommandLine.arguments
+guard args.count >= 2 else {
+    fputs("Usage: wms-ios-input <command> [args...]\\n", stderr)
+    fputs("Commands: tap, swipe, key, type, keystroke, geometry, toolbar-hide\\n", stderr)
+    exit(1)
+}
+
+let command = args[1]
+
+// Find Simulator.app (most commands need it)
+let simulatorApps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.iphonesimulator")
+
+func requireSimulator() -> NSRunningApplication {
+    guard let sim = simulatorApps.first else {
+        fputs("ERROR: Simulator.app not running\\n", stderr)
+        exit(1)
+    }
+    return sim
+}
+
+/// Save a reference to the currently focused app so we can restore it after posting events.
+let previousApp = NSWorkspace.shared.frontmostApplication
+
+/// Activate Simulator and wait for the window server to bring it to front.
+func activateSimulator() {
+    let sim = requireSimulator()
+    sim.activate(options: .activateIgnoringOtherApps)
+    Thread.sleep(forTimeInterval: 0.05)
+}
+
+/// Re-activate the app that was focused before we activated Simulator.
+/// This is a no-op if Simulator was already the frontmost app.
+func reactivatePreviousApp() {
+    guard let prev = previousApp,
+          prev.processIdentifier != requireSimulator().processIdentifier else { return }
+    // Small delay to let posted events be processed by Simulator before switching away
+    Thread.sleep(forTimeInterval: 0.05)
+    prev.activate(options: .activateIgnoringOtherApps)
+}
+
+func postMouse(_ type: CGEventType, _ x: Double, _ y: Double) {
+    let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: CGPoint(x: x, y: y), mouseButton: .left)
+    event?.post(tap: .cghidEventTap)
+}
+
+func postKey(_ keyCode: UInt16, _ keyDown: Bool, _ modifiers: CGEventFlags = []) {
+    guard let event = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: keyDown) else { return }
+    event.flags = modifiers
+    event.post(tap: .cghidEventTap)
+}
+
+func postKeyPress(_ keyCode: UInt16, _ modifiers: CGEventFlags = []) {
+    postKey(keyCode, true, modifiers)
+    Thread.sleep(forTimeInterval: 0.01)
+    postKey(keyCode, false, modifiers)
+}
+
+switch command {
+case "tap":
+    guard args.count >= 4,
+          let x = Double(args[2]),
+          let y = Double(args[3]) else {
+        fputs("Usage: wms-ios-input tap <x> <y>\\n", stderr)
+        exit(1)
+    }
+    activateSimulator()
+    postMouse(.leftMouseDown, x, y)
+    Thread.sleep(forTimeInterval: 0.03)
+    postMouse(.leftMouseUp, x, y)
+    reactivatePreviousApp()
+
+case "swipe":
+    guard args.count >= 8,
+          let x1 = Double(args[2]),
+          let y1 = Double(args[3]),
+          let x2 = Double(args[4]),
+          let y2 = Double(args[5]),
+          let steps = Int(args[6]),
+          let stepDelay = Double(args[7]) else {
+        fputs("Usage: wms-ios-input swipe <x1> <y1> <x2> <y2> <steps> <stepDelay>\\n", stderr)
+        exit(1)
+    }
+    activateSimulator()
+    postMouse(.leftMouseDown, x1, y1)
+    Thread.sleep(forTimeInterval: 0.02)
+    for i in 1...steps {
+        let t = Double(i) / Double(steps)
+        let ix = x1 + (x2 - x1) * t
+        let iy = y1 + (y2 - y1) * t
+        postMouse(.leftMouseDragged, ix, iy)
+        Thread.sleep(forTimeInterval: stepDelay)
+    }
+    postMouse(.leftMouseUp, x2, y2)
+    reactivatePreviousApp()
+
+case "key":
+    // Usage: wms-ios-input key <virtualKeyCode>
+    // Posts a single key down+up event using the macOS virtual key code.
+    guard args.count >= 3,
+          let keyCode = UInt16(args[2]) else {
+        fputs("Usage: wms-ios-input key <virtualKeyCode>\\n", stderr)
+        exit(1)
+    }
+    activateSimulator()
+    postKeyPress(keyCode)
+    reactivatePreviousApp()
+
+case "type":
+    // Usage: wms-ios-input type <text>
+    // Types a string by posting CGEvent keyboard events with Unicode characters.
+    guard args.count >= 3 else {
+        fputs("Usage: wms-ios-input type <text>\\n", stderr)
+        exit(1)
+    }
+    // Join remaining args in case text had spaces
+    let text = args[2...].joined(separator: " ")
+    activateSimulator()
+    for char in text {
+        let utf16 = Array(String(char).utf16)
+        guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else { continue }
+        event.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
+        event.post(tap: .cghidEventTap)
+        Thread.sleep(forTimeInterval: 0.005)
+        guard let upEvent = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else { continue }
+        upEvent.post(tap: .cghidEventTap)
+        Thread.sleep(forTimeInterval: 0.005)
+    }
+    reactivatePreviousApp()
+
+case "keystroke":
+    // Usage: wms-ios-input keystroke <char>
+    // Types a single character using CGEvent Unicode posting.
+    guard args.count >= 3 else {
+        fputs("Usage: wms-ios-input keystroke <char>\\n", stderr)
+        exit(1)
+    }
+    let char = args[2]
+    activateSimulator()
+    let utf16 = Array(char.utf16)
+    guard let downEvent = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else {
+        fputs("ERROR: Failed to create CGEvent\\n", stderr)
+        exit(1)
+    }
+    downEvent.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
+    downEvent.post(tap: .cghidEventTap)
+    Thread.sleep(forTimeInterval: 0.01)
+    if let upEvent = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) {
+        upEvent.post(tap: .cghidEventTap)
+    }
+    reactivatePreviousApp()
+
+case "shortcut":
+    // Usage: wms-ios-input shortcut <keyCode> <modifiers>
+    // modifiers is a comma-separated list: cmd,shift,ctrl,opt
+    guard args.count >= 4,
+          let keyCode = UInt16(args[2]) else {
+        fputs("Usage: wms-ios-input shortcut <keyCode> <modifiers: cmd,shift,ctrl,opt>\\n", stderr)
+        exit(1)
+    }
+    let modParts = args[3].lowercased().split(separator: ",")
+    var flags: CGEventFlags = []
+    for mod in modParts {
+        switch mod {
+        case "cmd":   flags.insert(.maskCommand)
+        case "shift": flags.insert(.maskShift)
+        case "ctrl":  flags.insert(.maskControl)
+        case "opt":   flags.insert(.maskAlternate)
+        default: break
+        }
+    }
+    activateSimulator()
+    postKeyPress(keyCode, flags)
+    reactivatePreviousApp()
+
+case "geometry":
+    // Usage: wms-ios-input geometry
+    // Returns window geometry as: windowX,windowY,windowWidth,windowHeight
+    // Uses CGWindowListCopyWindowInfo — NO accessibility permission needed.
+    let sim = requireSimulator()
+    let pid = sim.processIdentifier
+
+    guard let windowInfoList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
+        fputs("ERROR: Failed to query window list\\n", stderr)
+        exit(1)
+    }
+
+    // Find the main Simulator window (layer 0 = normal window, not menu/popover)
+    var found = false
+    for info in windowInfoList {
+        guard let ownerPID = info[kCGWindowOwnerPID as String] as? Int32,
+              ownerPID == pid,
+              let bounds = info[kCGWindowBounds as String] as? [String: Double],
+              let layer = info[kCGWindowLayer as String] as? Int,
+              layer == 0,
+              let wx = bounds["X"],
+              let wy = bounds["Y"],
+              let ww = bounds["Width"],
+              let wh = bounds["Height"],
+              ww > 50, wh > 50 else { continue }
+        // Output: windowX,windowY,windowWidth,windowHeight
+        print("\\(Int(wx)),\\(Int(wy)),\\(Int(ww)),\\(Int(wh))")
+        found = true
+        break
+    }
+    if !found {
+        fputs("ERROR: No Simulator window found\\n", stderr)
+        exit(1)
+    }
+
+case "toolbar-hide":
+    // Usage: wms-ios-input toolbar-hide
+    // Toggles the toolbar visibility using Cmd+Opt+T (View > Toggle Toolbar in Simulator.app)
+    // Note: This is Simulator.app's keyboard shortcut for View > Show/Hide Toolbar.
+    // kVK_ANSI_T = 17
+    activateSimulator()
+    postKeyPress(17, [.maskCommand, .maskAlternate])
+    reactivatePreviousApp()
+
+default:
+    fputs("Unknown command: \\(command)\\n", stderr)
+    exit(1)
+}
+`;
+
+// ---------------------------------------------------------------------------
 // Service class
 // ---------------------------------------------------------------------------
 
@@ -127,6 +404,72 @@ const SUPPORTED_FAMILIES = new Set(['iPhone', 'iPad']);
  * instances directly.
  */
 export class IOSSimulatorService {
+  // -------------------------------------------------------------------------
+  // Private state
+  // -------------------------------------------------------------------------
+
+  /** Cached result of the last geometry query. */
+  private geometryCache: {
+    x: number; y: number; width: number; height: number;
+    windowX: number; windowY: number; windowWidth: number; windowHeight: number;
+  } | null = null;
+
+  /** Timestamp (ms) when `geometryCache` was last populated. */
+  private geometryCacheTime = 0;
+
+  /** In-flight promise for binary compilation (prevents parallel compilations). */
+  private ensureInputBinaryPromise: Promise<string> | null = null;
+
+  // -------------------------------------------------------------------------
+  // Input binary management
+  // -------------------------------------------------------------------------
+
+  /**
+   * Ensure the iOS input binary is compiled and ready.
+   * Concurrent calls share a single compilation Promise so the binary is
+   * compiled at most once per process. Returns the path to the compiled binary.
+   */
+  private ensureInputBinary(): Promise<string> {
+    if (!this.ensureInputBinaryPromise) {
+      this.ensureInputBinaryPromise = (async (): Promise<string> => {
+        // Check if already compiled with current version
+        if (existsSync(INPUT_BINARY_PATH) && existsSync(INPUT_BINARY_VERSION_PATH)) {
+          let cachedVersion = '';
+          try {
+            cachedVersion = readFileSync(INPUT_BINARY_VERSION_PATH, 'utf-8').trim();
+          } catch {
+            // Unreadable version file — treat as stale, fall through to recompile.
+          }
+          if (cachedVersion === INPUT_BINARY_VERSION) {
+            return INPUT_BINARY_PATH;
+          }
+        }
+
+        // Delete stale binary before recompiling (M1 fix).
+        try { unlinkSync(INPUT_BINARY_PATH); } catch { /* already gone */ }
+        try { unlinkSync(INPUT_BINARY_VERSION_PATH); } catch { /* already gone */ }
+
+        log('Compiling iOS input helper binary…');
+        writeFileSync(INPUT_SWIFT_TMP_PATH, IOS_INPUT_SWIFT_SOURCE);
+        await exec('swiftc', [
+          INPUT_SWIFT_TMP_PATH,
+          '-o', INPUT_BINARY_PATH,
+          '-framework', 'AppKit',
+          '-framework', 'CoreGraphics',
+          '-O',
+        ], { timeout: 60_000 });
+        writeFileSync(INPUT_BINARY_VERSION_PATH, INPUT_BINARY_VERSION);
+        log('iOS input helper binary compiled successfully.');
+        return INPUT_BINARY_PATH;
+      })().catch((err: unknown) => {
+        // Reset so a subsequent call can retry compilation.
+        this.ensureInputBinaryPromise = null;
+        throw err;
+      });
+    }
+    return this.ensureInputBinaryPromise;
+  }
+
   // -------------------------------------------------------------------------
   // Device types
   // -------------------------------------------------------------------------
@@ -467,17 +810,18 @@ export class IOSSimulatorService {
   // -------------------------------------------------------------------------
 
   /**
-   * Simulate pressing a hardware button on the device via AppleScript.
+   * Simulate pressing a hardware button on the device via the precompiled
+   * CGEvent binary.
    *
-   * Triggers Simulator.app keyboard shortcuts or Device-menu clicks rather
-   * than `xcrun simctl ui pressButton`, which does not exist — `simctl ui`
-   * only supports `appearance`, `increase_contrast`, and `content_size`.
+   * Triggers Simulator.app keyboard shortcuts rather than `xcrun simctl ui
+   * pressButton`, which does not exist — `simctl ui` only supports
+   * `appearance`, `increase_contrast`, and `content_size`.
    *
-   * Button → Simulator.app action mapping:
-   * - `home`       → Cmd+Shift+H  (Device > Home)
-   * - `lock`       → Device menu item "Lock Screen"
-   * - `volumeUp`   → Device menu item "Volume Up"   (no keyboard shortcut)
-   * - `volumeDown` → Device menu item "Volume Down" (no keyboard shortcut)
+   * Button → Simulator.app keyboard shortcut mapping:
+   * - `home`       → Cmd+Shift+H  (Device > Home)          kVK_ANSI_H = 4
+   * - `lock`       → Cmd+L        (Device > Lock Screen)   kVK_ANSI_L = 37
+   * - `volumeUp`   → Cmd+Up       (Device > Volume Up)     kVK_UpArrow = 126
+   * - `volumeDown` → Cmd+Down     (Device > Volume Down)   kVK_DownArrow = 125
    *
    * Simulator.app must be running and connected to the device.
    *
@@ -490,61 +834,54 @@ export class IOSSimulatorService {
   ): Promise<void> {
     log(`Pressing button "${button}" on device ${udid}`);
 
-    // Map each button to the AppleScript snippet that triggers it.
-    // Simulator.app must be frontmost for keyboard shortcuts to work.
-    let actionSnippet: string;
+    const binary = await this.ensureInputBinary();
+
+    // Map each button to a Simulator.app keyboard shortcut.
+    // These are the same shortcuts the Simulator.app Device menu uses.
     switch (button) {
       case 'home':
-        // Device > Home (Cmd+Shift+H)
-        actionSnippet = 'keystroke "h" using {command down, shift down}';
+        // Device > Home (Cmd+Shift+H) — kVK_ANSI_H = 4
+        await exec(binary, ['shortcut', '4', 'cmd,shift'], { timeout: 5_000 });
         break;
       case 'lock':
-        // Device > Lock Screen — use menu click to avoid ambiguity with
-        // Cmd+L which maps to different actions on some Xcode versions.
-        actionSnippet = 'click menu item "Lock Screen" of menu 1 of menu bar item "Device" of menu bar 1';
+        // Device > Lock Screen (Cmd+L) — kVK_ANSI_L = 37
+        await exec(binary, ['shortcut', '37', 'cmd'], { timeout: 5_000 });
         break;
       case 'volumeUp':
-        // Device > Volume Up — no keyboard shortcut; click the menu item directly.
-        actionSnippet = 'click menu item "Volume Up" of menu 1 of menu bar item "Device" of menu bar 1';
+        // Device > Volume Up (Cmd+ArrowUp on some versions, but no reliable shortcut)
+        // Use Cmd+Up — kVK_UpArrow = 126
+        await exec(binary, ['shortcut', '126', 'cmd'], { timeout: 5_000 });
         break;
       case 'volumeDown':
-        // Device > Volume Down — no keyboard shortcut; click the menu item directly.
-        actionSnippet = 'click menu item "Volume Down" of menu 1 of menu bar item "Device" of menu bar 1';
+        // Device > Volume Down (Cmd+ArrowDown on some versions, but no reliable shortcut)
+        // Use Cmd+Down — kVK_DownArrow = 125
+        await exec(binary, ['shortcut', '125', 'cmd'], { timeout: 5_000 });
         break;
       default:
         throw new Error(`Unknown button: ${button}`);
     }
 
-    const script = `
-      tell application "System Events"
-        tell process "Simulator"
-          set frontmost to true
-          ${actionSnippet}
-        end tell
-      end tell
-    `;
-
-    await exec('osascript', ['-e', script]);
     log(`Button "${button}" pressed on device ${udid}`);
   }
 
   /**
-   * Rotate the device orientation via Simulator.app Device-menu clicks.
+   * Rotate the device orientation via the precompiled CGEvent binary.
    *
    * `xcrun simctl orientation` is NOT a valid simctl subcommand — it does not
-   * exist in any Xcode version.  Instead this method triggers the
-   * Simulator.app Device menu items "Rotate Left" and "Rotate Right".
+   * exist in any Xcode version.  Instead this method sends Simulator.app
+   * keyboard shortcuts for Rotate Left (Cmd+Left Arrow) and Rotate Right
+   * (Cmd+Right Arrow).
    *
    * **Limitation:** Simulator.app only exposes *relative* rotation commands
    * (left / right), not absolute orientation setters.  The mapping below
    * applies a single relative rotation as a best-effort approximation:
    *
-   * | `orientation`        | Action                        |
-   * |----------------------|-------------------------------|
-   * | `landscapeLeft`      | Device > Rotate Left          |
-   * | `landscapeRight`     | Device > Rotate Right         |
-   * | `portrait`           | Device > Rotate Right (best effort) |
-   * | `portraitUpsideDown` | Device > Rotate Left  (best effort) |
+   * | `orientation`        | Action                              |
+   * |----------------------|-------------------------------------|
+   * | `landscapeLeft`      | Cmd+Left  (kVK_LeftArrow = 123)     |
+   * | `landscapeRight`     | Cmd+Right (kVK_RightArrow = 124)    |
+   * | `portrait`           | Cmd+Right (best effort)             |
+   * | `portraitUpsideDown` | Cmd+Left  (best effort)             |
    *
    * Callers that need precise absolute orientation control should track the
    * current orientation externally and issue multiple rotate calls as needed.
@@ -560,44 +897,43 @@ export class IOSSimulatorService {
   ): Promise<void> {
     log(`Setting orientation to "${orientation}" on device ${udid}`);
 
-    // Map each requested orientation to the closest Device-menu item name.
-    // "Rotate Left" and "Rotate Right" are the only orientation-related items
-    // available in all Xcode versions — no absolute-orientation menu items exist.
-    const menuItemMap: Record<string, string> = {
-      landscapeLeft:      'Rotate Left',
-      landscapeRight:     'Rotate Right',
-      portrait:           'Rotate Right',  // best-effort relative rotation
-      portraitUpsideDown: 'Rotate Left',   // best-effort relative rotation
-    };
+    const binary = await this.ensureInputBinary();
 
-    const menuItem = menuItemMap[orientation];
-    if (!menuItem) {
-      throw new Error(
-        `Invalid orientation: "${orientation}". ` +
-        `Valid options: ${Object.keys(menuItemMap).join(', ')}`,
-      );
+    // Map each orientation to a Simulator.app rotation shortcut.
+    // Cmd+Left Arrow = Rotate Left (kVK_LeftArrow = 123)
+    // Cmd+Right Arrow = Rotate Right (kVK_RightArrow = 124)
+    switch (orientation) {
+      case 'landscapeLeft':
+        await exec(binary, ['shortcut', '123', 'cmd'], { timeout: 5_000 });
+        break;
+      case 'landscapeRight':
+        await exec(binary, ['shortcut', '124', 'cmd'], { timeout: 5_000 });
+        break;
+      case 'portrait':
+        // Best-effort: rotate right
+        await exec(binary, ['shortcut', '124', 'cmd'], { timeout: 5_000 });
+        break;
+      case 'portraitUpsideDown':
+        // Best-effort: rotate left
+        await exec(binary, ['shortcut', '123', 'cmd'], { timeout: 5_000 });
+        break;
+      default:
+        throw new Error(
+          `Invalid orientation: "${orientation}". ` +
+          `Valid options: portrait, landscapeLeft, landscapeRight, portraitUpsideDown`,
+        );
     }
 
-    const script = `
-      tell application "System Events"
-        tell process "Simulator"
-          set frontmost to true
-          click menu item "${menuItem}" of menu 1 of menu bar item "Device" of menu bar 1
-        end tell
-      end tell
-    `;
-
-    await exec('osascript', ['-e', script]);
     log(`Orientation set to "${orientation}" on device ${udid}`);
   }
 
   /**
-   * Trigger a shake gesture on the device via AppleScript.
+   * Trigger a shake gesture on the device via the precompiled CGEvent binary.
    *
    * `xcrun simctl ui <udid> shake` does not exist — `simctl ui` only supports
    * `appearance`, `increase_contrast`, and `content_size`.  Instead this
    * method sends the Simulator.app keyboard shortcut for Device > Shake:
-   * Ctrl+Cmd+Z.
+   * Ctrl+Cmd+Z (kVK_ANSI_Z = 6).
    *
    * Simulator.app must be running and connected to the device.
    *
@@ -606,17 +942,10 @@ export class IOSSimulatorService {
   async shake(udid: string): Promise<void> {
     log(`Triggering shake gesture on device ${udid}`);
 
-    // Simulator.app Device > Shake (Ctrl+Cmd+Z)
-    const script = `
-      tell application "System Events"
-        tell process "Simulator"
-          set frontmost to true
-          keystroke "z" using {command down, control down}
-        end tell
-      end tell
-    `;
+    // Simulator.app Device > Shake (Ctrl+Cmd+Z) — kVK_ANSI_Z = 6
+    const binary = await this.ensureInputBinary();
+    await exec(binary, ['shortcut', '6', 'cmd,ctrl'], { timeout: 5_000 });
 
-    await exec('osascript', ['-e', script]);
     log(`Shake gesture triggered on device ${udid}`);
   }
 
@@ -751,23 +1080,12 @@ export class IOSSimulatorService {
     await new Promise<void>(resolve => setTimeout(resolve, 2000));
 
     // Hide the Simulator toolbar to reduce chrome height in the captured stream.
-    // This is best-effort — if the toolbar script fails (e.g. the window hasn't
-    // fully rendered yet, or Accessibility permissions are not granted), we log a
-    // warning and continue rather than aborting session creation.
-    const toolbarScript = `
-  tell application "System Events"
-    tell process "Simulator"
-      if exists toolbar 1 of window 1 then
-        if visible of toolbar 1 of window 1 then
-          set visible of toolbar 1 of window 1 to false
-        end if
-      end if
-    end tell
-  end tell
-`;
+    // This is best-effort — if the toolbar-hide command fails (e.g. the window hasn't
+    // fully rendered yet), we log a warning and continue rather than aborting.
     let toolbarHidden = false;
     try {
-      await exec('osascript', ['-e', toolbarScript]);
+      const binary = await this.ensureInputBinary();
+      await exec(binary, ['toolbar-hide'], { timeout: 5_000 });
       toolbarHidden = true;
     } catch (err: unknown) {
       warn(
@@ -783,8 +1101,9 @@ export class IOSSimulatorService {
 
   /**
    * Type text into the currently focused text field on the device.
-   * Uses AppleScript `keystroke` via Simulator.app — no `xcrun simctl` command
-   * exists for typing text.
+   * Uses the precompiled CGEvent binary `type` command, which posts Unicode
+   * keyboard events per character — no `xcrun simctl` command exists for
+   * typing text.
    *
    * Requires Simulator.app to be running and connected to the device.
    *
@@ -794,26 +1113,16 @@ export class IOSSimulatorService {
   async sendText(udid: string, text: string): Promise<void> {
     log(`Sending text to device ${udid}: "${text.substring(0, 50)}${text.length > 50 ? '…' : ''}"`);
 
-    // Escape characters that are special inside an AppleScript double-quoted string.
-    const escaped = text.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-
-    const script = `
-      tell application "System Events"
-        tell process "Simulator"
-          set frontmost to true
-          keystroke "${escaped}"
-        end tell
-      end tell
-    `;
-
-    await exec('osascript', ['-e', script]);
+    const binary = await this.ensureInputBinary();
+    await exec(binary, ['type', text], { timeout: 10_000 });
     log(`Text sent to device ${udid}`);
   }
 
   /**
    * Send a tap at the given normalised coordinates on the iOS simulator.
-   * Uses a Swift / CoreGraphics CGEvent sequence (mouse-down → mouse-up)
-   * posted via `post(tap: .cghidEventTap)` after activating Simulator.app.
+   * Uses a precompiled Swift / CoreGraphics CGEvent binary (mouse-down →
+   * mouse-up) posted via `post(tap: .cghidEventTap)` after activating
+   * Simulator.app.
    *
    * Unlike the legacy AppleScript `System Events click at {x, y}` approach,
    * this avoids macOS TCC errors (-25211, -25204) that arise from the global
@@ -827,7 +1136,7 @@ export class IOSSimulatorService {
    * @param udid  - The device UDID (used for logging only).
    * @param normX - Normalised X coordinate (0.0 = left edge, 1.0 = right edge).
    * @param normY - Normalised Y coordinate (0.0 = top edge, 1.0 = bottom edge).
-   * @throws If Simulator.app is not running or Swift is unavailable.
+   * @throws If Simulator.app is not running or the input binary is unavailable.
    */
   async sendTap(udid: string, normX: number, normY: number): Promise<void> {
     log(`Sending tap to device ${udid} at normalised (${normX.toFixed(3)}, ${normY.toFixed(3)})`);
@@ -837,39 +1146,16 @@ export class IOSSimulatorService {
     const screenX = Math.round(content.windowX + normX * content.windowWidth);
     const screenY = Math.round(content.windowY + normY * content.windowHeight);
 
-    const swiftScript = `
-import CoreGraphics
-import Foundation
-import AppKit
-
-let apps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.iphonesimulator")
-guard let simulator = apps.first else {
-    fputs("ERROR: Simulator.app not running\\n", stderr)
-    exit(1)
-}
-
-// Bring Simulator to the foreground so HID events are routed to it.
-simulator.activate(options: .activateIgnoringOtherApps)
-Thread.sleep(forTimeInterval: 0.05)
-
-func post(_ type: CGEventType, _ x: Double, _ y: Double) {
-    let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: CGPoint(x: x, y: y), mouseButton: .left)
-    event?.post(tap: .cghidEventTap)
-}
-
-post(.leftMouseDown, ${screenX}, ${screenY})
-Thread.sleep(forTimeInterval: 0.05)
-post(.leftMouseUp, ${screenX}, ${screenY})
-`;
-
-    await exec('swift', ['-e', swiftScript]);
+    const binary = await this.ensureInputBinary();
+    await exec(binary, ['tap', String(screenX), String(screenY)], { timeout: 5_000 });
     log(`Tap sent to device ${udid} at screen (${screenX}, ${screenY})`);
   }
 
   /**
    * Send a swipe gesture on the iOS simulator.
-   * Uses a Swift / CoreGraphics CGEvent sequence (mouse-down → drag → mouse-up)
-   * posted via `post(tap: .cghidEventTap)` after activating Simulator.app.
+   * Uses a precompiled Swift / CoreGraphics CGEvent binary (mouse-down → drag
+   * → mouse-up) posted via `post(tap: .cghidEventTap)` after activating
+   * Simulator.app.
    *
    * Unlike `postToPid`, `post(tap: .cghidEventTap)` requires Accessibility
    * permission (not Input Monitoring). Simulator.app is brought to the
@@ -887,7 +1173,7 @@ post(.leftMouseUp, ${screenX}, ${screenY})
    * @param normX2     - Normalised end X (0.0–1.0).
    * @param normY2     - Normalised end Y (0.0–1.0).
    * @param durationMs - Duration of the swipe in milliseconds (default 300).
-   * @throws If Simulator.app is not running or Swift is unavailable.
+   * @throws If Simulator.app is not running or the input binary is unavailable.
    */
   async sendSwipe(
     udid: string,
@@ -913,53 +1199,23 @@ post(.leftMouseUp, ${screenX}, ${screenY})
     const steps = Math.max(5, Math.round(durationMs / 30));
     const stepDelaySecs = (durationMs / 1000) / steps;
 
-    const swiftScript = `
-import CoreGraphics
-import Foundation
-import AppKit
-
-let apps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.iphonesimulator")
-guard let simulator = apps.first else {
-    fputs("ERROR: Simulator.app not running\\n", stderr)
-    exit(1)
-}
-
-// Bring Simulator to the foreground so HID events are routed to it.
-simulator.activate(options: .activateIgnoringOtherApps)
-Thread.sleep(forTimeInterval: 0.1)
-
-func post(_ type: CGEventType, _ x: Double, _ y: Double) {
-    let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: CGPoint(x: x, y: y), mouseButton: .left)
-    event?.post(tap: .cghidEventTap)
-}
-
-let steps = ${steps}
-let stepDelay: Double = ${stepDelaySecs}
-
-post(.leftMouseDown, ${startX}, ${startY})
-Thread.sleep(forTimeInterval: 0.02)
-
-for i in 1...steps {
-    let t = Double(i) / Double(steps)
-    let ix = ${startX} + (${endX} - ${startX}) * t
-    let iy = ${startY} + (${endY} - ${startY}) * t
-    post(.leftMouseDragged, ix, iy)
-    Thread.sleep(forTimeInterval: stepDelay)
-}
-
-post(.leftMouseUp, ${endX}, ${endY})
-`;
-
-    await exec('swift', ['-e', swiftScript]);
+    const binary = await this.ensureInputBinary();
+    await exec(binary, [
+      'swipe',
+      String(startX), String(startY),
+      String(endX), String(endY),
+      String(steps), String(stepDelaySecs),
+    ], { timeout: 10_000 });
     log(`Swipe sent to device ${udid} from (${startX}, ${startY}) to (${endX}, ${endY})`);
   }
 
   /**
-   * Send a key event to the iOS simulator via AppleScript.
+   * Send a key event to the iOS simulator via the precompiled CGEvent binary.
    *
-   * - Special keys (Enter, Backspace, arrows, etc.) are sent using
-   *   `key code <macVirtualKeyCode>`.
-   * - Single printable characters are sent using `keystroke "<char>"`.
+   * - Special keys (Enter, Backspace, arrows, etc.) are sent using the `key`
+   *   command with the macOS virtual key code (CGEvent key down+up).
+   * - Single printable characters are sent using the `keystroke` command
+   *   (CGEvent Unicode posting).
    * - Multi-character keys not in the map (Shift, Control, etc.) are ignored.
    *
    * Requires Simulator.app to be running and connected to the device.
@@ -990,35 +1246,20 @@ post(.leftMouseUp, ${endX}, ${endY})
     };
 
     const macKeyCode = specialKeyMap[key];
-    let script: string;
 
     if (macKeyCode !== undefined) {
-      script = `
-        tell application "System Events"
-          tell process "Simulator"
-            set frontmost to true
-            key code ${macKeyCode}
-          end tell
-        end tell
-      `;
+      // Special key — use the 'key' command with virtual key code
+      const binary = await this.ensureInputBinary();
+      await exec(binary, ['key', String(macKeyCode)], { timeout: 5_000 });
     } else if (key.length === 1) {
-      // Escape characters that are special inside an AppleScript double-quoted string.
-      const escaped = key.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-      script = `
-        tell application "System Events"
-          tell process "Simulator"
-            set frontmost to true
-            keystroke "${escaped}"
-          end tell
-        end tell
-      `;
+      // Printable character — use the 'keystroke' command
+      const binary = await this.ensureInputBinary();
+      await exec(binary, ['keystroke', key], { timeout: 5_000 });
     } else {
       // Multi-character keys not in the map (Shift, Control, Alt, Meta, etc.) — ignore.
       log(`Ignoring unsupported key: "${key}" (code: "${code}")`);
       return;
     }
-
-    await exec('osascript', ['-e', script]);
   }
 
   // -------------------------------------------------------------------------
@@ -1026,37 +1267,30 @@ post(.leftMouseUp, ${endX}, ${endY})
   // -------------------------------------------------------------------------
 
   /**
-   * Get the Simulator.app **window and content area** geometry via AppleScript.
+   * Get the Simulator.app **window geometry** via the precompiled CGEvent
+   * binary's `geometry` command.
    *
-   * Issues a single batched AppleScript call that fetches both the full window
-   * frame (`window 1`) and the device-screen content area (`group 1 of window 1`)
-   * in one round-trip, returning 8 comma-separated integers:
-   * `winX,winY,winW,winH,contentX,contentY,contentW,contentH`.
+   * The binary uses `CGWindowListCopyWindowInfo` — which does NOT require
+   * Accessibility permissions — to locate the main Simulator window and
+   * returns `windowX,windowY,windowWidth,windowHeight` on stdout.
+   *
+   * Since bezels are disabled via `ShowChrome -int 0`, the content area is
+   * the window minus the title bar, computed with a 28 px offset.
    *
    * The full window frame matches the reference frame of the captured screen
-   * stream (which includes the macOS title bar and the Simulator toolbar), so
-   * normalised coordinates sent from the browser can be mapped directly via:
+   * stream, so normalised coordinates sent from the browser can be mapped
+   * directly via:
    *
    *   screenX = windowX + normX × windowWidth
    *   screenY = windowY + normY × windowHeight
    *
-   * Each integer returned by AppleScript is explicitly coerced to `text` before
-   * `&` concatenation to prevent the `&` operator from building a list instead
-   * of a string (which would produce spurious commas in the output).
-   *
-   * **Fallback**: if the batched query fails (e.g. `group 1 of window 1` is
-   * unavailable on older Xcode versions), the method falls back to a single
-   * window-frame-only AppleScript query and derives the content area origin
-   * using a hardcoded 28 px title-bar offset, emitting a warning so the caller
-   * is aware of reduced accuracy.
-   *
    * @returns Object with:
    *   - `x`, `y` — content area origin in screen coordinates
-   *   - `width`, `height` — content area size (excludes window chrome)
+   *   - `width`, `height` — content area size (excludes title bar)
    *   - `windowX`, `windowY` — full window origin in screen coordinates
-   *   - `windowWidth`, `windowHeight` — full window size (includes title bar + toolbar)
-   * @throws If Simulator.app is not running, has no open windows, or both the
-   *         batched and window-frame AppleScript queries fail.
+   *   - `windowWidth`, `windowHeight` — full window size (includes title bar)
+   * @throws If Simulator.app is not running, has no open windows, or the
+   *         binary output cannot be parsed.
    */
   private async getSimulatorContentGeometry(): Promise<{
     x: number;
@@ -1068,73 +1302,40 @@ post(.leftMouseUp, ${endX}, ${endY})
     windowWidth: number;
     windowHeight: number;
   }> {
-    // --- Primary: single batched query — window frame + content area ---
-    const batchedScript = `
-      tell application "System Events"
-        tell process "Simulator"
-          set winPos to position of window 1
-          set winSize to size of window 1
-          set contentArea to group 1 of window 1
-          set contentPos to position of contentArea
-          set contentSize to size of contentArea
-          return ((item 1 of winPos) as text) & "," & ((item 2 of winPos) as text) & "," & ((item 1 of winSize) as text) & "," & ((item 2 of winSize) as text) & "," & ((item 1 of contentPos) as text) & "," & ((item 2 of contentPos) as text) & "," & ((item 1 of contentSize) as text) & "," & ((item 2 of contentSize) as text)
-        end tell
-      end tell
-    `;
-
-    try {
-      const { stdout } = await exec('osascript', ['-e', batchedScript]);
-      const parts = stdout.trim().split(',').map(s => parseInt(s.trim(), 10));
-
-      if (parts.length >= 8 && parts.every(n => !isNaN(n))) {
-        return {
-          windowX: parts[0]!, windowY: parts[1]!, windowWidth: parts[2]!, windowHeight: parts[3]!,
-          x: parts[4]!, y: parts[5]!, width: parts[6]!, height: parts[7]!,
-        };
-      }
-
-      warn(
-        `Content-area geometry query returned unexpected output: "${stdout.trim()}". ` +
-        'Falling back to window frame with hardcoded title-bar offset.',
-      );
-    } catch (err) {
-      warn(
-        `Content-area geometry query failed (${(err as Error).message}). ` +
-        'Falling back to window frame with hardcoded title-bar offset.',
-      );
+    // Return cached geometry if still fresh.
+    if (this.geometryCache && (Date.now() - this.geometryCacheTime) < GEOMETRY_CACHE_TTL_MS) {
+      return this.geometryCache;
     }
 
-    // --- Fallback: window frame only + hardcoded title-bar offset ---
-    const windowScript = `
-      tell application "System Events"
-        tell process "Simulator"
-          set winPos to position of window 1
-          set winSize to size of window 1
-          return ((item 1 of winPos) as text) & "," & ((item 2 of winPos) as text) & "," & ((item 1 of winSize) as text) & "," & ((item 2 of winSize) as text)
-        end tell
-      end tell
-    `;
+    const binary = await this.ensureInputBinary();
+    const { stdout } = await exec(binary, ['geometry'], { timeout: 5_000 });
+    const parts = stdout.trim().split(',').map(s => parseInt(s.trim(), 10));
 
-    const { stdout: fallbackStdout } = await exec('osascript', ['-e', windowScript]);
-    const fallbackParts = fallbackStdout.trim().split(',').map(s => parseInt(s.trim(), 10));
-
-    if (fallbackParts.length < 4 || fallbackParts.some(n => isNaN(n))) {
+    if (parts.length < 4 || parts.some(n => isNaN(n))) {
       throw new Error(
-        `Failed to parse Simulator window geometry from AppleScript output: "${fallbackStdout.trim()}"`,
+        `Failed to parse Simulator window geometry from binary output: "${stdout.trim()}"`,
       );
     }
 
-    const titleBarHeight = 28; // Hardcoded fallback offset — less accurate than batched query.
-    return {
-      windowX: fallbackParts[0]!,
-      windowY: fallbackParts[1]!,
-      windowWidth: fallbackParts[2]!,
-      windowHeight: fallbackParts[3]!,
-      x: fallbackParts[0]!,
-      y: fallbackParts[1]! + titleBarHeight,
-      width: fallbackParts[2]!,
-      height: fallbackParts[3]! - titleBarHeight,
+    const titleBarHeight = 28;
+    this.geometryCache = {
+      windowX: parts[0]!,
+      windowY: parts[1]!,
+      windowWidth: parts[2]!,
+      windowHeight: parts[3]!,
+      x: parts[0]!,
+      y: parts[1]! + titleBarHeight,
+      width: parts[2]!,
+      height: parts[3]! - titleBarHeight,
     };
+    this.geometryCacheTime = Date.now();
+    return this.geometryCache;
+  }
+
+  /** Clear the cached Simulator window geometry, forcing re-query on next interaction. */
+  invalidateGeometryCache(): void {
+    this.geometryCache = null;
+    this.geometryCacheTime = 0;
   }
 
   /**
