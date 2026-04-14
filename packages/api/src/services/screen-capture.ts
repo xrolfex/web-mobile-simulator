@@ -118,7 +118,7 @@ const CAPTURE_SWIFT_TMP_PATH = join(tmpdir(), 'wms-ios-capture-stream.swift');
 const MAX_IOS_CAPTURE_RESTARTS = 5;
 
 /** Version tag for the compiled iOS capture binary. Increment to force recompilation. */
-const CAPTURE_BINARY_VERSION = '13';
+const CAPTURE_BINARY_VERSION = '14';
 
 /** Sidecar file that stores the version of the currently-cached binary. */
 const CAPTURE_BINARY_VERSION_PATH = join(tmpdir(), 'wms-ios-capture-stream.ver');
@@ -526,21 +526,24 @@ class FrameHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             fputs("[\\(self.capturedDeviceName)] First frame received — startup watchdog cancelled\\n", stderr)
         }
 
-        // Track last real frame arrival time for idle detection.
-        self.lastFrameTime = Date()
-        // Reset idle log flag so the next idle period logs once.
-        self.idleRefreshLogged = false
-        // Signal that the next idle period must begin with a keyframe.
-        self.idleKeyframeNeeded = true
-
         guard type == .screen else { return }
 
-        // Check frame status — skip idle frames silently (no misleading error logs).
+        // Check frame status BEFORE updating lastFrameTime.
+        // Idle-status frames must NOT reset the idle timer — doing so prevents
+        // the idle refresh timer from ever firing when SCStream delivers
+        // continuous idle-status callbacks for static screen content.
         if let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
            let statusValue = attachments.first?[.status] as? Int,
            statusValue != SCFrameStatus.complete.rawValue && statusValue != SCFrameStatus.started.rawValue {
             return  // Idle, blank, suspended, or stopped — no valid pixel data
         }
+
+        // Only reset the idle timer when a real, encodable frame arrives.
+        self.lastFrameTime = Date()
+        // Reset idle log flag so the next idle period logs once.
+        self.idleRefreshLogged = false
+        // Signal that the next idle period must begin with a keyframe.
+        self.idleKeyframeNeeded = true
 
         // Store the latest pixel buffer for idle frame refresh (both modes).
         if let pb = CMSampleBufferGetImageBuffer(sampleBuffer) {

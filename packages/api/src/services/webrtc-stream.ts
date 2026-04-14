@@ -61,6 +61,8 @@ interface WebRTCSession {
   parameterSetsSent: boolean;
   /** Tracks the last NALU timestamp fed to the session for gap detection. */
   lastFedTimestampUs?: bigint;
+  /** Running count of RTP packets written to the video track (diagnostic). */
+  rtpPacketsSent: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -181,6 +183,7 @@ export class WebRTCStreamService {
       sequenceNumber: Math.floor(Math.random() * 65536),
       rtpTimestamp: Math.floor(Math.random() * 0xFFFFFFFF),
       parameterSetsSent: false,
+      rtpPacketsSent: 0,
     };
 
     this.sessions.set(sessionId, session);
@@ -245,6 +248,15 @@ export class WebRTCStreamService {
     // is properly recognised as carrying the decoder-initialisation data.
     session.parameterSetsSent = false;
 
+    // [DIAG] Verify sender codec and DTLS transport state after wiring up capture.
+    const diagSenders = session.pc.getSenders();
+    const diagVideoSender = diagSenders.find((s) => s.track === session.videoTrack);
+    if (diagVideoSender) {
+      log(`[DIAG] Sender state for ${sessionId}: codec=${JSON.stringify((diagVideoSender as any).codec?.mimeType)}, dtlsState=${(diagVideoSender as any).dtlsTransport?.state}, ssrc=${(diagVideoSender as any).ssrc}`);
+    } else {
+      warn(`[DIAG] No video sender found for ${sessionId}!`);
+    }
+
     log(`Capture emitter connected to WebRTC session ${sessionId}`);
   }
 
@@ -275,6 +287,61 @@ export class WebRTCStreamService {
     if (message.type === 'offer') {
       log(`Handling SDP offer for session ${sessionId}`);
       await pc.setRemoteDescription({ type: 'offer', sdp: message.sdp });
+
+      // ── Fix #40: Reorder negotiated codecs to prefer Constrained Baseline ──
+      // werift's findCodecByMimeType matches only by mimeType, ignoring
+      // profile-level-id. This means transceiver.codecs[0] may be the
+      // browser's High Profile H.264 (640c1f) while our Swift encoder
+      // produces Baseline (42e01f). Reorder so the matching profile is first,
+      // then update the sender's codec to match.
+      // This runs BEFORE createAnswer() so that the generated SDP answer lists
+      // the preferred codec (PT for Constrained Baseline) first in the m= line.
+      // Guard: getTransceivers() may be absent on some werift builds / mocks.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const transceivers: any[] =
+        typeof (pc as any).getTransceivers === 'function'
+          ? (pc as any).getTransceivers()
+          : [];
+      const videoTransceiver = transceivers.find(
+        (t: any) => t.kind === 'video' || t.sender?.track?.kind === 'video',
+      );
+      if (videoTransceiver && videoTransceiver.codecs.length > 1) {
+        const TARGET_PROFILE = '42e01f';
+        const matchIdx = videoTransceiver.codecs.findIndex((c: any) => {
+          const params: string = c.parameters ?? '';
+          return (
+            params.includes(`profile-level-id=${TARGET_PROFILE}`) &&
+            params.includes('packetization-mode=1')
+          );
+        });
+        if (matchIdx > 0) {
+          // Move the matching codec to index 0.
+          const [matched] = videoTransceiver.codecs.splice(matchIdx, 1);
+          videoTransceiver.codecs.unshift(matched);
+          // Update sender.codec to use the reordered first codec so that
+          // sendRtp() uses the correct payload type.
+          (videoTransceiver.sender as any).codec = videoTransceiver.codecs[0];
+          const selectedPt: number = (videoTransceiver.codecs[0] as any)?.payloadType ?? -1;
+          log(`[Fix #40] Reordered H.264 codecs: preferred profile-level-id=${TARGET_PROFILE} (PT ${selectedPt})`);
+          log(`[DIAG] Fix #40 selected codec: profile-level-id=${TARGET_PROFILE}, payloadType=${selectedPt}`);
+        } else if (matchIdx === 0) {
+          const selectedPt: number = (videoTransceiver.codecs[0] as any)?.payloadType ?? -1;
+          log(`[Fix #40] H.264 codec already preferred: profile-level-id=${TARGET_PROFILE} (PT ${selectedPt})`);
+          log(`[DIAG] Fix #40 selected codec: profile-level-id=${TARGET_PROFILE}, payloadType=${selectedPt}`);
+        } else {
+          warn(`[Fix #40] No H.264 codec with profile-level-id=${TARGET_PROFILE} found in negotiated codecs — using default`);
+          const fallbackPt: number = (videoTransceiver.codecs[0] as any)?.payloadType ?? -1;
+          const fallbackParams: string = (videoTransceiver.codecs[0] as any)?.parameters ?? 'unknown';
+          log(`[DIAG] Fix #40 fallback codec: parameters=${fallbackParams}, payloadType=${fallbackPt}`);
+        }
+      } else if (videoTransceiver && videoTransceiver.codecs.length === 1) {
+        const onlyPt: number = (videoTransceiver.codecs[0] as any)?.payloadType ?? -1;
+        const onlyParams: string = (videoTransceiver.codecs[0] as any)?.parameters ?? 'unknown';
+        log(`[Fix #40] Only one H.264 codec negotiated — no reordering needed (PT ${onlyPt}, parameters=${onlyParams})`);
+      } else if (!videoTransceiver) {
+        warn(`[Fix #40] No video transceiver found — skipping codec reorder`);
+      }
+
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       return { type: 'answer', sdp: answer.sdp };
@@ -354,6 +421,22 @@ export class WebRTCStreamService {
   private feedNalu(session: WebRTCSession, frame: NaluFrame): void {
     const { videoTrack } = session;
 
+    // [DIAG] On the very first packet, inspect sender codec and DTLS state to
+    // catch the most common silent-drop causes in werift.
+    if (session.rtpPacketsSent === 0) {
+      const senders = session.pc.getSenders();
+      const videoSender = senders.find((s) => s.track === session.videoTrack);
+      const senderCodec = (videoSender as any)?.codec;
+      const dtlsState = (videoSender as any)?.dtlsTransport?.state;
+      log(`[DIAG] First feedNalu for ${session.sessionId}: senderCodec=${JSON.stringify(senderCodec?.mimeType ?? null)}, parameters=${senderCodec?.parameters ?? 'none'}, dtlsState=${dtlsState}, payloadType=${senderCodec?.payloadType ?? 'none'}`);
+      if (!senderCodec) {
+        warn(`[DIAG] CRITICAL: sender.codec is FALSY — all RTP packets will be silently dropped by werift!`);
+      }
+      if (dtlsState !== 'connected') {
+        warn(`[DIAG] CRITICAL: DTLS state is "${dtlsState}" — all RTP packets will be silently dropped by werift!`);
+      }
+    }
+
     // Convert presentation timestamp from µs to 90 kHz RTP clock units.
     const rtpTimestamp = Number(((frame.timestampUs * 90n) / 1000n) & 0xFFFFFFFFn);
 
@@ -372,6 +455,12 @@ export class WebRTCStreamService {
     // Split the Annex B stream into individual NALUs.
     const nalus = splitAnnexB(frame.naluData);
     if (nalus.length === 0) return;
+
+    // [DIAG] Log NALU types on the first packet and every 100th packet thereafter.
+    if (session.rtpPacketsSent === 0 || session.rtpPacketsSent % 100 === 0) {
+      const naluTypes = nalus.map(n => n.length > 0 ? (n[0]! & 0x1F) : -1);
+      log(`[DIAG] feedNalu #${session.rtpPacketsSent} for ${session.sessionId}: naluCount=${nalus.length}, types=[${naluTypes.join(',')}], keyframe=${frame.isKeyframe}, ts=${frame.timestampUs}µs, rtpTs=${rtpTimestamp}`);
+    }
 
     const ssrc = 0; // videoTrack.ssrc is always undefined — the real SSRC is managed by
     // RTCRtpSender which overwrites the header field in sendRtp().
@@ -397,6 +486,7 @@ export class WebRTCStreamService {
         const packet = new RtpPacket(header, Buffer.from(nalu));
         videoTrack.writeRtp(packet);
         session.sequenceNumber = (session.sequenceNumber + 1) & 0xFFFF;
+        session.rtpPacketsSent++;
       } else {
         // ----------------------------------------------------------------
         // FU-A fragmentation (RFC 6184 §5.8)
@@ -436,6 +526,7 @@ export class WebRTCStreamService {
           const packet = new RtpPacket(header, fragment);
           videoTrack.writeRtp(packet);
           session.sequenceNumber = (session.sequenceNumber + 1) & 0xFFFF;
+          session.rtpPacketsSent++;
 
           offset = end;
         }
@@ -445,6 +536,11 @@ export class WebRTCStreamService {
     // Mark parameter sets as sent once a keyframe has been processed.
     if (frame.isKeyframe && !session.parameterSetsSent) {
       session.parameterSetsSent = true;
+    }
+
+    // [DIAG] Log a summary after the first few keyframes to confirm RTP output.
+    if (frame.isKeyframe && session.rtpPacketsSent < 50) {
+      log(`[DIAG] Keyframe sent for ${session.sessionId}: totalRtpPackets=${session.rtpPacketsSent}`);
     }
   }
 }

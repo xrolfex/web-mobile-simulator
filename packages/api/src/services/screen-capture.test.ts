@@ -166,7 +166,7 @@ describe('ScreenCaptureService', () => {
     // Default: binary already compiled (access resolves) — skips compilation.
     mockAccess.mockResolvedValue(undefined);
     // Default: version sidecar file returns the current version — skips recompilation.
-    mockReadFile.mockResolvedValue('13');
+    mockReadFile.mockResolvedValue('14');
     mockWriteFile.mockResolvedValue(undefined);
 
     // Default: spawn returns a fresh mock child process.
@@ -475,7 +475,7 @@ describe('ScreenCaptureService', () => {
       // Version file written after successful compilation.
       expect(mockWriteFile).toHaveBeenCalledWith(
         expect.stringContaining('wms-ios-capture-stream.ver'),
-        '13',
+        '14',
         'utf8',
       );
     });
@@ -508,7 +508,7 @@ describe('ScreenCaptureService', () => {
       // Version file written with new version.
       expect(mockWriteFile).toHaveBeenCalledWith(
         expect.stringContaining('wms-ios-capture-stream.ver'),
-        '13',
+        '14',
         'utf8',
       );
     });
@@ -528,7 +528,7 @@ describe('ScreenCaptureService', () => {
       // Assert — version sidecar written after compilation.
       expect(mockWriteFile).toHaveBeenCalledWith(
         expect.stringContaining('wms-ios-capture-stream.ver'),
-        '13',
+        '14',
         'utf8',
       );
     });

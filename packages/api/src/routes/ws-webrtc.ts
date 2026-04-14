@@ -97,6 +97,14 @@ const wsWebRTCRoutes: FastifyPluginAsync = async (fastify) => {
             const msg = JSON.parse(data.toString()) as SignalingMessage;
             const response = await webRTCStreamService.handleSignaling(sessionId, msg);
 
+            // [DIAG] Log full SDP offer and answer to verify H.264 codec agreement.
+            if (msg.type === 'offer') {
+              log(`[DIAG] SDP Offer for ${sessionId}:\n${msg.sdp}`);
+              if (response && response.type === 'answer') {
+                log(`[DIAG] SDP Answer for ${sessionId}:\n${(response as { type: 'answer'; sdp: string }).sdp}`);
+              }
+            }
+
             if (response && socket.readyState === socket.OPEN) {
               socket.send(JSON.stringify(response));
             }

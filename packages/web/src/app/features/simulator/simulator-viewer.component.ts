@@ -281,6 +281,12 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
       const ws = this.getInputWebSocket();
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
+      // Don't send swipes until video dimensions are known.
+      if (this.frameWidth() === 0 || this.frameHeight() === 0) {
+        console.warn('[SimulatorViewer] Swipe dropped: video dimensions not yet known');
+        return;
+      }
+
       const el = event.currentTarget as HTMLElement;
       const rect = el.getBoundingClientRect();
 
@@ -406,6 +412,12 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
     const y = displayY / rect.height;
 
     if (x >= 0 && x <= 1 && y >= 0 && y <= 1) {
+      // Don't send taps until video dimensions are known — otherwise
+      // deviceX/Y resolve to 0, sending every tap to the top-left corner.
+      if (this.frameWidth() === 0 || this.frameHeight() === 0) {
+        console.warn('[SimulatorViewer] Tap dropped: video dimensions not yet known');
+        return;
+      }
       ws.send(
         JSON.stringify({
           type: 'touch',
@@ -499,6 +511,18 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
     video.play().catch((err: unknown) => {
       console.warn('[SimulatorViewer] video.play() failed:', err);
     });
+
+    // Fallback: capture dimensions from loadedmetadata in case
+    // requestVideoFrameCallback doesn't fire (e.g. frozen stream).
+    video.addEventListener('loadedmetadata', () => {
+      if (video.videoWidth > 0 && this.frameWidth() === 0) {
+        this.ngZone.run(() => {
+          this.frameWidth.set(video.videoWidth);
+          this.frameHeight.set(video.videoHeight);
+          this.applyScaleMode();
+        });
+      }
+    }, { once: true });
 
     // Use requestVideoFrameCallback for FPS counting when available.
     // This API is not yet in the TypeScript lib types, so we check at runtime

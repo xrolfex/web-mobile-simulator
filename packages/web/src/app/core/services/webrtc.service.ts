@@ -162,7 +162,22 @@ export class WebRtcService {
                 })();
 
           console.log('[WebRtcService] Remote track received');
-          this.remoteStream.set(stream);
+          // [DIAG] Detailed track diagnostics
+          console.log(`[WebRtcService] [DIAG] Track details: kind=${event.track.kind}, readyState=${event.track.readyState}, muted=${event.track.muted}, id=${event.track.id}`);
+          console.log(`[WebRtcService] [DIAG] Stream tracks: ${stream!.getTracks().map(t => `${t.kind}:${t.readyState}:muted=${t.muted}`).join(', ')}`);
+
+          this.remoteStream.set(stream!);
+
+          // [DIAG] Monitor track lifecycle state changes
+          event.track.addEventListener('unmute', () => {
+            console.log(`[WebRtcService] [DIAG] Track unmuted — RTP packets are arriving`);
+          });
+          event.track.addEventListener('mute', () => {
+            console.log(`[WebRtcService] [DIAG] Track muted — RTP packets stopped`);
+          });
+          event.track.addEventListener('ended', () => {
+            console.log(`[WebRtcService] [DIAG] Track ended`);
+          });
         });
 
         // ── ICE candidate — forward to server ────────────────────────────
@@ -191,6 +206,8 @@ export class WebRtcService {
             case 'connected':
               this.connectionState.set('connected');
               settle(); // resolve the connect() promise
+              // [DIAG] Start periodic stats polling to check for incoming RTP packets.
+              this.startStatsPolling(pc);
               break;
             case 'disconnected':
               this.connectionState.set('disconnected');
@@ -384,6 +401,41 @@ export class WebRtcService {
         console.warn('[WebRtcService] Unexpected offer message received from server');
         break;
     }
+  }
+
+  /**
+   * [DIAG] Poll `RTCPeerConnection` stats every 2 seconds (up to 10 times /
+   * 20 seconds) to check whether the browser is actually receiving RTP packets
+   * from the server.  Results are printed to the browser console.
+   *
+   * @param pc - The active `RTCPeerConnection` to query.
+   */
+  private startStatsPolling(pc: RTCPeerConnection): void {
+    let pollCount = 0;
+    const interval = setInterval(() => {
+      if (pc.connectionState !== 'connected' || pollCount >= 10) {
+        clearInterval(interval);
+        return;
+      }
+      pollCount++;
+      pc.getStats().then((stats) => {
+        stats.forEach((report) => {
+          if (report.type === 'inbound-rtp' && report.kind === 'video') {
+            console.log(
+              `[WebRtcService] [DIAG] inbound-rtp stats (poll #${pollCount}):`,
+              `packetsReceived=${(report as RTCInboundRtpStreamStats).packetsReceived},`,
+              `bytesReceived=${(report as RTCInboundRtpStreamStats).bytesReceived},`,
+              `framesDecoded=${(report as any).framesDecoded ?? 'N/A'},`,
+              `framesReceived=${(report as any).framesReceived ?? 'N/A'},`,
+              `decoderImplementation=${(report as any).decoderImplementation ?? 'N/A'},`,
+              `lastPacketReceivedTimestamp=${(report as RTCInboundRtpStreamStats).lastPacketReceivedTimestamp ?? 'N/A'}`,
+            );
+          }
+        });
+      }).catch(() => {
+        // Stats retrieval failed — non-fatal, ignore silently.
+      });
+    }, 2000);
   }
 
   /**
