@@ -3,8 +3,8 @@
 .dialog-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.65);
-  backdrop-filter: blur(4px);
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(8px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -17,20 +17,20 @@
 .dialog {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: 16px;
+  border-radius: var(--radius-lg);
   width: 100%;
   max-width: 460px;
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+  box-shadow: var(--shadow-lg), 0 0 0 1px var(--color-border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  animation: dialog-in 0.18s ease-out both;
+  animation: dialog-in 0.25s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 @keyframes dialog-in {
   from {
     opacity: 0;
-    transform: translateY(12px) scale(0.97);
+    transform: translateY(16px) scale(0.96);
   }
   to {
     opacity: 1;
@@ -46,6 +46,7 @@
   gap: 0.75rem;
   padding: 1.25rem 1.5rem;
   border-bottom: 1px solid var(--color-border);
+  background: rgba(255, 255, 255, 0.02);
 }
 
 .dialog__platform-icon {
@@ -69,9 +70,9 @@
   font-size: 1rem;
   cursor: pointer;
   padding: 0.25rem;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   line-height: 1;
-  transition: color 0.15s ease, background 0.15s ease;
+  transition: color var(--transition-fast), background var(--transition-fast);
 
   &:hover {
     color: var(--color-text-primary);
@@ -136,8 +137,9 @@
   color: #f87171;
   background: rgba(239, 68, 68, 0.1);
   border: 1px solid rgba(239, 68, 68, 0.25);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 0.6rem 0.9rem;
+  box-shadow: var(--shadow-sm);
 }
 
 // ── Form fields ───────────────────────────────────────────────────────────────
@@ -157,15 +159,15 @@
 
   &__select {
     width: 100%;
-    padding: 0.6rem 0.85rem;
+    padding: 0.7rem 0.9rem;
     background: var(--color-bg);
     border: 1px solid var(--color-border);
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
     color: var(--color-text-primary);
     font-size: 0.9rem;
     font-family: var(--font-sans);
     cursor: pointer;
-    transition: border-color 0.15s ease;
+    transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
     appearance: none;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%238888aa' d='M1 1l5 5 5-5'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
@@ -173,9 +175,9 @@
     padding-right: 2.25rem;
 
     &:focus {
-      outline: 2px solid var(--color-accent);
-      outline-offset: 1px;
+      outline: none;
       border-color: var(--color-accent);
+      box-shadow: 0 0 0 3px var(--color-accent-subtle);
     }
 
     option {
@@ -207,7 +209,7 @@
   gap: 0.75rem;
   padding: 1rem 1.5rem;
   border-top: 1px solid var(--color-border);
-  background: var(--color-bg);
+  background: rgba(0, 0, 0, 0.15);
 }
 
 // ── Buttons ───────────────────────────────────────────────────────────────────
@@ -217,13 +219,12 @@
   align-items: center;
   gap: 0.4rem;
   padding: 0.6rem 1.25rem;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   font-size: 0.9rem;
   font-weight: 600;
   font-family: var(--font-sans);
   cursor: pointer;
   border: none;
-  transition: background 0.15s ease, opacity 0.15s ease;
 
   &:disabled {
     opacity: 0.45;
@@ -234,6 +235,7 @@
     background: var(--color-surface-raised);
     color: var(--color-text-muted);
     border: 1px solid var(--color-border);
+    transition: all var(--transition-fast);
 
     &:hover:not(:disabled) {
       color: var(--color-text-primary);
@@ -243,9 +245,15 @@
   &--launch {
     background: var(--color-accent);
     color: #fff;
+    transition: all var(--transition-fast);
 
     &:hover:not(:disabled) {
       background: var(--color-accent-hover);
+      box-shadow: 0 4px 16px rgba(99, 102, 241, 0.3);
+    }
+
+    &:active:not(:disabled) {
+      transform: scale(0.98);
     }
   }
 }
@@ -258,7 +266,7 @@
   height: 13px;
   border: 2px solid rgba(255, 255, 255, 0.3);
   border-top-color: #fff;
-  border-radius: 50%;
+  border-radius: var(--radius-full);
   animation: spin 0.6s linear infinite;
 }
 
@@ -273,6 +281,6 @@
   height: 36px;
   border: 3px solid var(--color-surface-raised);
   border-top-color: var(--color-accent);
-  border-radius: 50%;
+  border-radius: var(--radius-full);
   animation: spin 0.75s linear infinite;
 }

@@ -178,15 +178,34 @@ typealias IndigoHIDMessageForKeyboardArbitraryFn = @convention(c) (
 ///       uint32_t target       // x2 — IndigoHIDTarget (0x33 for iPhone)
 ///   )
 ///
-/// Button codes (from SimulatorKit/Simulator.app disassembly):
-///   1    = Home button
-///   2000 = Volume Down
-///   2001 = Volume Up
-///   2002 = Lock/Side button
+/// Button codes (from Simulator.app disassembly):
+///   0    = Home button (Face ID devices — wzr)
+///   401  = Home button (Touch ID devices — 0x191)
+///   1    = Lock/Power/Side button
 typealias IndigoHIDMessageForButtonFn = @convention(c) (
     UInt32,   // x0 — buttonCode
     UInt32,   // x1 — keyState (1=down, 2=up)
     UInt32    // x2 — target (0x33 for iPhone/iPad)
+) -> UnsafeMutableRawPointer?
+
+/// IndigoHIDMessageForHIDArbitrary — arbitrary USB HID page events.
+///
+/// C signature (from embedded debug string in SimulatorKit):
+///   IndigoHIDMessage *IndigoHIDMessageForHIDArbitrary(
+///       IndigoHIDTarget target,    // x0 — HID target (0x33 for iPhone)
+///       uint32_t        usagePage, // x1 — HID Usage Page (e.g. 0x0c = Consumer Control)
+///       uint32_t        usageCode, // x2 — HID Usage Code (e.g. 0xe9 = Volume Up)
+///       IndigoHIDButtonOp buttonOp // x3 — 1=down, 2=up
+///   )
+///
+/// Used for volume buttons (usagePage=0x0c Consumer Control):
+///   Volume Up:   usageCode=0xe9
+///   Volume Down: usageCode=0xea
+typealias IndigoHIDMessageForHIDArbitraryFn = @convention(c) (
+    UInt32,   // x0 — target (0x33 for iPhone/iPad)
+    UInt32,   // x1 — usagePage
+    UInt32,   // x2 — usageCode
+    UInt32    // x3 — buttonOp (1=down, 2=up)
 ) -> UnsafeMutableRawPointer?
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1041,34 +1060,22 @@ func injectSwipe(
 
 /// Inject a hardware button press (down + up).
 ///
-/// - Parameters:
-///   - hidClient:  The SimDeviceLegacyHIDClient instance.
-///   - buttonName: Button name: "home", "lock", "volumeUp", "volumeDown".
+/// Button routing (from Simulator.app / SimulatorKit disassembly):
+///   - home, lock → IndigoHIDMessageForButton(code, keyState, target)
+///   - volumeUp, volumeDown → IndigoHIDMessageForHIDArbitrary(target, 0x0c, usage, keyState)
+///
+/// Button codes:
+///   home (Face ID)  = 0     (hasHomeButton==false → wzr)
+///   home (Touch ID) = 401   (0x191, hasHomeButton==true)
+///   lock/power      = 1     (lockButtonPressed: hardcoded)
+///   volumeUp        = HID Consumer Control page 0x0c, usage 0xe9
+///   volumeDown      = HID Consumer Control page 0x0c, usage 0xea
 func injectButton(hidClient: AnyObject, buttonName: String) {
-    let buttonCodes: [String: UInt32] = [
-        "home":       1,
-        "lock":       2002,
-        "volumeUp":   2001,
-        "volumeDown": 2000,
-    ]
-
-    guard let buttonCode = buttonCodes[buttonName] else {
-        fputs("❌ Unknown button: \"\(buttonName)\". Valid: home, lock, volumeUp, volumeDown\n", stderr)
-        exit(1)
-    }
-
-    // Resolve function
     guard let simKitHandle = dlopen(kSimulatorKitPath, RTLD_NOLOAD) else {
         fputs("❌ SimulatorKit not loaded\n", stderr)
         return
     }
     defer { dlclose(simKitHandle) }
-
-    guard let rawPtr = dlsym(simKitHandle, "IndigoHIDMessageForButton") else {
-        fputs("❌ dlsym(IndigoHIDMessageForButton) failed\n", stderr)
-        return
-    }
-    let buttonFn = unsafeBitCast(rawPtr, to: IndigoHIDMessageForButtonFn.self)
 
     // Resolve send method
     let clientClass: AnyClass = type(of: hidClient)
@@ -1079,27 +1086,77 @@ func injectButton(hidClient: AnyObject, buttonName: String) {
         fputs("❌ HIDClient does not respond to send selector\n", stderr)
         return
     }
-
     typealias SendFn = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, Bool, AnyObject?, AnyObject?) -> Void
     let sendFn = unsafeBitCast(method_getImplementation(sendMethod), to: SendFn.self)
 
+    // ── Volume buttons use IndigoHIDMessageForHIDArbitrary ──
+    if buttonName == "volumeUp" || buttonName == "volumeDown" {
+        guard let rawPtr = dlsym(simKitHandle, "IndigoHIDMessageForHIDArbitrary") else {
+            fputs("❌ dlsym(IndigoHIDMessageForHIDArbitrary) failed\n", stderr)
+            return
+        }
+        let arbitraryFn = unsafeBitCast(rawPtr, to: IndigoHIDMessageForHIDArbitraryFn.self)
+
+        let kConsumerControlPage: UInt32 = 0x0c
+        let usageCode: UInt32 = (buttonName == "volumeUp") ? 0xe9 : 0xea
+
+        // Button down
+        guard let msgDown = arbitraryFn(kIndigoHIDTargetButton, kConsumerControlPage, usageCode, 1) else {
+            fputs("❌ IndigoHIDMessageForHIDArbitrary returned nil (down)\n", stderr)
+            return
+        }
+        sendFn(hidClient, sendSel, msgDown, false, nil, nil)
+        Thread.sleep(forTimeInterval: 0.05)
+
+        // Button up
+        guard let msgUp = arbitraryFn(kIndigoHIDTargetButton, kConsumerControlPage, usageCode, 2) else {
+            fputs("❌ IndigoHIDMessageForHIDArbitrary returned nil (up)\n", stderr)
+            return
+        }
+        sendFn(hidClient, sendSel, msgUp, false, nil, nil)
+
+        print("✅ Volume button: \"\(buttonName)\" (page=0x0c, usage=0x\(String(usageCode, radix: 16)))")
+        return
+    }
+
+    // ── All other buttons use IndigoHIDMessageForButton ──
+    // Button code mapping (from Simulator.app disassembly):
+    //   home: Face ID = 0, Touch ID = 401 (0x191)
+    //   lock: 1
+    // For now we default to Face ID (code=0) since iPhone 17 Pro is our test device.
+    // TODO: Query device.hasHomeButton via ObjC runtime to auto-detect.
+    let buttonCodes: [String: UInt32] = [
+        "home": 0,      // Face ID home (goes to home screen)
+        "lock": 1,      // Lock/Power/Side button
+    ]
+
+    guard let buttonCode = buttonCodes[buttonName] else {
+        fputs("❌ Unknown button: \"\(buttonName)\". Valid: home, lock, volumeUp, volumeDown\n", stderr)
+        exit(1)
+    }
+
+    guard let rawPtr = dlsym(simKitHandle, "IndigoHIDMessageForButton") else {
+        fputs("❌ dlsym(IndigoHIDMessageForButton) failed\n", stderr)
+        return
+    }
+    let buttonFn = unsafeBitCast(rawPtr, to: IndigoHIDMessageForButtonFn.self)
+
     // Button down
     guard let msgDown = buttonFn(buttonCode, 1, kIndigoHIDTargetButton) else {
-        fputs("❌ IndigoHIDMessageForButton returned nil for button down\n", stderr)
+        fputs("❌ IndigoHIDMessageForButton returned nil (down)\n", stderr)
         return
     }
     sendFn(hidClient, sendSel, msgDown, false, nil, nil)
-
     Thread.sleep(forTimeInterval: 0.05)
 
     // Button up
     guard let msgUp = buttonFn(buttonCode, 2, kIndigoHIDTargetButton) else {
-        fputs("❌ IndigoHIDMessageForButton returned nil for button up\n", stderr)
+        fputs("❌ IndigoHIDMessageForButton returned nil (up)\n", stderr)
         return
     }
     sendFn(hidClient, sendSel, msgUp, false, nil, nil)
 
-    print("✅ Button pressed: \"\(buttonName)\" (code \(buttonCode), target 0x\(String(kIndigoHIDTargetButton, radix: 16)))")
+    print("✅ Button pressed: \"\(buttonName)\" (code=\(buttonCode), target=0x\(String(kIndigoHIDTargetButton, radix: 16)))")
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
