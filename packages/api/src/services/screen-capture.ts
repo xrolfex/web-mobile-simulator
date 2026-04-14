@@ -114,7 +114,7 @@ const CAPTURE_SWIFT_TMP_PATH = join(tmpdir(), 'wms-ios-capture-stream.swift');
 const MAX_IOS_CAPTURE_RESTARTS = 5;
 
 /** Version tag for the compiled iOS capture binary. Increment to force recompilation. */
-const CAPTURE_BINARY_VERSION = '8';
+const CAPTURE_BINARY_VERSION = '10';
 
 /** Sidecar file that stores the version of the currently-cached binary. */
 const CAPTURE_BINARY_VERSION_PATH = join(tmpdir(), 'wms-ios-capture-stream.ver');
@@ -405,6 +405,8 @@ class FrameHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     private let capturedDeviceName: String
     private let format: String
     private var h264Encoder: H264Encoder?
+    private var receivedFirstFrame: Bool = false
+    private var startupWatchdogTimer: DispatchSourceTimer?
 
     init(deviceName: String, format: String, width: Int, height: Int, fps: Int) {
         self.capturedDeviceName = deviceName
@@ -412,9 +414,31 @@ class FrameHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         if format == "h264" {
             self.h264Encoder = H264Encoder(width: width, height: height, fps: fps, deviceName: deviceName)
         }
+        super.init()
+        // Startup-only watchdog: fires once after 10 seconds.
+        // If no frame has arrived by then, SCStream failed to deliver any output — exit for restart.
+        // Once the first frame arrives the timer is cancelled permanently; content silence is normal.
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        timer.schedule(deadline: .now() + 10, repeating: .never)
+        timer.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            if !self.receivedFirstFrame {
+                fputs("[\\(self.capturedDeviceName)] Startup watchdog: no frames received within 10 seconds — exiting for restart\\n", stderr)
+                exit(1)
+            }
+        }
+        timer.resume()
+        self.startupWatchdogTimer = timer
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        // Cancel the startup watchdog on the very first frame and never check again.
+        if !self.receivedFirstFrame {
+            self.receivedFirstFrame = true
+            self.startupWatchdogTimer?.cancel()
+            self.startupWatchdogTimer = nil
+            fputs("[\\(self.capturedDeviceName)] First frame received — startup watchdog cancelled\\n", stderr)
+        }
         guard type == .screen else { return }
 
         if format == "h264" {
