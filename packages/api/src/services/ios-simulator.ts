@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -102,7 +102,7 @@ const INDIGO_BINARY_PATH = join(WMS_INPUT_TMP_DIR, 'wms-indigo-hid');
 const INDIGO_SWIFT_TMP_PATH = join(WMS_INPUT_TMP_DIR, 'wms-indigo-hid.swift');
 
 /** Version tag — increment to force recompilation of IndigoHID binary. */
-const INDIGO_BINARY_VERSION = '4';
+const INDIGO_BINARY_VERSION = '6';
 
 /** Sidecar file storing the version of the cached IndigoHID binary. */
 const INDIGO_BINARY_VERSION_PATH = join(WMS_INPUT_TMP_DIR, 'wms-indigo-hid.ver');
@@ -1204,7 +1204,7 @@ private func sendTouchEventViaObjC(
         AnyObject?              // completion
     ) -> Void
     let sendFn = unsafeBitCast(method_getImplementation(sendMethod), to: SendFn.self)
-    sendFn(hidClient, sendSel, msg, false, nil, nil)
+    sendFn(hidClient, sendSel, msg, false, DispatchQueue.global(qos: .utility) as AnyObject, nil)
 }
 
 /// Fallback: find and call the Swift dispatch thunk for
@@ -1779,7 +1779,7 @@ let args = CommandLine.arguments
 guard args.count >= 2 else { printUsage() }
 
 // ── Install signal handlers for clean exit ────────────────────────────────────
-signal(SIGTERM) { _ in exit(0) }
+signal(SIGTERM) { _ in exit(143) }
 signal(SIGINT)  { _ in exit(0) }
 
 // ── Load frameworks first (required before any ObjC introspection) ────────────
@@ -1910,30 +1910,6 @@ if command == "--discover" {
 `;
 
 // ---------------------------------------------------------------------------
-// IndigoDaemon — persistent process handle
-// ---------------------------------------------------------------------------
-
-/** Handle to a persistent IndigoHID daemon process for one device. */
-interface IndigoDaemon {
-  /** The child process. */
-  process: ChildProcess;
-  /** Promise that resolves when the daemon emits {"ready":true}. */
-  readyPromise: Promise<void>;
-  /** Whether the daemon has signaled ready. */
-  ready: boolean;
-  /** Pending request callbacks keyed by request ID. */
-  pendingRequests: Map<string, {
-    resolve: () => void;
-    reject: (err: Error) => void;
-    timer: ReturnType<typeof setTimeout>;
-  }>;
-  /** Incrementing request ID counter. */
-  requestCounter: number;
-  /** Buffer for partial lines from stdout. */
-  stdoutBuffer: string;
-}
-
-// ---------------------------------------------------------------------------
 // Service class
 // ---------------------------------------------------------------------------
 
@@ -1963,16 +1939,6 @@ export class IOSSimulatorService {
 
   /** In-flight promise for IndigoHID binary compilation (prevents parallel compilations). */
   private ensureIndigoHIDBinaryPromise: Promise<string> | null = null;
-
-  /** Persistent IndigoHID daemon processes keyed by device UDID. */
-  private readonly indigoDaemons = new Map<string, IndigoDaemon>();
-
-  /**
-   * In-flight start promises keyed by device UDID.
-   * Prevents double-spawning when multiple callers call `ensureIndigoDaemon`
-   * concurrently before the daemon has been stored in `indigoDaemons`.
-   */
-  private readonly indigoDaemonStarting = new Map<string, Promise<IndigoDaemon>>();
 
   // -------------------------------------------------------------------------
   // Input binary management
@@ -2073,287 +2039,6 @@ export class IOSSimulatorService {
       });
     }
     return this.ensureIndigoHIDBinaryPromise;
-  }
-
-  // -------------------------------------------------------------------------
-  // IndigoDaemon management
-  // -------------------------------------------------------------------------
-
-  /**
-   * Ensure a persistent IndigoHID daemon is running for the given device UDID.
-   * Uses `indigoDaemonStarting` to deduplicate concurrent startup attempts —
-   * only one `startIndigoDaemon` call will be in-flight per UDID at a time.
-   *
-   * @param udid - The device UDID to start/reuse a daemon for.
-   * @returns The running, ready `IndigoDaemon` handle.
-   */
-  private async ensureIndigoDaemon(udid: string): Promise<IndigoDaemon> {
-    // Fast path: daemon already running and ready.
-    const existing = this.indigoDaemons.get(udid);
-    if (existing) {
-      if (existing.ready) return existing;
-      await existing.readyPromise;
-      return existing;
-    }
-
-    // Deduplicate concurrent startup attempts.
-    const inFlight = this.indigoDaemonStarting.get(udid);
-    if (inFlight) return inFlight;
-
-    const startPromise = this.startIndigoDaemon(udid).finally(() => {
-      this.indigoDaemonStarting.delete(udid);
-    });
-    this.indigoDaemonStarting.set(udid, startPromise);
-    return startPromise;
-  }
-
-  /**
-   * Compile the IndigoHID binary (if needed), spawn a new daemon process for
-   * the given UDID, wire up all event handlers, and wait for the ready signal.
-   *
-   * This method should only be called from `ensureIndigoDaemon` — never
-   * directly — so that concurrent callers share the same in-flight promise.
-   *
-   * @param udid - The device UDID to spawn a daemon for.
-   * @returns The running, ready `IndigoDaemon` handle.
-   */
-  private async startIndigoDaemon(udid: string): Promise<IndigoDaemon> {
-    // Compile the binary first (idempotent — caches after first compile).
-    const binaryPath = await this.ensureIndigoHIDBinary();
-
-    log(`Spawning IndigoHID daemon for device ${udid}`);
-
-    const child = spawn(binaryPath, [udid], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        DEVELOPER_DIR: `${config.xcodePath}/Contents/Developer`,
-      },
-    });
-
-    // Suppress stdin pipe errors — write errors are handled via the write callback.
-    child.stdin?.on('error', (err) => {
-      warn(`IndigoHID daemon (${udid}) stdin error: ${err.message}`);
-    });
-
-    // Create the daemon record upfront so concurrent callers share the same
-    // readyPromise and don't spawn duplicate processes.
-    let resolveReady!: () => void;
-    let rejectReady!: (err: Error) => void;
-
-    const readyPromise = new Promise<void>((res, rej) => {
-      resolveReady = res;
-      rejectReady = rej;
-    });
-
-    // Guard so 'error' and 'exit' events can both fire without double-settling.
-    let readySettled = false;
-    const safeResolveReady = (): void => {
-      if (readySettled) return;
-      readySettled = true;
-      resolveReady();
-    };
-    const safeRejectReady = (err: Error): void => {
-      if (readySettled) return;
-      readySettled = true;
-      rejectReady(err);
-    };
-
-    const daemon: IndigoDaemon = {
-      process: child,
-      readyPromise,
-      ready: false,
-      pendingRequests: new Map(),
-      requestCounter: 0,
-      stdoutBuffer: '',
-    };
-
-    // Store immediately so concurrent `ensureIndigoDaemon` callers wait on
-    // the same readyPromise rather than spawning a second process.
-    this.indigoDaemons.set(udid, daemon);
-
-    /** Maximum number of bytes to keep in `stdoutBuffer` before truncating. */
-    const MAX_STDOUT_BUFFER = 64 * 1024; // 64 KB
-
-    // -------------------------------------------------------------------------
-    // stdout — newline-delimited JSON protocol
-    // -------------------------------------------------------------------------
-    child.stdout?.on('data', (chunk: Buffer) => {
-      daemon.stdoutBuffer += chunk.toString();
-
-      // Cap buffer to prevent unbounded growth on crash dumps or runaway output.
-      if (daemon.stdoutBuffer.length > MAX_STDOUT_BUFFER) {
-        warn(`IndigoHID daemon (${udid}): stdout buffer overflow — truncating`);
-        daemon.stdoutBuffer = daemon.stdoutBuffer.slice(-MAX_STDOUT_BUFFER / 2);
-      }
-
-      // Process all complete lines in the buffer.
-      let newlineIdx: number;
-      while ((newlineIdx = daemon.stdoutBuffer.indexOf('\n')) !== -1) {
-        const line = daemon.stdoutBuffer.slice(0, newlineIdx).trim();
-        daemon.stdoutBuffer = daemon.stdoutBuffer.slice(newlineIdx + 1);
-
-        if (!line) continue;
-
-        let parsed: Record<string, unknown>;
-        try {
-          parsed = JSON.parse(line) as Record<string, unknown>;
-        } catch {
-          warn(`IndigoHID daemon (${udid}): invalid JSON on stdout: ${line}`);
-          continue;
-        }
-
-        if (!daemon.ready) {
-          // Expect the first message to be the ready signal.
-          if (parsed['ready'] === true) {
-            daemon.ready = true;
-            log(`IndigoHID daemon ready for device ${udid}`);
-            safeResolveReady();
-          } else {
-            const errMsg = typeof parsed['error'] === 'string'
-              ? parsed['error']
-              : 'IndigoHID daemon failed to start';
-            warn(`IndigoHID daemon (${udid}): start-up failed: ${errMsg}`);
-            this.indigoDaemons.delete(udid);
-            safeRejectReady(new Error(errMsg));
-          }
-        } else {
-          // Subsequent messages are command responses — resolve/reject pending.
-          const id = typeof parsed['id'] === 'string' ? parsed['id'] : null;
-          if (id === null) {
-            warn(`IndigoHID daemon (${udid}): response missing id: ${line}`);
-            continue;
-          }
-          const pending = daemon.pendingRequests.get(id);
-          if (!pending) {
-            warn(`IndigoHID daemon (${udid}): no pending request for id=${id}`);
-            continue;
-          }
-          daemon.pendingRequests.delete(id);
-          clearTimeout(pending.timer);
-
-          if (parsed['ok'] === true) {
-            pending.resolve();
-          } else {
-            const errMsg = typeof parsed['error'] === 'string'
-              ? parsed['error']
-              : 'IndigoHID command failed';
-            pending.reject(new Error(errMsg));
-          }
-        }
-      }
-    });
-
-    // -------------------------------------------------------------------------
-    // stderr — forward diagnostics as warnings
-    // -------------------------------------------------------------------------
-    child.stderr?.on('data', (chunk: Buffer) => {
-      const text = chunk.toString().trim();
-      if (text) warn(`IndigoHID daemon (${udid}) stderr: ${text}`);
-    });
-
-    // -------------------------------------------------------------------------
-    // process error — e.g. binary not found / permission denied
-    // -------------------------------------------------------------------------
-    child.on('error', (err: Error) => {
-      warn(`IndigoHID daemon (${udid}) process error: ${err.message}`);
-      this.indigoDaemons.delete(udid);
-      safeRejectReady(new Error(`IndigoHID daemon process error: ${err.message}`));
-      // Reject all in-flight requests.
-      for (const [, pending] of daemon.pendingRequests) {
-        clearTimeout(pending.timer);
-        pending.reject(new Error(`IndigoHID daemon process error: ${err.message}`));
-      }
-      daemon.pendingRequests.clear();
-    });
-
-    // -------------------------------------------------------------------------
-    // process exit — clean up and reject in-flight requests
-    // -------------------------------------------------------------------------
-    child.on('exit', (code: number | null, signal: string | null) => {
-      const reason = signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`;
-      warn(`IndigoHID daemon (${udid}) exited unexpectedly (${reason})`);
-      this.indigoDaemons.delete(udid);
-      safeRejectReady(new Error(`IndigoHID daemon exited before ready (${reason})`));
-      // Reject all in-flight requests so callers don't hang.
-      for (const [, pending] of daemon.pendingRequests) {
-        clearTimeout(pending.timer);
-        pending.reject(new Error(`IndigoHID daemon exited (${reason})`));
-      }
-      daemon.pendingRequests.clear();
-    });
-
-    // Wait for the daemon to signal readiness before returning.
-    await readyPromise;
-    return daemon;
-  }
-
-  /**
-   * Send a JSON command to the IndigoHID daemon for the given device and wait
-   * for a success response. Spawns the daemon if it is not yet running.
-   *
-   * @param udid      - The device UDID.
-   * @param command   - Command payload (without the `id` field — added internally).
-   * @param timeoutMs - How long to wait for a response before rejecting (default 5 000 ms).
-   */
-  private async sendIndigoCommand(
-    udid: string,
-    command: Record<string, unknown>,
-    timeoutMs = 5_000,
-  ): Promise<void> {
-    const daemon = await this.ensureIndigoDaemon(udid);
-
-    // Guard: verify the daemon is still registered — it may have exited between
-    // ensureIndigoDaemon returning and this point (M4).
-    if (!this.indigoDaemons.has(udid)) {
-      throw new Error(`IndigoHID daemon for ${udid} exited during startup`);
-    }
-
-    const id = String(++daemon.requestCounter);
-
-    return new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        daemon.pendingRequests.delete(id);
-        // Kill the stuck daemon so the next command auto-restarts a fresh one.
-        this.indigoDaemons.delete(udid);
-        try { daemon.process.kill('SIGTERM'); } catch { /* already dead */ }
-        reject(new Error(`IndigoHID command timed out (id=${id}, cmd=${String(command['cmd'])})`));
-      }, timeoutMs);
-
-      daemon.pendingRequests.set(id, { resolve, reject, timer });
-
-      // Guard: if the process is already dead, reject immediately (H3).
-      if (daemon.process.killed || daemon.process.exitCode !== null) {
-        clearTimeout(timer);
-        daemon.pendingRequests.delete(id);
-        reject(new Error(`IndigoHID daemon for ${udid} is no longer running`));
-        return;
-      }
-
-      // Guard: stdin must be writable (L2).
-      if (!daemon.process.stdin) {
-        clearTimeout(timer);
-        daemon.pendingRequests.delete(id);
-        reject(new Error(`IndigoHID daemon for ${udid}: stdin is null`));
-        return;
-      }
-
-      const payload = JSON.stringify({ id, ...command }) + '\n';
-
-      try {
-        daemon.process.stdin.write(payload, (err) => {
-          if (err) {
-            clearTimeout(timer);
-            daemon.pendingRequests.delete(id);
-            reject(new Error(`IndigoHID stdin write failed: ${err.message}`));
-          }
-        });
-      } catch (err: unknown) {
-        clearTimeout(timer);
-        daemon.pendingRequests.delete(id);
-        reject(new Error(`IndigoHID stdin write threw: ${String(err)}`));
-      }
-    });
   }
 
   // -------------------------------------------------------------------------
@@ -2716,7 +2401,11 @@ export class IOSSimulatorService {
   ): Promise<void> {
     log(`Pressing button "${button}" on device ${udid}`);
 
-    await this.sendIndigoCommand(udid, { cmd: 'button', name: button });
+    const binary = await this.ensureIndigoHIDBinary();
+    await exec(binary, [udid, 'button', button], {
+      ...XCRUN_EXEC_OPTIONS,
+      timeout: 5_000,
+    });
 
     log(`Button "${button}" pressed on device ${udid}`);
   }
@@ -2967,7 +2656,11 @@ export class IOSSimulatorService {
   async sendText(udid: string, text: string): Promise<void> {
     log(`Sending text to device ${udid}: "${text.substring(0, 50)}${text.length > 50 ? '…' : ''}"`);
 
-    await this.sendIndigoCommand(udid, { cmd: 'type', text }, 10_000);
+    const binary = await this.ensureIndigoHIDBinary();
+    await exec(binary, [udid, 'type', text], {
+      ...XCRUN_EXEC_OPTIONS,
+      timeout: 10_000,
+    });
     log(`Text sent to device ${udid}`);
   }
 
@@ -2986,7 +2679,11 @@ export class IOSSimulatorService {
   async sendTap(udid: string, normX: number, normY: number): Promise<void> {
     log(`Sending tap to device ${udid} at normalised (${normX.toFixed(3)}, ${normY.toFixed(3)})`);
 
-    await this.sendIndigoCommand(udid, { cmd: 'tap', x: normX, y: normY });
+    const binary = await this.ensureIndigoHIDBinary();
+    await exec(binary, [udid, 'tap', String(normX), String(normY)], {
+      ...XCRUN_EXEC_OPTIONS,
+      timeout: 5_000,
+    });
     log(`Tap sent to device ${udid} at (${normX.toFixed(3)}, ${normY.toFixed(3)})`);
   }
 
@@ -3022,13 +2719,16 @@ export class IOSSimulatorService {
     const steps = Math.max(5, Math.round(durationMs / 30));
 
     const swipeTimeoutMs = Math.max(10_000, durationMs + 5_000);
-    await this.sendIndigoCommand(udid, {
-      cmd: 'swipe',
-      x1: normX1, y1: normY1,
-      x2: normX2, y2: normY2,
-      steps,
-      durationMs,
-    }, swipeTimeoutMs);
+    const binary = await this.ensureIndigoHIDBinary();
+    await exec(binary, [
+      udid, 'swipe',
+      String(normX1), String(normY1),
+      String(normX2), String(normY2),
+      String(steps), String(durationMs),
+    ], {
+      ...XCRUN_EXEC_OPTIONS,
+      timeout: swipeTimeoutMs,
+    });
     log(`Swipe sent to device ${udid} from (${normX1}, ${normY1}) to (${normX2}, ${normY2})`);
   }
 
@@ -3075,47 +2775,24 @@ export class IOSSimulatorService {
 
     if (indigoKeyName !== undefined) {
       // Special key — use the IndigoHID 'key' command
-      await this.sendIndigoCommand(udid, { cmd: 'key', name: indigoKeyName });
+      const binary = await this.ensureIndigoHIDBinary();
+      await exec(binary, [udid, 'key', indigoKeyName], {
+        ...XCRUN_EXEC_OPTIONS,
+        timeout: 5_000,
+      });
     } else if (key.length === 1) {
       // Single printable character (including space) — send the character directly.
       // The Swift HID table maps single characters (e.g. ' ', 'a') by their
       // literal value, so we pass the character as-is.
-      await this.sendIndigoCommand(udid, { cmd: 'key', name: key });
+      const binary = await this.ensureIndigoHIDBinary();
+      await exec(binary, [udid, 'key', key], {
+        ...XCRUN_EXEC_OPTIONS,
+        timeout: 5_000,
+      });
     } else {
       // Multi-character keys not in the map (Shift, Control, Alt, Meta, etc.) — ignore.
       log(`Ignoring unsupported key: "${key}" (code: "${code}")`);
       return;
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // IndigoDaemon cleanup
-  // -------------------------------------------------------------------------
-
-  /**
-   * Kill the IndigoHID daemon for a specific device.
-   * All pending requests are rejected immediately.
-   *
-   * @param udid - The device UDID whose daemon should be destroyed.
-   */
-  destroyIndigoDaemon(udid: string): void {
-    const daemon = this.indigoDaemons.get(udid);
-    if (!daemon) return;
-    log(`Killing IndigoHID daemon for device ${udid}`);
-    try { daemon.process.kill('SIGTERM'); } catch { /* already dead */ }
-    for (const [, pending] of daemon.pendingRequests) {
-      clearTimeout(pending.timer);
-      pending.reject(new Error('IndigoHID daemon destroyed'));
-    }
-    daemon.pendingRequests.clear();
-    daemon.stdoutBuffer = '';
-    this.indigoDaemons.delete(udid);
-  }
-
-  /** Kill all IndigoHID daemons. Called during server shutdown. */
-  destroyAllIndigoDaemons(): void {
-    for (const udid of [...this.indigoDaemons.keys()]) {
-      this.destroyIndigoDaemon(udid);
     }
   }
 

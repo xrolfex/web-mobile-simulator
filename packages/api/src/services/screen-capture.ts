@@ -114,7 +114,7 @@ const CAPTURE_SWIFT_TMP_PATH = join(tmpdir(), 'wms-ios-capture-stream.swift');
 const MAX_IOS_CAPTURE_RESTARTS = 5;
 
 /** Version tag for the compiled iOS capture binary. Increment to force recompilation. */
-const CAPTURE_BINARY_VERSION = '4';
+const CAPTURE_BINARY_VERSION = '5';
 
 /** Sidecar file that stores the version of the currently-cached binary. */
 const CAPTURE_BINARY_VERSION_PATH = join(tmpdir(), 'wms-ios-capture-stream.ver');
@@ -316,11 +316,11 @@ class H264Encoder {
         // Determine whether this is a keyframe.
         let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
         var isKeyframe = true
-        if let attachments = attachments, CFArrayGetCount(attachments) > 0 {
-            let attachment = CFArrayGetValueAtIndex(attachments, 0)
-            let dict = unsafeBitCast(attachment, to: CFDictionary.self)
+        if let attachments = attachments, CFArrayGetCount(attachments) > 0,
+           let attachment = CFArrayGetValueAtIndex(attachments, 0) {
+            let dict = Unmanaged<CFDictionary>.fromOpaque(attachment).takeUnretainedValue()
             if let notSync = CFDictionaryGetValue(dict, Unmanaged.passUnretained(kCMSampleAttachmentKey_NotSync).toOpaque()) {
-                let notSyncBool = unsafeBitCast(notSync, to: CFBoolean.self)
+                let notSyncBool = Unmanaged<CFBoolean>.fromOpaque(notSync).takeUnretainedValue()
                 isKeyframe = !CFBooleanGetValue(notSyncBool)
             }
         }
@@ -372,7 +372,8 @@ class H264Encoder {
         var offset = 0
         while offset + 4 <= totalLength {
             // Read the 4-byte big-endian NALU length.
-            let naluLengthBE = dataPointer.advanced(by: offset).withMemoryRebound(to: UInt32.self, capacity: 1) { $0.pointee }
+            let naluLengthBE = UnsafeRawPointer(dataPointer)
+                .load(fromByteOffset: offset, as: UInt32.self)
             let naluLength = Int(CFSwapInt32BigToHost(naluLengthBE))
             offset += 4
             guard offset + naluLength <= totalLength else { break }

@@ -162,7 +162,16 @@ export class WebRTCStreamService {
     }
 
     const pc = new RTCPeerConnection({
-      codecs: { video: [useH264()] },
+      codecs: {
+        video: [
+          // Override default Constrained Baseline (42e01f) to match our
+          // VideoToolbox encoder which produces Main Profile (4d) + CABAC.
+          useH264({
+            parameters:
+              'profile-level-id=4d0028;packetization-mode=1;level-asymmetry-allowed=1',
+          }),
+        ],
+      },
     });
 
     const videoTrack = new MediaStreamTrack({ kind: 'video' });
