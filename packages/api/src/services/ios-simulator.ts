@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -102,7 +102,7 @@ const INDIGO_BINARY_PATH = join(WMS_INPUT_TMP_DIR, 'wms-indigo-hid');
 const INDIGO_SWIFT_TMP_PATH = join(WMS_INPUT_TMP_DIR, 'wms-indigo-hid.swift');
 
 /** Version tag — increment to force recompilation of IndigoHID binary. */
-const INDIGO_BINARY_VERSION = '1';
+const INDIGO_BINARY_VERSION = '3';
 
 /** Sidecar file storing the version of the cached IndigoHID binary. */
 const INDIGO_BINARY_VERSION_PATH = join(WMS_INPUT_TMP_DIR, 'wms-indigo-hid.ver');
@@ -443,8 +443,11 @@ import ObjectiveC
 /// Paths to the private frameworks we need.
 let kCoreSimulatorPath =
     "/Library/Developer/PrivateFrameworks/CoreSimulator.framework/CoreSimulator"
-let kSimulatorKitPath =
-    "/Applications/Xcode.app/Contents/Developer/Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit"
+let kSimulatorKitPath: String = {
+    let devDir = ProcessInfo.processInfo.environment["DEVELOPER_DIR"]
+        ?? "/Applications/Xcode.app/Contents/Developer"
+    return "\\(devDir)/Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit"
+}()
 
 /// Load a dynamic library, aborting with a diagnostic if it fails.
 func loadFramework(_ path: String) {
@@ -453,7 +456,7 @@ func loadFramework(_ path: String) {
         fputs("❌ Failed to load \\(path)\\n   Reason: \\(reason)\\n", stderr)
         exit(1)
     }
-    print("✅ Loaded \\(path)")
+    fputs("✅ Loaded \\(path)\\n", stderr)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -650,36 +653,36 @@ func discoverClasses() {
     var matched = 0
     for name in knownNames {
         guard let cls = NSClassFromString(name) else {
-            print("  ⚠️  \\(name) — not found (class not registered)")
+            fputs("  ⚠️  \\(name) — not found (class not registered)\\n", stderr)
             continue
         }
         matched += 1
 
-        print("\\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        print("CLASS: \\(name)")
+        fputs("\\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n", stderr)
+        fputs("CLASS: \\(name)\\n", stderr)
         if let superCls = class_getSuperclass(cls) {
-            print("  Superclass: \\(String(cString: class_getName(superCls)))")
+            fputs("  Superclass: \\(String(cString: class_getName(superCls)))\\n", stderr)
         }
 
         let instMethods = methodNames(of: cls)
         if !instMethods.isEmpty {
-            print("  Instance methods (\\(instMethods.count)):")
-            instMethods.sorted().forEach { print("    - \\($0)") }
+            fputs("  Instance methods (\\(instMethods.count)):\\n", stderr)
+            instMethods.sorted().forEach { fputs("    - \\($0)\\n", stderr) }
         }
 
         let clsMethods = classMethodNames(of: cls)
         if !clsMethods.isEmpty {
-            print("  Class methods (\\(clsMethods.count)):")
-            clsMethods.sorted().forEach { print("    + \\($0)") }
+            fputs("  Class methods (\\(clsMethods.count)):\\n", stderr)
+            clsMethods.sorted().forEach { fputs("    + \\($0)\\n", stderr) }
         }
     }
 
-    print("\\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    print("Found \\(matched)/\\(knownNames.count) targeted class(es).")
-    print("")
-    print("ℹ️  Note: Full objc_copyClassList enumeration (~60 k classes) hangs")
-    print("   due to Swift runtime realization. Use NSClassFromString for any")
-    print("   additional classes you want to inspect.")
+    fputs("\\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n", stderr)
+    fputs("Found \\(matched)/\\(knownNames.count) targeted class(es).\\n", stderr)
+    fputs("\\n", stderr)
+    fputs("ℹ️  Note: Full objc_copyClassList enumeration (~60 k classes) hangs\\n", stderr)
+    fputs("   due to Swift runtime realization. Use NSClassFromString for any\\n", stderr)
+    fputs("   additional classes you want to inspect.\\n", stderr)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -696,18 +699,18 @@ func findSimDevice(udid: String) -> AnyObject? {
         fputs("❌ SimServiceContext class not found — CoreSimulator not loaded?\\n", stderr)
         return nil
     }
-    print("🔍 Found SimServiceContext class: \\(ctxClass)")
+    fputs("🔍 Found SimServiceContext class: \\(ctxClass)\\n", stderr)
 
     // +sharedServiceContextForDeveloperDir:error:
     let developerDir = ProcessInfo.processInfo.environment["DEVELOPER_DIR"]
         ?? "/Applications/Xcode.app/Contents/Developer"
-    print("🔍 Using DEVELOPER_DIR: \\(developerDir)")
+    fputs("🔍 Using DEVELOPER_DIR: \\(developerDir)\\n", stderr)
 
     let sharedCtxSel = NSSelectorFromString("sharedServiceContextForDeveloperDir:error:")
     guard let sharedCtxMethod = class_getClassMethod(ctxClass, sharedCtxSel) else {
         fputs("❌ SimServiceContext does not have sharedServiceContextForDeveloperDir:error:\\n", stderr)
         let altMethods = classMethodNames(of: ctxClass)
-        print("  Available class methods: \\(altMethods.joined(separator: ", "))")
+        fputs("  Available class methods: \\(altMethods.joined(separator: ", "))\\n", stderr)
         return nil
     }
 
@@ -738,7 +741,7 @@ func findSimDevice(udid: String) -> AnyObject? {
         }
         return nil
     }
-    print("✅ Got SimServiceContext: \\(serviceContext)")
+    fputs("✅ Got SimServiceContext: \\(serviceContext)\\n", stderr)
 
     // ── 2. Get defaultDeviceSet ───────────────────────────────────────────────
     let defaultSetSel = NSSelectorFromString("defaultDeviceSetWithError:")
@@ -746,7 +749,7 @@ func findSimDevice(udid: String) -> AnyObject? {
     guard let defaultSetMethod = class_getInstanceMethod(serviceContextClass, defaultSetSel) else {
         fputs("❌ SimServiceContext does not respond to defaultDeviceSetWithError:\\n", stderr)
         let instMethods = methodNames(of: serviceContextClass)
-        print("  Available instance methods (first 30): \\(instMethods.prefix(30).joined(separator: ", "))")
+        fputs("  Available instance methods (first 30): \\(instMethods.prefix(30).joined(separator: ", "))\\n", stderr)
         return nil
     }
 
@@ -769,7 +772,7 @@ func findSimDevice(udid: String) -> AnyObject? {
         }
         return nil
     }
-    print("✅ Got SimDeviceSet: \\(deviceSet)")
+    fputs("✅ Got SimDeviceSet: \\(deviceSet)\\n", stderr)
 
     // ── 3. Get devices dictionary via devicesByUDID (keyed by NSUUID) ────────────
     //
@@ -787,7 +790,7 @@ func findSimDevice(udid: String) -> AnyObject? {
         fputs("❌ Could not cast devicesByUDID result to NSDictionary; type=\\(type(of: devicesObj))\\n", stderr)
         return nil
     }
-    print("  devicesByUDID count: \\(devicesDict.count)")
+    fputs("  devicesByUDID count: \\(devicesDict.count)\\n", stderr)
 
     // Build an NSUUID key from the provided UDID string.
     guard let swiftUUID = UUID(uuidString: udid) else {
@@ -798,13 +801,13 @@ func findSimDevice(udid: String) -> AnyObject? {
 
     if let found = devicesDict[nsUUID] {
         let device = found as AnyObject
-        print("✅ Found SimDevice for UDID \\(udid): \\(device)")
+        fputs("✅ Found SimDevice for UDID \\(udid): \\(device)\\n", stderr)
         return device
     }
 
     fputs("❌ Device with UDID \\(udid) not found in devicesByUDID.\\n", stderr)
     let availableUDIDs = devicesDict.allKeys.map { String(describing: $0) }.joined(separator: "\\n    ")
-    print("  Available UDIDs:\\n    \\(availableUDIDs)")
+    fputs("  Available UDIDs:\\n    \\(availableUDIDs)\\n", stderr)
     return nil
 }
 
@@ -831,7 +834,7 @@ func createHIDClient(for device: AnyObject) -> AnyObject? {
     for name in possibleNames {
         if let cls = NSClassFromString(name) {
             hidClientClass = cls
-            print("✅ Found SimDeviceLegacyHIDClient class as: \\(name)")
+            fputs("✅ Found SimDeviceLegacyHIDClient class as: \\(name)\\n", stderr)
             break
         }
     }
@@ -843,9 +846,9 @@ func createHIDClient(for device: AnyObject) -> AnyObject? {
     }
 
     let instMethods = methodNames(of: cls)
-    print("  HIDClient instance methods: \\(instMethods.joined(separator: ", "))")
+    fputs("  HIDClient instance methods: \\(instMethods.joined(separator: ", "))\\n", stderr)
     let clsMethodsList = classMethodNames(of: cls)
-    print("  HIDClient class methods: \\(clsMethodsList.joined(separator: ", "))")
+    fputs("  HIDClient class methods: \\(clsMethodsList.joined(separator: ", "))\\n", stderr)
 
     // ── Allocate via +alloc using IMP ─────────────────────────────────────────
     let allocSel = NSSelectorFromString("alloc")
@@ -856,7 +859,7 @@ func createHIDClient(for device: AnyObject) -> AnyObject? {
     typealias AllocFn = @convention(c) (AnyClass, Selector) -> AnyObject
     let allocImpl = unsafeBitCast(method_getImplementation(allocMethod), to: AllocFn.self)
     let alloc: AnyObject = allocImpl(cls, allocSel)
-    print("  Allocated instance: \\(alloc)")
+    fputs("  Allocated instance: \\(alloc)\\n", stderr)
 
     // ── Try -initWithDevice:error: ────────────────────────────────────────────
     let initErrSel = NSSelectorFromString("initWithDevice:error:")
@@ -875,7 +878,7 @@ func createHIDClient(for device: AnyObject) -> AnyObject? {
             return nil
         }
         if let c = client {
-            print("✅ Created SimDeviceLegacyHIDClient: \\(c)")
+            fputs("✅ Created SimDeviceLegacyHIDClient: \\(c)\\n", stderr)
             return c
         }
         fputs("⚠️  initWithDevice:error: returned nil (no error)\\n", stderr)
@@ -887,7 +890,7 @@ func createHIDClient(for device: AnyObject) -> AnyObject? {
         typealias InitSimpleFn = @convention(c) (AnyObject, Selector, AnyObject) -> AnyObject?
         let initSimpleImpl = unsafeBitCast(method_getImplementation(initSimpleMethod), to: InitSimpleFn.self)
         if let c = initSimpleImpl(alloc, initSimpleSel, device) {
-            print("✅ Created SimDeviceLegacyHIDClient (simple init): \\(c)")
+            fputs("✅ Created SimDeviceLegacyHIDClient (simple init): \\(c)\\n", stderr)
             return c
         }
         fputs("⚠️  initWithDevice: returned nil\\n", stderr)
@@ -976,17 +979,18 @@ let kUSBHIDUsageCodes: [String: UInt32] = [
 ///   - hidClient: The SimDeviceLegacyHIDClient instance (AnyObject).
 ///   - normX:     Normalised X coordinate (0.0 = left, 1.0 = right).
 ///   - normY:     Normalised Y coordinate (0.0 = top,  1.0 = bottom).
-func injectTap(hidClient: AnyObject, normX: Double, normY: Double) {
+/// - Returns: nil on success, or an error message string on failure.
+func injectTap(hidClient: AnyObject, normX: Double, normY: Double) -> String? {
     // ── 1. Resolve IndigoHIDMessageForMouseNSEvent via dlsym ─────────────────
     guard let simKitHandle = dlopen(kSimulatorKitPath, RTLD_NOLOAD) else {
         fputs("❌ SimulatorKit not currently loaded — cannot dlsym\\n", stderr)
-        return
+        return "SimulatorKit not currently loaded"
     }
     defer { dlclose(simKitHandle) }
 
     guard let rawIndigoPtr = dlsym(simKitHandle, "IndigoHIDMessageForMouseNSEvent") else {
         fputs("❌ dlsym(IndigoHIDMessageForMouseNSEvent) failed: \\(String(cString: dlerror()))\\n", stderr)
-        return
+        return "dlsym(IndigoHIDMessageForMouseNSEvent) failed"
     }
     let indigoFn = unsafeBitCast(rawIndigoPtr, to: IndigoHIDMessageForMouseNSEventFn.self)
 
@@ -1004,7 +1008,7 @@ func injectTap(hidClient: AnyObject, normX: Double, normY: Double) {
           let sendMethod = class_getInstanceMethod(clientClass, sendSel) else {
         fputs("❌ HIDClient does not respond to \\(sendSelName)\\n", stderr)
         fputs("   Available methods: \\(instMethods.joined(separator: ", "))\\n", stderr)
-        return
+        return "HIDClient does not respond to \\(sendSelName)"
     }
 
     // ── 3. No registration needed ──────────────────────────────────────────────
@@ -1037,7 +1041,8 @@ func injectTap(hidClient: AnyObject, normX: Double, normY: Double) {
         x: normX, y: normY,
         eventType: kButtonEventTypeUp
     )
-    print("✅ Tap injection complete.")
+    fputs("✅ Tap injection complete.\\n", stderr)
+    return nil
 }
 
 /// Send an IndigoHID registration message to register a HID service in the
@@ -1225,7 +1230,7 @@ private func attemptSwiftDirectCall(
         fputs("   Mangled name attempted: \\(mangledName)\\n", stderr)
         return
     }
-    print("✅ Found Swift send(message:) dispatch thunk at \\(fnPtr)")
+    fputs("✅ Found Swift send(message:) dispatch thunk at \\(fnPtr)\\n", stderr)
 
     // The Swift dispatch thunk has the following calling convention:
     // arg0 (x0) = UnsafeMutablePointer<IndigoHIDMessageStruct>
@@ -1236,7 +1241,7 @@ private func attemptSwiftDirectCall(
     // Try the non-thunk symbol first:
     let implMangledName = "$s12SimulatorKit24SimDeviceLegacyHIDClientC4send7messageySpySo22IndigoHIDMessageStructVG_tF"
     let implFnPtr = dlsym(simKitHandle, implMangledName) ?? fnPtr
-    print("  Using impl at \\(implFnPtr)")
+    fputs("  Using impl at \\(implFnPtr)\\n", stderr)
 
     let events: [(UInt, String)] = [
         (kButtonEventTypeDown, "touch-down"),
@@ -1251,7 +1256,7 @@ private func attemptSwiftDirectCall(
             continue
         }
         defer { free(msgPtr) }
-        print("📤 Swift direct: \\(label) at (\\(normX), \\(normY))…")
+        fputs("📤 Swift direct: \\(label) at (\\(normX), \\(normY))…\\n", stderr)
 
         // Attempt: cast the thunk to a C function that takes (message_ptr, self).
         // NOTE: This may crash if the ABI assumption is wrong; it's a best-effort.
@@ -1260,9 +1265,9 @@ private func attemptSwiftDirectCall(
         typealias SwiftSendFn = @convention(c) (UnsafeMutableRawPointer, AnyObject) -> Void
         let sendFn = unsafeBitCast(implFnPtr, to: SwiftSendFn.self)
         sendFn(msgPtr, hidClient)
-        print("   Swift direct send called for \\(label).")
+        fputs("   Swift direct send called for \\(label).\\n", stderr)
     }
-    print("✅ Swift direct call tap injection attempt complete.")
+    fputs("✅ Swift direct call tap injection attempt complete.\\n", stderr)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1274,22 +1279,23 @@ private func attemptSwiftDirectCall(
 /// - Parameters:
 ///   - hidClient: The SimDeviceLegacyHIDClient instance.
 ///   - keyName:   Key name (e.g. "a", "Enter", "Backspace", "ArrowUp").
-func injectKeyEvent(hidClient: AnyObject, keyName: String) {
+/// - Returns: nil on success, or an error message string on failure.
+func injectKeyEvent(hidClient: AnyObject, keyName: String) -> String? {
     guard let usageCode = kUSBHIDUsageCodes[keyName] else {
         fputs("❌ Unknown key name: \\"\\(keyName)\\" — not in USB HID usage table\\n", stderr)
-        exit(1)
+        return "Unknown key name: \\(keyName)"
     }
 
     // Resolve function
     guard let simKitHandle = dlopen(kSimulatorKitPath, RTLD_NOLOAD) else {
         fputs("❌ SimulatorKit not loaded\\n", stderr)
-        return
+        return "SimulatorKit not loaded"
     }
     defer { dlclose(simKitHandle) }
 
     guard let rawPtr = dlsym(simKitHandle, "IndigoHIDMessageForKeyboardArbitrary") else {
         fputs("❌ dlsym(IndigoHIDMessageForKeyboardArbitrary) failed\\n", stderr)
-        return
+        return "dlsym(IndigoHIDMessageForKeyboardArbitrary) failed"
     }
     let keyFn = unsafeBitCast(rawPtr, to: IndigoHIDMessageForKeyboardArbitraryFn.self)
 
@@ -1300,7 +1306,7 @@ func injectKeyEvent(hidClient: AnyObject, keyName: String) {
     guard hidClient.responds(to: sendSel),
           let sendMethod = class_getInstanceMethod(clientClass, sendSel) else {
         fputs("❌ HIDClient does not respond to send selector\\n", stderr)
-        return
+        return "HIDClient does not respond to send selector"
     }
 
     typealias SendFn = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, Bool, AnyObject?, AnyObject?) -> Void
@@ -1309,7 +1315,7 @@ func injectKeyEvent(hidClient: AnyObject, keyName: String) {
     // Key down
     guard let msgDown = keyFn(usageCode, 1) else {
         fputs("❌ IndigoHIDMessageForKeyboardArbitrary returned nil for key down\\n", stderr)
-        return
+        return "IndigoHIDMessageForKeyboardArbitrary returned nil for key down"
     }
     sendFn(hidClient, sendSel, msgDown, false, nil, nil)
 
@@ -1318,11 +1324,12 @@ func injectKeyEvent(hidClient: AnyObject, keyName: String) {
     // Key up
     guard let msgUp = keyFn(usageCode, 2) else {
         fputs("❌ IndigoHIDMessageForKeyboardArbitrary returned nil for key up\\n", stderr)
-        return
+        return "IndigoHIDMessageForKeyboardArbitrary returned nil for key up"
     }
     sendFn(hidClient, sendSel, msgUp, false, nil, nil)
 
-    print("✅ Key event sent: \\"\\(keyName)\\" (USB HID 0x\\(String(usageCode, radix: 16)))")
+    fputs("✅ Key event sent: \\"\\(keyName)\\" (USB HID 0x\\(String(usageCode, radix: 16)))\\n", stderr)
+    return nil
 }
 
 /// Inject a text string as a series of key events.
@@ -1330,17 +1337,18 @@ func injectKeyEvent(hidClient: AnyObject, keyName: String) {
 /// - Parameters:
 ///   - hidClient: The SimDeviceLegacyHIDClient instance.
 ///   - text:      The text to type.
-func injectTextInput(hidClient: AnyObject, text: String) {
+/// - Returns: nil on success, or an error message string on failure.
+func injectTextInput(hidClient: AnyObject, text: String) -> String? {
     // Resolve function
     guard let simKitHandle = dlopen(kSimulatorKitPath, RTLD_NOLOAD) else {
         fputs("❌ SimulatorKit not loaded\\n", stderr)
-        return
+        return "SimulatorKit not loaded"
     }
     defer { dlclose(simKitHandle) }
 
     guard let rawPtr = dlsym(simKitHandle, "IndigoHIDMessageForKeyboardArbitrary") else {
         fputs("❌ dlsym(IndigoHIDMessageForKeyboardArbitrary) failed\\n", stderr)
-        return
+        return "dlsym(IndigoHIDMessageForKeyboardArbitrary) failed"
     }
     let keyFn = unsafeBitCast(rawPtr, to: IndigoHIDMessageForKeyboardArbitraryFn.self)
 
@@ -1351,7 +1359,7 @@ func injectTextInput(hidClient: AnyObject, text: String) {
     guard hidClient.responds(to: sendSel),
           let sendMethod = class_getInstanceMethod(clientClass, sendSel) else {
         fputs("❌ HIDClient does not respond to send selector\\n", stderr)
-        return
+        return "HIDClient does not respond to send selector"
     }
 
     typealias SendFn = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, Bool, AnyObject?, AnyObject?) -> Void
@@ -1379,7 +1387,8 @@ func injectTextInput(hidClient: AnyObject, text: String) {
         Thread.sleep(forTimeInterval: 0.01)
     }
 
-    print("✅ Text input sent: \\"\\(text.prefix(50))\\(text.count > 50 ? "…" : "")\\" (\\(text.count) chars)")
+    fputs("✅ Text input sent: \\"\\(text.prefix(50))\\(text.count > 50 ? "…" : "")\\" (\\(text.count) chars)\\n", stderr)
+    return nil
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1396,23 +1405,24 @@ func injectTextInput(hidClient: AnyObject, text: String) {
 ///   - toX, toY:     End coordinates (normalised 0.0–1.0).
 ///   - steps:        Number of intermediate move events (default 10).
 ///   - durationMs:   Total swipe duration in milliseconds (default 300).
+/// - Returns: nil on success, or an error message string on failure.
 func injectSwipe(
     hidClient: AnyObject,
     fromX: Double, fromY: Double,
     toX: Double, toY: Double,
     steps: Int = 10,
     durationMs: Int = 300
-) {
+) -> String? {
     // Resolve IndigoHIDMessageForMouseNSEvent
     guard let simKitHandle = dlopen(kSimulatorKitPath, RTLD_NOLOAD) else {
         fputs("❌ SimulatorKit not loaded\\n", stderr)
-        return
+        return "SimulatorKit not loaded"
     }
     defer { dlclose(simKitHandle) }
 
     guard let rawPtr = dlsym(simKitHandle, "IndigoHIDMessageForMouseNSEvent") else {
         fputs("❌ dlsym(IndigoHIDMessageForMouseNSEvent) failed\\n", stderr)
-        return
+        return "dlsym(IndigoHIDMessageForMouseNSEvent) failed"
     }
     let indigoFn = unsafeBitCast(rawPtr, to: IndigoHIDMessageForMouseNSEventFn.self)
 
@@ -1423,7 +1433,7 @@ func injectSwipe(
     guard hidClient.responds(to: sendSel),
           let sendMethod = class_getInstanceMethod(clientClass, sendSel) else {
         fputs("❌ HIDClient does not respond to send selector\\n", stderr)
-        return
+        return "HIDClient does not respond to send selector"
     }
 
     typealias SendFn = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, Bool, AnyObject?, AnyObject?) -> Void
@@ -1462,7 +1472,8 @@ func injectSwipe(
     Thread.sleep(forTimeInterval: 0.01)
     sendTouch(x: toX, y: toY, eventType: kButtonEventTypeUp, phase: 4)
 
-    print("✅ Swipe sent: (\\(fromX), \\(fromY)) → (\\(toX), \\(toY)) in \\(steps) steps over \\(durationMs)ms")
+    fputs("✅ Swipe sent: (\\(fromX), \\(fromY)) → (\\(toX), \\(toY)) in \\(steps) steps over \\(durationMs)ms\\n", stderr)
+    return nil
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1481,10 +1492,11 @@ func injectSwipe(
 ///   lock/power      = 1     (lockButtonPressed: hardcoded)
 ///   volumeUp        = HID Consumer Control page 0x0c, usage 0xe9
 ///   volumeDown      = HID Consumer Control page 0x0c, usage 0xea
-func injectButton(hidClient: AnyObject, buttonName: String) {
+/// - Returns: nil on success, or an error message string on failure.
+func injectButton(hidClient: AnyObject, buttonName: String) -> String? {
     guard let simKitHandle = dlopen(kSimulatorKitPath, RTLD_NOLOAD) else {
         fputs("❌ SimulatorKit not loaded\\n", stderr)
-        return
+        return "SimulatorKit not loaded"
     }
     defer { dlclose(simKitHandle) }
 
@@ -1495,7 +1507,7 @@ func injectButton(hidClient: AnyObject, buttonName: String) {
     guard hidClient.responds(to: sendSel),
           let sendMethod = class_getInstanceMethod(clientClass, sendSel) else {
         fputs("❌ HIDClient does not respond to send selector\\n", stderr)
-        return
+        return "HIDClient does not respond to send selector"
     }
     typealias SendFn = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, Bool, AnyObject?, AnyObject?) -> Void
     let sendFn = unsafeBitCast(method_getImplementation(sendMethod), to: SendFn.self)
@@ -1504,7 +1516,7 @@ func injectButton(hidClient: AnyObject, buttonName: String) {
     if buttonName == "volumeUp" || buttonName == "volumeDown" {
         guard let rawPtr = dlsym(simKitHandle, "IndigoHIDMessageForHIDArbitrary") else {
             fputs("❌ dlsym(IndigoHIDMessageForHIDArbitrary) failed\\n", stderr)
-            return
+            return "dlsym(IndigoHIDMessageForHIDArbitrary) failed"
         }
         let arbitraryFn = unsafeBitCast(rawPtr, to: IndigoHIDMessageForHIDArbitraryFn.self)
 
@@ -1514,7 +1526,7 @@ func injectButton(hidClient: AnyObject, buttonName: String) {
         // Button down
         guard let msgDown = arbitraryFn(kIndigoHIDTargetButton, kConsumerControlPage, usageCode, 1) else {
             fputs("❌ IndigoHIDMessageForHIDArbitrary returned nil (down)\\n", stderr)
-            return
+            return "IndigoHIDMessageForHIDArbitrary returned nil (down)"
         }
         sendFn(hidClient, sendSel, msgDown, false, nil, nil)
         Thread.sleep(forTimeInterval: 0.05)
@@ -1522,12 +1534,12 @@ func injectButton(hidClient: AnyObject, buttonName: String) {
         // Button up
         guard let msgUp = arbitraryFn(kIndigoHIDTargetButton, kConsumerControlPage, usageCode, 2) else {
             fputs("❌ IndigoHIDMessageForHIDArbitrary returned nil (up)\\n", stderr)
-            return
+            return "IndigoHIDMessageForHIDArbitrary returned nil (up)"
         }
         sendFn(hidClient, sendSel, msgUp, false, nil, nil)
 
-        print("✅ Volume button: \\"\\(buttonName)\\" (page=0x0c, usage=0x\\(String(usageCode, radix: 16)))")
-        return
+        fputs("✅ Volume button: \\"\\(buttonName)\\" (page=0x0c, usage=0x\\(String(usageCode, radix: 16)))\\n", stderr)
+        return nil
     }
 
     // ── All other buttons use IndigoHIDMessageForButton ──
@@ -1543,19 +1555,19 @@ func injectButton(hidClient: AnyObject, buttonName: String) {
 
     guard let buttonCode = buttonCodes[buttonName] else {
         fputs("❌ Unknown button: \\"\\(buttonName)\\". Valid: home, lock, volumeUp, volumeDown\\n", stderr)
-        exit(1)
+        return "Unknown button: \\(buttonName). Valid: home, lock, volumeUp, volumeDown"
     }
 
     guard let rawPtr = dlsym(simKitHandle, "IndigoHIDMessageForButton") else {
         fputs("❌ dlsym(IndigoHIDMessageForButton) failed\\n", stderr)
-        return
+        return "dlsym(IndigoHIDMessageForButton) failed"
     }
     let buttonFn = unsafeBitCast(rawPtr, to: IndigoHIDMessageForButtonFn.self)
 
     // Button down
     guard let msgDown = buttonFn(buttonCode, 1, kIndigoHIDTargetButton) else {
         fputs("❌ IndigoHIDMessageForButton returned nil (down)\\n", stderr)
-        return
+        return "IndigoHIDMessageForButton returned nil (down)"
     }
     sendFn(hidClient, sendSel, msgDown, false, nil, nil)
     Thread.sleep(forTimeInterval: 0.05)
@@ -1563,11 +1575,12 @@ func injectButton(hidClient: AnyObject, buttonName: String) {
     // Button up
     guard let msgUp = buttonFn(buttonCode, 2, kIndigoHIDTargetButton) else {
         fputs("❌ IndigoHIDMessageForButton returned nil (up)\\n", stderr)
-        return
+        return "IndigoHIDMessageForButton returned nil (up)"
     }
     sendFn(hidClient, sendSel, msgUp, false, nil, nil)
 
-    print("✅ Button pressed: \\"\\(buttonName)\\" (code=\\(buttonCode), target=0x\\(String(kIndigoHIDTargetButton, radix: 16)))")
+    fputs("✅ Button pressed: \\"\\(buttonName)\\" (code=\\(buttonCode), target=0x\\(String(kIndigoHIDTargetButton, radix: 16)))\\n", stderr)
+    return nil
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1579,6 +1592,10 @@ func printUsage() -> Never {
     Usage:
       wms-indigo-poc --discover
           List SimulatorKit/CoreSimulator ObjC classes and their methods.
+
+      wms-indigo-poc <udid>
+          Daemon mode: read newline-delimited JSON commands from stdin,
+          write JSON responses to stdout.
 
       wms-indigo-poc <udid> tap <normX> <normY>
           Inject a tap at normalised coordinates (0.0–1.0).
@@ -1600,6 +1617,7 @@ func printUsage() -> Never {
 
     Examples:
       wms-indigo-poc --discover
+      wms-indigo-poc ABCD-1234
       wms-indigo-poc ABCD-1234 tap 0.5 0.5
       wms-indigo-poc ABCD-1234 swipe 0.5 0.8 0.5 0.2
       wms-indigo-poc ABCD-1234 key Enter
@@ -1610,24 +1628,198 @@ func printUsage() -> Never {
     exit(1)
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// MARK: - Daemon mode helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Serialise a dictionary to a JSON line and write it to stdout (the daemon protocol channel).
+/// Uses JSONSerialization so all values are properly encoded — no hand-rolled escaping.
+func writeJSONResponse(_ dict: [String: Any]) {
+    guard let data = try? JSONSerialization.data(withJSONObject: dict, options: []),
+          var jsonStr = String(data: data, encoding: .utf8) else {
+        fputs("[daemon] Failed to serialize JSON response\\n", stderr)
+        return
+    }
+    jsonStr += "\\n"
+    FileHandle.standardOutput.write(jsonStr.data(using: .utf8)!)
+}
+
+/// Parse and dispatch a single JSON command line received from the daemon's stdin.
+///
+/// - Parameters:
+///   - line:      A single UTF-8 line (without the trailing newline).
+///   - hidClient: The ready SimDeviceLegacyHIDClient instance.
+func processCommand(_ line: String, hidClient: AnyObject) {
+    guard let lineData = line.data(using: .utf8) else { return }
+
+    // Parse JSON
+    guard let jsonObj = try? JSONSerialization.jsonObject(with: lineData),
+          let dict = jsonObj as? [String: Any] else {
+        fputs("[daemon] Could not parse JSON line: \\(line)\\n", stderr)
+        return
+    }
+
+    let reqId = (dict["id"] as? String) ?? ""
+    guard let cmd = dict["cmd"] as? String else {
+        writeJSONResponse(["id": reqId, "ok": false, "error": "Missing 'cmd' field"])
+        return
+    }
+
+    fputs("[daemon] cmd=\\(cmd) id=\\(reqId)\\n", stderr)
+
+    // Dispatch — each injection function returns nil on success or an error string.
+    var errorMsg: String? = nil
+
+    switch cmd {
+    case "tap":
+        guard let x = dict["x"] as? Double, let y = dict["y"] as? Double else {
+            errorMsg = "tap requires numeric x and y"
+            break
+        }
+        if let err = injectTap(hidClient: hidClient, normX: x, normY: y) {
+            errorMsg = err
+        }
+
+    case "swipe":
+        guard let x1 = dict["x1"] as? Double, let y1 = dict["y1"] as? Double,
+              let x2 = dict["x2"] as? Double, let y2 = dict["y2"] as? Double else {
+            errorMsg = "swipe requires numeric x1, y1, x2, y2"
+            break
+        }
+        // Clamp steps and durationMs to ≥1 to avoid divide-by-zero in injectSwipe.
+        let steps = max(1, (dict["steps"] as? Int) ?? 10)
+        let durationMs = max(1, (dict["durationMs"] as? Int) ?? 300)
+        if let err = injectSwipe(hidClient: hidClient, fromX: x1, fromY: y1, toX: x2, toY: y2,
+                                 steps: steps, durationMs: durationMs) {
+            errorMsg = err
+        }
+
+    case "key":
+        guard let name = dict["name"] as? String else {
+            errorMsg = "key requires string name"
+            break
+        }
+        if let err = injectKeyEvent(hidClient: hidClient, keyName: name) {
+            errorMsg = err
+        }
+
+    case "type":
+        guard let text = dict["text"] as? String else {
+            errorMsg = "type requires string text"
+            break
+        }
+        if let err = injectTextInput(hidClient: hidClient, text: text) {
+            errorMsg = err
+        }
+
+    case "button":
+        guard let name = dict["name"] as? String else {
+            errorMsg = "button requires string name"
+            break
+        }
+        if let err = injectButton(hidClient: hidClient, buttonName: name) {
+            errorMsg = err
+        }
+
+    default:
+        errorMsg = "Unknown cmd: \\(cmd)"
+    }
+
+    if let err = errorMsg {
+        writeJSONResponse(["id": reqId, "ok": false, "error": err])
+    } else {
+        writeJSONResponse(["id": reqId, "ok": true])
+    }
+}
+
+/// Run the stdin read loop (daemon mode).
+///
+/// Uses \`FileHandle.read(upToCount:)\` which blocks until at least 1 byte
+/// arrives or EOF — unlike \`availableData\` which returns empty Data immediately
+/// on a pipe with no buffered data, causing a premature daemon exit.
+///
+/// - Parameters:
+///   - hidClient: The ready SimDeviceLegacyHIDClient.
+///   - udid:      The device UDID (echoed in the ready signal).
+func runDaemonLoop(hidClient: AnyObject, udid: String) {
+    // Emit ready signal on stdout
+    writeJSONResponse(["ready": true, "udid": udid])
+    fputs("[daemon] Ready. Waiting for commands on stdin.\\n", stderr)
+
+    signal(SIGTERM) { _ in exit(0) }
+    signal(SIGINT)  { _ in exit(0) }
+
+    let stdinHandle = FileHandle.standardInput
+    var lineBuffer = Data()
+    let newline = UInt8(0x0A) // \\n
+
+    while true {
+        // read(upToCount:) blocks until at least 1 byte arrives or EOF.
+        // On a pipe, this is the correct blocking behavior we need.
+        guard let chunk = try? stdinHandle.read(upToCount: 4096), !chunk.isEmpty else {
+            fputs("[daemon] stdin EOF — exiting.\\n", stderr)
+            exit(0)
+        }
+
+        lineBuffer.append(chunk)
+
+        // Process all complete lines in the buffer
+        while let newlineIndex = lineBuffer.firstIndex(of: newline) {
+            let lineData = lineBuffer[lineBuffer.startIndex..<newlineIndex]
+            lineBuffer = Data(lineBuffer[(newlineIndex + 1)...])
+
+            guard let lineStr = String(data: lineData, encoding: .utf8),
+                  !lineStr.isEmpty else { continue }
+
+            // Parse and dispatch the JSON command
+            processCommand(lineStr, hidClient: hidClient)
+        }
+    }
+}
+
 let args = CommandLine.arguments
 
 guard args.count >= 2 else { printUsage() }
 
+// ── Install signal handlers for clean exit ────────────────────────────────────
+signal(SIGTERM) { _ in exit(0) }
+signal(SIGINT)  { _ in exit(0) }
+
 // ── Load frameworks first (required before any ObjC introspection) ────────────
-print("──────────────────────────────────────────────────────────")
-print("  WMS IndigoHID POC")
-print("──────────────────────────────────────────────────────────")
+fputs("──────────────────────────────────────────────────────────\\n", stderr)
+fputs("  WMS IndigoHID POC\\n", stderr)
+fputs("──────────────────────────────────────────────────────────\\n", stderr)
 loadFramework(kCoreSimulatorPath)
 loadFramework(kSimulatorKitPath)
-print("")
+fputs("\\n", stderr)
 
 // ── Dispatch on command ───────────────────────────────────────────────────────
 let command = args[1]
 
 if command == "--discover" {
-    print("🔍 Discovering SimulatorKit and CoreSimulator ObjC classes…\\n")
+    fputs("🔍 Discovering SimulatorKit and CoreSimulator ObjC classes…\\n\\n", stderr)
     discoverClasses()
+} else if args.count == 2 {
+    // ── Daemon mode: just UDID, no subcommand ─────────────────────────────────
+    let udid = command
+    fputs("[daemon] Starting for UDID: \\(udid)\\n", stderr)
+
+    guard let device = findSimDevice(udid: udid) else {
+        writeJSONResponse(["ready": false, "error": "Could not locate SimDevice for UDID \\(udid)"])
+        exit(1)
+    }
+
+    if let nameVal = objcCall(device, sel: NSSelectorFromString("name")),
+       let stateVal = objcCall(device, sel: NSSelectorFromString("stateString")) {
+        fputs("[daemon] Device: \\(nameVal) (\\(stateVal))\\n", stderr)
+    }
+
+    guard let hidClient = createHIDClient(for: device) else {
+        writeJSONResponse(["ready": false, "error": "Could not create SimDeviceLegacyHIDClient"])
+        exit(1)
+    }
+
+    runDaemonLoop(hidClient: hidClient, udid: udid)
 } else {
     // All other commands require: <udid> <command> [args...]
     guard args.count >= 3 else { printUsage() }
@@ -1635,7 +1827,7 @@ if command == "--discover" {
     let subcommand = args[2]
 
     // Find device and create HID client (common for all commands)
-    print("🎯 Target UDID: \\(udid)\\n")
+    fputs("🎯 Target UDID: \\(udid)\\n\\n", stderr)
 
     guard let device = findSimDevice(udid: udid) else {
         fputs("❌ Could not locate SimDevice — see diagnostics above.\\n", stderr)
@@ -1644,15 +1836,15 @@ if command == "--discover" {
 
     if let nameVal = objcCall(device, sel: NSSelectorFromString("name")),
        let stateVal = objcCall(device, sel: NSSelectorFromString("stateString")) {
-        print("  Device: \\(nameVal) (\\(stateVal))")
+        fputs("  Device: \\(nameVal) (\\(stateVal))\\n", stderr)
     }
-    print("")
+    fputs("\\n", stderr)
 
     guard let hidClient = createHIDClient(for: device) else {
         fputs("❌ Could not create SimDeviceLegacyHIDClient.\\n", stderr)
         exit(1)
     }
-    print("")
+    fputs("\\n", stderr)
 
     switch subcommand {
     case "tap":
@@ -1662,8 +1854,8 @@ if command == "--discover" {
             fputs("Usage: wms-indigo-poc <udid> tap <normX> <normY>\\n", stderr)
             exit(1)
         }
-        print("🎯 Tap at (\\(normX), \\(normY))")
-        injectTap(hidClient: hidClient, normX: normX, normY: normY)
+        fputs("🎯 Tap at (\\(normX), \\(normY))\\n", stderr)
+        _ = injectTap(hidClient: hidClient, normX: normX, normY: normY)
 
     case "swipe":
         guard args.count >= 7,
@@ -1674,8 +1866,8 @@ if command == "--discover" {
         }
         let steps = args.count >= 8 ? (Int(args[7]) ?? 10) : 10
         let durationMs = args.count >= 9 ? (Int(args[8]) ?? 300) : 300
-        print("🎯 Swipe (\\(x1),\\(y1)) → (\\(x2),\\(y2)) steps=\\(steps) duration=\\(durationMs)ms")
-        injectSwipe(hidClient: hidClient, fromX: x1, fromY: y1, toX: x2, toY: y2, steps: steps, durationMs: durationMs)
+        fputs("🎯 Swipe (\\(x1),\\(y1)) → (\\(x2),\\(y2)) steps=\\(steps) duration=\\(durationMs)ms\\n", stderr)
+        _ = injectSwipe(hidClient: hidClient, fromX: x1, fromY: y1, toX: x2, toY: y2, steps: steps, durationMs: durationMs)
 
     case "key":
         guard args.count >= 4 else {
@@ -1683,8 +1875,8 @@ if command == "--discover" {
             exit(1)
         }
         let keyName = args[3]
-        print("🎯 Key: \\"\\(keyName)\\"")
-        injectKeyEvent(hidClient: hidClient, keyName: keyName)
+        fputs("🎯 Key: \\"\\(keyName)\\"\\n", stderr)
+        _ = injectKeyEvent(hidClient: hidClient, keyName: keyName)
 
     case "type":
         guard args.count >= 4 else {
@@ -1692,8 +1884,8 @@ if command == "--discover" {
             exit(1)
         }
         let text = args[3]
-        print("🎯 Type: \\"\\(text.prefix(50))\\(text.count > 50 ? "…" : "")\\"")
-        injectTextInput(hidClient: hidClient, text: text)
+        fputs("🎯 Type: \\"\\(text.prefix(50))\\(text.count > 50 ? "…" : "")\\\"\\n", stderr)
+        _ = injectTextInput(hidClient: hidClient, text: text)
 
     case "button":
         guard args.count >= 4 else {
@@ -1701,8 +1893,8 @@ if command == "--discover" {
             exit(1)
         }
         let buttonName = args[3]
-        print("🎯 Button: \\"\\(buttonName)\\"")
-        injectButton(hidClient: hidClient, buttonName: buttonName)
+        fputs("🎯 Button: \\"\\(buttonName)\\"\\n", stderr)
+        _ = injectButton(hidClient: hidClient, buttonName: buttonName)
 
     default:
         fputs("❌ Unknown command: \\(subcommand)\\n", stderr)
@@ -1710,6 +1902,30 @@ if command == "--discover" {
     }
 }
 `;
+
+// ---------------------------------------------------------------------------
+// IndigoDaemon — persistent process handle
+// ---------------------------------------------------------------------------
+
+/** Handle to a persistent IndigoHID daemon process for one device. */
+interface IndigoDaemon {
+  /** The child process. */
+  process: ChildProcess;
+  /** Promise that resolves when the daemon emits {"ready":true}. */
+  readyPromise: Promise<void>;
+  /** Whether the daemon has signaled ready. */
+  ready: boolean;
+  /** Pending request callbacks keyed by request ID. */
+  pendingRequests: Map<string, {
+    resolve: () => void;
+    reject: (err: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>;
+  /** Incrementing request ID counter. */
+  requestCounter: number;
+  /** Buffer for partial lines from stdout. */
+  stdoutBuffer: string;
+}
 
 // ---------------------------------------------------------------------------
 // Service class
@@ -1741,6 +1957,16 @@ export class IOSSimulatorService {
 
   /** In-flight promise for IndigoHID binary compilation (prevents parallel compilations). */
   private ensureIndigoHIDBinaryPromise: Promise<string> | null = null;
+
+  /** Persistent IndigoHID daemon processes keyed by device UDID. */
+  private readonly indigoDaemons = new Map<string, IndigoDaemon>();
+
+  /**
+   * In-flight start promises keyed by device UDID.
+   * Prevents double-spawning when multiple callers call `ensureIndigoDaemon`
+   * concurrently before the daemon has been stored in `indigoDaemons`.
+   */
+  private readonly indigoDaemonStarting = new Map<string, Promise<IndigoDaemon>>();
 
   // -------------------------------------------------------------------------
   // Input binary management
@@ -1841,6 +2067,280 @@ export class IOSSimulatorService {
       });
     }
     return this.ensureIndigoHIDBinaryPromise;
+  }
+
+  // -------------------------------------------------------------------------
+  // IndigoDaemon management
+  // -------------------------------------------------------------------------
+
+  /**
+   * Ensure a persistent IndigoHID daemon is running for the given device UDID.
+   * Uses `indigoDaemonStarting` to deduplicate concurrent startup attempts —
+   * only one `startIndigoDaemon` call will be in-flight per UDID at a time.
+   *
+   * @param udid - The device UDID to start/reuse a daemon for.
+   * @returns The running, ready `IndigoDaemon` handle.
+   */
+  private async ensureIndigoDaemon(udid: string): Promise<IndigoDaemon> {
+    // Fast path: daemon already running and ready.
+    const existing = this.indigoDaemons.get(udid);
+    if (existing) {
+      if (existing.ready) return existing;
+      await existing.readyPromise;
+      return existing;
+    }
+
+    // Deduplicate concurrent startup attempts.
+    const inFlight = this.indigoDaemonStarting.get(udid);
+    if (inFlight) return inFlight;
+
+    const startPromise = this.startIndigoDaemon(udid).finally(() => {
+      this.indigoDaemonStarting.delete(udid);
+    });
+    this.indigoDaemonStarting.set(udid, startPromise);
+    return startPromise;
+  }
+
+  /**
+   * Compile the IndigoHID binary (if needed), spawn a new daemon process for
+   * the given UDID, wire up all event handlers, and wait for the ready signal.
+   *
+   * This method should only be called from `ensureIndigoDaemon` — never
+   * directly — so that concurrent callers share the same in-flight promise.
+   *
+   * @param udid - The device UDID to spawn a daemon for.
+   * @returns The running, ready `IndigoDaemon` handle.
+   */
+  private async startIndigoDaemon(udid: string): Promise<IndigoDaemon> {
+    // Compile the binary first (idempotent — caches after first compile).
+    const binaryPath = await this.ensureIndigoHIDBinary();
+
+    log(`Spawning IndigoHID daemon for device ${udid}`);
+
+    const child = spawn(binaryPath, [udid], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    // Suppress stdin pipe errors — write errors are handled via the write callback.
+    child.stdin?.on('error', (err) => {
+      warn(`IndigoHID daemon (${udid}) stdin error: ${err.message}`);
+    });
+
+    // Create the daemon record upfront so concurrent callers share the same
+    // readyPromise and don't spawn duplicate processes.
+    let resolveReady!: () => void;
+    let rejectReady!: (err: Error) => void;
+
+    const readyPromise = new Promise<void>((res, rej) => {
+      resolveReady = res;
+      rejectReady = rej;
+    });
+
+    // Guard so 'error' and 'exit' events can both fire without double-settling.
+    let readySettled = false;
+    const safeResolveReady = (): void => {
+      if (readySettled) return;
+      readySettled = true;
+      resolveReady();
+    };
+    const safeRejectReady = (err: Error): void => {
+      if (readySettled) return;
+      readySettled = true;
+      rejectReady(err);
+    };
+
+    const daemon: IndigoDaemon = {
+      process: child,
+      readyPromise,
+      ready: false,
+      pendingRequests: new Map(),
+      requestCounter: 0,
+      stdoutBuffer: '',
+    };
+
+    // Store immediately so concurrent `ensureIndigoDaemon` callers wait on
+    // the same readyPromise rather than spawning a second process.
+    this.indigoDaemons.set(udid, daemon);
+
+    /** Maximum number of bytes to keep in `stdoutBuffer` before truncating. */
+    const MAX_STDOUT_BUFFER = 64 * 1024; // 64 KB
+
+    // -------------------------------------------------------------------------
+    // stdout — newline-delimited JSON protocol
+    // -------------------------------------------------------------------------
+    child.stdout?.on('data', (chunk: Buffer) => {
+      daemon.stdoutBuffer += chunk.toString();
+
+      // Cap buffer to prevent unbounded growth on crash dumps or runaway output.
+      if (daemon.stdoutBuffer.length > MAX_STDOUT_BUFFER) {
+        warn(`IndigoHID daemon (${udid}): stdout buffer overflow — truncating`);
+        daemon.stdoutBuffer = daemon.stdoutBuffer.slice(-MAX_STDOUT_BUFFER / 2);
+      }
+
+      // Process all complete lines in the buffer.
+      let newlineIdx: number;
+      while ((newlineIdx = daemon.stdoutBuffer.indexOf('\n')) !== -1) {
+        const line = daemon.stdoutBuffer.slice(0, newlineIdx).trim();
+        daemon.stdoutBuffer = daemon.stdoutBuffer.slice(newlineIdx + 1);
+
+        if (!line) continue;
+
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(line) as Record<string, unknown>;
+        } catch {
+          warn(`IndigoHID daemon (${udid}): invalid JSON on stdout: ${line}`);
+          continue;
+        }
+
+        if (!daemon.ready) {
+          // Expect the first message to be the ready signal.
+          if (parsed['ready'] === true) {
+            daemon.ready = true;
+            log(`IndigoHID daemon ready for device ${udid}`);
+            safeResolveReady();
+          } else {
+            const errMsg = typeof parsed['error'] === 'string'
+              ? parsed['error']
+              : 'IndigoHID daemon failed to start';
+            warn(`IndigoHID daemon (${udid}): start-up failed: ${errMsg}`);
+            this.indigoDaemons.delete(udid);
+            safeRejectReady(new Error(errMsg));
+          }
+        } else {
+          // Subsequent messages are command responses — resolve/reject pending.
+          const id = typeof parsed['id'] === 'string' ? parsed['id'] : null;
+          if (id === null) {
+            warn(`IndigoHID daemon (${udid}): response missing id: ${line}`);
+            continue;
+          }
+          const pending = daemon.pendingRequests.get(id);
+          if (!pending) {
+            warn(`IndigoHID daemon (${udid}): no pending request for id=${id}`);
+            continue;
+          }
+          daemon.pendingRequests.delete(id);
+          clearTimeout(pending.timer);
+
+          if (parsed['ok'] === true) {
+            pending.resolve();
+          } else {
+            const errMsg = typeof parsed['error'] === 'string'
+              ? parsed['error']
+              : 'IndigoHID command failed';
+            pending.reject(new Error(errMsg));
+          }
+        }
+      }
+    });
+
+    // -------------------------------------------------------------------------
+    // stderr — forward diagnostics as warnings
+    // -------------------------------------------------------------------------
+    child.stderr?.on('data', (chunk: Buffer) => {
+      const text = chunk.toString().trim();
+      if (text) warn(`IndigoHID daemon (${udid}) stderr: ${text}`);
+    });
+
+    // -------------------------------------------------------------------------
+    // process error — e.g. binary not found / permission denied
+    // -------------------------------------------------------------------------
+    child.on('error', (err: Error) => {
+      warn(`IndigoHID daemon (${udid}) process error: ${err.message}`);
+      this.indigoDaemons.delete(udid);
+      safeRejectReady(new Error(`IndigoHID daemon process error: ${err.message}`));
+      // Reject all in-flight requests.
+      for (const [, pending] of daemon.pendingRequests) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error(`IndigoHID daemon process error: ${err.message}`));
+      }
+      daemon.pendingRequests.clear();
+    });
+
+    // -------------------------------------------------------------------------
+    // process exit — clean up and reject in-flight requests
+    // -------------------------------------------------------------------------
+    child.on('exit', (code: number | null, signal: string | null) => {
+      const reason = signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`;
+      warn(`IndigoHID daemon (${udid}) exited unexpectedly (${reason})`);
+      this.indigoDaemons.delete(udid);
+      safeRejectReady(new Error(`IndigoHID daemon exited before ready (${reason})`));
+      // Reject all in-flight requests so callers don't hang.
+      for (const [, pending] of daemon.pendingRequests) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error(`IndigoHID daemon exited (${reason})`));
+      }
+      daemon.pendingRequests.clear();
+    });
+
+    // Wait for the daemon to signal readiness before returning.
+    await readyPromise;
+    return daemon;
+  }
+
+  /**
+   * Send a JSON command to the IndigoHID daemon for the given device and wait
+   * for a success response. Spawns the daemon if it is not yet running.
+   *
+   * @param udid      - The device UDID.
+   * @param command   - Command payload (without the `id` field — added internally).
+   * @param timeoutMs - How long to wait for a response before rejecting (default 5 000 ms).
+   */
+  private async sendIndigoCommand(
+    udid: string,
+    command: Record<string, unknown>,
+    timeoutMs = 5_000,
+  ): Promise<void> {
+    const daemon = await this.ensureIndigoDaemon(udid);
+
+    // Guard: verify the daemon is still registered — it may have exited between
+    // ensureIndigoDaemon returning and this point (M4).
+    if (!this.indigoDaemons.has(udid)) {
+      throw new Error(`IndigoHID daemon for ${udid} exited during startup`);
+    }
+
+    const id = String(++daemon.requestCounter);
+
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        daemon.pendingRequests.delete(id);
+        reject(new Error(`IndigoHID command timed out (id=${id}, cmd=${String(command['cmd'])})`));
+      }, timeoutMs);
+
+      daemon.pendingRequests.set(id, { resolve, reject, timer });
+
+      // Guard: if the process is already dead, reject immediately (H3).
+      if (daemon.process.killed || daemon.process.exitCode !== null) {
+        clearTimeout(timer);
+        daemon.pendingRequests.delete(id);
+        reject(new Error(`IndigoHID daemon for ${udid} is no longer running`));
+        return;
+      }
+
+      // Guard: stdin must be writable (L2).
+      if (!daemon.process.stdin) {
+        clearTimeout(timer);
+        daemon.pendingRequests.delete(id);
+        reject(new Error(`IndigoHID daemon for ${udid}: stdin is null`));
+        return;
+      }
+
+      const payload = JSON.stringify({ id, ...command }) + '\n';
+
+      try {
+        daemon.process.stdin.write(payload, (err) => {
+          if (err) {
+            clearTimeout(timer);
+            daemon.pendingRequests.delete(id);
+            reject(new Error(`IndigoHID stdin write failed: ${err.message}`));
+          }
+        });
+      } catch (err: unknown) {
+        clearTimeout(timer);
+        daemon.pendingRequests.delete(id);
+        reject(new Error(`IndigoHID stdin write threw: ${String(err)}`));
+      }
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -2203,11 +2703,7 @@ export class IOSSimulatorService {
   ): Promise<void> {
     log(`Pressing button "${button}" on device ${udid}`);
 
-    const binary = await this.ensureIndigoHIDBinary();
-
-    // IndigoHID button command: wms-indigo-hid <udid> button <buttonName>
-    // Supported buttons: home, lock, volumeUp, volumeDown
-    await exec(binary, [udid, 'button', button], { timeout: 5_000 });
+    await this.sendIndigoCommand(udid, { cmd: 'button', name: button });
 
     log(`Button "${button}" pressed on device ${udid}`);
   }
@@ -2458,8 +2954,7 @@ export class IOSSimulatorService {
   async sendText(udid: string, text: string): Promise<void> {
     log(`Sending text to device ${udid}: "${text.substring(0, 50)}${text.length > 50 ? '…' : ''}"`);
 
-    const binary = await this.ensureIndigoHIDBinary();
-    await exec(binary, [udid, 'type', text], { timeout: 10_000 });
+    await this.sendIndigoCommand(udid, { cmd: 'type', text }, 10_000);
     log(`Text sent to device ${udid}`);
   }
 
@@ -2478,8 +2973,7 @@ export class IOSSimulatorService {
   async sendTap(udid: string, normX: number, normY: number): Promise<void> {
     log(`Sending tap to device ${udid} at normalised (${normX.toFixed(3)}, ${normY.toFixed(3)})`);
 
-    const binary = await this.ensureIndigoHIDBinary();
-    await exec(binary, [udid, 'tap', String(normX), String(normY)], { timeout: 5_000 });
+    await this.sendIndigoCommand(udid, { cmd: 'tap', x: normX, y: normY });
     log(`Tap sent to device ${udid} at (${normX.toFixed(3)}, ${normY.toFixed(3)})`);
   }
 
@@ -2514,13 +3008,14 @@ export class IOSSimulatorService {
 
     const steps = Math.max(5, Math.round(durationMs / 30));
 
-    const binary = await this.ensureIndigoHIDBinary();
-    await exec(binary, [
-      udid, 'swipe',
-      String(normX1), String(normY1),
-      String(normX2), String(normY2),
-      String(steps), String(durationMs),
-    ], { timeout: 10_000 });
+    const swipeTimeoutMs = Math.max(10_000, durationMs + 5_000);
+    await this.sendIndigoCommand(udid, {
+      cmd: 'swipe',
+      x1: normX1, y1: normY1,
+      x2: normX2, y2: normY2,
+      steps,
+      durationMs,
+    }, swipeTimeoutMs);
     log(`Swipe sent to device ${udid} from (${normX1}, ${normY1}) to (${normX2}, ${normY2})`);
   }
 
@@ -2544,6 +3039,9 @@ export class IOSSimulatorService {
   async sendKeyEvent(udid: string, key: string, code: string): Promise<void> {
     // Map browser KeyboardEvent.key names to IndigoHID key names.
     // IndigoHID's kUSBHIDUsageCodes table accepts these names directly.
+    // NOTE: Space (' ') is intentionally NOT mapped here — it falls through to
+    // the single-character path below, which sends ' ' directly. The Swift HID
+    // table has `" ": 0x2C` (the space character), not `"Space"`.
     const specialKeyMap: Record<string, string> = {
       'Enter':      'Enter',
       'Backspace':  'Backspace',
@@ -2554,7 +3052,6 @@ export class IOSSimulatorService {
       'ArrowDown':  'ArrowDown',
       'ArrowLeft':  'ArrowLeft',
       'ArrowRight': 'ArrowRight',
-      ' ':          'Space',
       'Home':       'Home',
       'End':        'End',
       'PageUp':     'PageUp',
@@ -2565,16 +3062,47 @@ export class IOSSimulatorService {
 
     if (indigoKeyName !== undefined) {
       // Special key — use the IndigoHID 'key' command
-      const binary = await this.ensureIndigoHIDBinary();
-      await exec(binary, [udid, 'key', indigoKeyName], { timeout: 5_000 });
+      await this.sendIndigoCommand(udid, { cmd: 'key', name: indigoKeyName });
     } else if (key.length === 1) {
-      // Single printable character — use the IndigoHID 'key' command with the character
-      const binary = await this.ensureIndigoHIDBinary();
-      await exec(binary, [udid, 'key', key], { timeout: 5_000 });
+      // Single printable character (including space) — send the character directly.
+      // The Swift HID table maps single characters (e.g. ' ', 'a') by their
+      // literal value, so we pass the character as-is.
+      await this.sendIndigoCommand(udid, { cmd: 'key', name: key });
     } else {
       // Multi-character keys not in the map (Shift, Control, Alt, Meta, etc.) — ignore.
       log(`Ignoring unsupported key: "${key}" (code: "${code}")`);
       return;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // IndigoDaemon cleanup
+  // -------------------------------------------------------------------------
+
+  /**
+   * Kill the IndigoHID daemon for a specific device.
+   * All pending requests are rejected immediately.
+   *
+   * @param udid - The device UDID whose daemon should be destroyed.
+   */
+  destroyIndigoDaemon(udid: string): void {
+    const daemon = this.indigoDaemons.get(udid);
+    if (!daemon) return;
+    log(`Killing IndigoHID daemon for device ${udid}`);
+    try { daemon.process.kill('SIGTERM'); } catch { /* already dead */ }
+    for (const [, pending] of daemon.pendingRequests) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('IndigoHID daemon destroyed'));
+    }
+    daemon.pendingRequests.clear();
+    daemon.stdoutBuffer = '';
+    this.indigoDaemons.delete(udid);
+  }
+
+  /** Kill all IndigoHID daemons. Called during server shutdown. */
+  destroyAllIndigoDaemons(): void {
+    for (const udid of [...this.indigoDaemons.keys()]) {
+      this.destroyIndigoDaemon(udid);
     }
   }
 
