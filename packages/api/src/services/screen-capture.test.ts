@@ -166,7 +166,7 @@ describe('ScreenCaptureService', () => {
     // Default: binary already compiled (access resolves) — skips compilation.
     mockAccess.mockResolvedValue(undefined);
     // Default: version sidecar file returns the current version — skips recompilation.
-    mockReadFile.mockResolvedValue('2');
+    mockReadFile.mockResolvedValue('8');
     mockWriteFile.mockResolvedValue(undefined);
 
     // Default: spawn returns a fresh mock child process.
@@ -316,7 +316,7 @@ describe('ScreenCaptureService', () => {
       expect(mockSpawn).toHaveBeenCalledWith(
         expect.stringContaining('wms-ios-capture-stream'),
         ['--device-name', 'wms-session-test', '--fps', '20'],
-        expect.objectContaining({ stdio: ['ignore', 'pipe', 'pipe'] }),
+        expect.objectContaining({ stdio: ['pipe', 'pipe', 'pipe'] }),
       );
     });
 
@@ -475,7 +475,7 @@ describe('ScreenCaptureService', () => {
       // Version file written after successful compilation.
       expect(mockWriteFile).toHaveBeenCalledWith(
         expect.stringContaining('wms-ios-capture-stream.ver'),
-        '2',
+        '8',
         'utf8',
       );
     });
@@ -508,7 +508,7 @@ describe('ScreenCaptureService', () => {
       // Version file written with new version.
       expect(mockWriteFile).toHaveBeenCalledWith(
         expect.stringContaining('wms-ios-capture-stream.ver'),
-        '2',
+        '8',
         'utf8',
       );
     });
@@ -528,7 +528,7 @@ describe('ScreenCaptureService', () => {
       // Assert — version sidecar written after compilation.
       expect(mockWriteFile).toHaveBeenCalledWith(
         expect.stringContaining('wms-ios-capture-stream.ver'),
-        '2',
+        '8',
         'utf8',
       );
     });
@@ -904,6 +904,7 @@ describe('ScreenCaptureService', () => {
         await Promise.resolve();
         await Promise.resolve();
         await Promise.resolve();
+        await Promise.resolve();
 
         const errorPromise = waitForEvent(emitter, 'error', 15_000);
 
@@ -938,6 +939,7 @@ describe('ScreenCaptureService', () => {
         const emitter = service.startCapture(sessionId, 'ios', 'UDID-CRASH-CLEANUP');
 
         // Flush promise chain so the first process is spawned.
+        await Promise.resolve();
         await Promise.resolve();
         await Promise.resolve();
         await Promise.resolve();
@@ -976,16 +978,19 @@ describe('ScreenCaptureService', () => {
         await Promise.resolve();
         await Promise.resolve();
         await Promise.resolve();
+        await Promise.resolve();
 
         const errorPromise = waitForEvent(emitter, 'error', 15_000);
 
         // Act — fire 'error' on each spawned process, advancing fake timers between
         // each attempt so the 1000ms restart delay fires.
         const spawnError = new Error('ENOENT: spawn failed');
-        for (let i = 0; i <= MAX_RESTARTS; i++) {
-          mockProcesses[i]!.emit('error', spawnError);
+        mockProcesses[0]!.emit('error', spawnError);
+        for (let i = 1; i <= MAX_RESTARTS; i++) {
           await vi.advanceTimersByTimeAsync(1100);
+          mockProcesses[i]!.emit('error', spawnError);
         }
+        await vi.advanceTimersByTimeAsync(1100);
 
         const error = await errorPromise;
 
@@ -1013,6 +1018,7 @@ describe('ScreenCaptureService', () => {
         const emitter = service.startCapture(sessionId, 'ios', 'UDID-DOUBLE');
 
         // Flush promise chain so the first process is spawned.
+        await Promise.resolve();
         await Promise.resolve();
         await Promise.resolve();
         await Promise.resolve();
@@ -1072,6 +1078,396 @@ describe('ScreenCaptureService', () => {
 
       service.stopCapture('count-b');
       expect(service.getActiveCount()).toBe(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // H.264 capture pipeline — parseH264Buffer
+  // -------------------------------------------------------------------------
+
+  /**
+   * Build a Buffer containing a single H.264 frame packet in the binary protocol format.
+   *
+   * Protocol: [4B BE uint32 payload-length][1B flags][8B BE uint64 timestamp_us][NALU bytes]
+   *
+   * The payload-length covers flags (1) + timestamp (8) + NALU data — NOT the 4-byte
+   * length-prefix itself.
+   */
+  function buildH264FramePacket(naluData: Buffer, isKeyframe: boolean, timestampUs: bigint): Buffer {
+    const payloadLength = 1 + 8 + naluData.length; // flags + timestamp + nalu data
+    const header = Buffer.alloc(4 + 1 + 8);         // length prefix + flags + timestamp
+    header.writeUInt32BE(payloadLength, 0);
+    header[4] = isKeyframe ? 0x01 : 0x00;
+    header.writeBigUInt64BE(timestampUs, 5);
+    return Buffer.concat([header, naluData]);
+  }
+
+  describe('H.264 capture pipeline', () => {
+    it('emits nalu events for H.264 captures via persistent capture process', async () => {
+      // Arrange — SPS NAL unit in Annex B format (nal_unit_type=0x67)
+      const naluData = Buffer.from([0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1f]);
+      const timestampUs = 5000000n; // 5 seconds in µs
+      const packet = buildH264FramePacket(naluData, true, timestampUs);
+
+      const mockProcess = makeMockChildProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      const sessionId = 'session-h264-nalu';
+      const emitter = service.startCapture(sessionId, 'ios', 'UDID-H264', 30, 'iPhone 15', 'h264');
+
+      // Wait for ensureCaptureBinaryCompiled → startIOSCaptureProcess to run.
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      // Register the 'nalu' listener BEFORE pushing to stdout (event fires synchronously)
+      const naluPromise = waitForEvent(emitter, 'nalu');
+
+      // Simulate the capture process emitting an H.264 frame on stdout.
+      mockProcess.stdout.push(packet);
+
+      const frame = await naluPromise;
+      service.stopCapture(sessionId);
+
+      // Assert — the nalu event payload contains the correct NaluFrame fields
+      expect(frame).toBeDefined();
+      const naluFrame = frame as { naluData: Buffer; isKeyframe: boolean; timestampUs: bigint };
+      expect(Buffer.isBuffer(naluFrame.naluData)).toBe(true);
+      expect(naluFrame.naluData.equals(naluData)).toBe(true);
+      expect(naluFrame.isKeyframe).toBe(true);
+      expect(naluFrame.timestampUs).toBe(timestampUs);
+    });
+
+    it('does NOT emit frame events for H.264 captures — only nalu events', async () => {
+      // Arrange — H.264 mode must use 'nalu' not 'frame'
+      const naluData = Buffer.from([0x00, 0x00, 0x00, 0x01, 0x65, 0x88]); // IDR slice
+      const packet = buildH264FramePacket(naluData, true, 1000000n);
+
+      const mockProcess = makeMockChildProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      const sessionId = 'session-h264-no-frame';
+      const emitter = service.startCapture(sessionId, 'ios', 'UDID-H264-NF', 30, 'iPhone 15', 'h264');
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      let frameFired = false;
+      emitter.on('frame', () => { frameFired = true; });
+
+      const naluPromise = waitForEvent(emitter, 'nalu');
+      mockProcess.stdout.push(packet);
+      await naluPromise;
+
+      service.stopCapture(sessionId);
+
+      // Assert — no 'frame' event was emitted
+      expect(frameFired).toBe(false);
+    });
+
+    it('correctly parses keyframe flag — true when bit 0 of flags byte is set', async () => {
+      // Arrange — flags byte = 0x01
+      const naluData = Buffer.from([0x00, 0x00, 0x00, 0x01, 0x65]); // IDR NAL type
+      const packet = buildH264FramePacket(naluData, true, 1000n);
+
+      const mockProcess = makeMockChildProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      const sessionId = 'session-h264-keyframe-true';
+      const emitter = service.startCapture(sessionId, 'ios', 'UDID-KF-TRUE', 30, 'Test', 'h264');
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const naluPromise = waitForEvent(emitter, 'nalu');
+      mockProcess.stdout.push(packet);
+      const frame = (await naluPromise) as { isKeyframe: boolean };
+      service.stopCapture(sessionId);
+
+      // Assert
+      expect(frame.isKeyframe).toBe(true);
+    });
+
+    it('correctly parses keyframe flag — false when bit 0 of flags byte is clear', async () => {
+      // Arrange — flags byte = 0x00 (non-keyframe P-frame)
+      const naluData = Buffer.from([0x00, 0x00, 0x00, 0x01, 0x41]); // non-IDR NAL type
+      const packet = buildH264FramePacket(naluData, false, 2000n);
+
+      const mockProcess = makeMockChildProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      const sessionId = 'session-h264-keyframe-false';
+      const emitter = service.startCapture(sessionId, 'ios', 'UDID-KF-FALSE', 30, 'Test', 'h264');
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const naluPromise = waitForEvent(emitter, 'nalu');
+      mockProcess.stdout.push(packet);
+      const frame = (await naluPromise) as { isKeyframe: boolean };
+      service.stopCapture(sessionId);
+
+      // Assert
+      expect(frame.isKeyframe).toBe(false);
+    });
+
+    it('correctly parses 64-bit timestamps beyond 32-bit range', async () => {
+      // Arrange — 123456789012345 µs exceeds 32-bit max (~4.29 billion)
+      const timestampUs = 123456789012345n;
+      const naluData = Buffer.from([0x00, 0x00, 0x00, 0x01, 0x41]);
+      const packet = buildH264FramePacket(naluData, false, timestampUs);
+
+      const mockProcess = makeMockChildProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      const sessionId = 'session-h264-timestamp';
+      const emitter = service.startCapture(sessionId, 'ios', 'UDID-TS', 30, 'Test', 'h264');
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const naluPromise = waitForEvent(emitter, 'nalu');
+      mockProcess.stdout.push(packet);
+      const frame = (await naluPromise) as { timestampUs: bigint };
+      service.stopCapture(sessionId);
+
+      // Assert — the full 64-bit bigint is correctly reconstructed from two 32-bit reads
+      expect(frame.timestampUs).toBe(timestampUs);
+    });
+
+    it('correctly parses a timestamp of zero', async () => {
+      // Arrange — edge case: timestamp = 0n
+      const naluData = Buffer.from([0x00, 0x00, 0x00, 0x01, 0x67]);
+      const packet = buildH264FramePacket(naluData, true, 0n);
+
+      const mockProcess = makeMockChildProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      const sessionId = 'session-h264-ts-zero';
+      const emitter = service.startCapture(sessionId, 'ios', 'UDID-TS-0', 30, 'Test', 'h264');
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const naluPromise = waitForEvent(emitter, 'nalu');
+      mockProcess.stdout.push(packet);
+      const frame = (await naluPromise) as { timestampUs: bigint };
+      service.stopCapture(sessionId);
+
+      // Assert
+      expect(frame.timestampUs).toBe(0n);
+    });
+
+    it('handles split H.264 packet across multiple stdout chunks', async () => {
+      // Arrange — build a full packet and split it at a mid-packet boundary
+      const innerNaluBytes = Buffer.alloc(50, 0xab);
+      const naluData = Buffer.concat([Buffer.from([0x00, 0x00, 0x00, 0x01]), innerNaluBytes]);
+      const fullPacket = buildH264FramePacket(naluData, false, 99999n);
+
+      // Split at byte 7: inside the 13-byte header (4 length + 1 flags + 8 timestamp)
+      const chunk1 = fullPacket.subarray(0, 7);
+      const chunk2 = fullPacket.subarray(7);
+
+      const mockProcess = makeMockChildProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      const sessionId = 'session-h264-split';
+      const emitter = service.startCapture(sessionId, 'ios', 'UDID-SPLIT-H264', 30, 'Test', 'h264');
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const naluPromise = waitForEvent(emitter, 'nalu');
+
+      // Push two chunks separately — service must buffer and reassemble
+      mockProcess.stdout.push(chunk1);
+      mockProcess.stdout.push(chunk2);
+
+      const frame = await naluPromise;
+      service.stopCapture(sessionId);
+
+      // Assert — exactly one complete nalu event with the correct reassembled data
+      const naluFrame = frame as { naluData: Buffer; isKeyframe: boolean; timestampUs: bigint };
+      expect(naluFrame.naluData.equals(naluData)).toBe(true);
+      expect(naluFrame.isKeyframe).toBe(false);
+      expect(naluFrame.timestampUs).toBe(99999n);
+    });
+
+    it('handles H.264 packet split within the 4-byte length prefix', async () => {
+      // Arrange — split right after the first 2 bytes (inside the length field)
+      const naluData = Buffer.from([0x00, 0x00, 0x00, 0x01, 0x67, 0x42]);
+      const fullPacket = buildH264FramePacket(naluData, true, 1234n);
+
+      const chunk1 = fullPacket.subarray(0, 2);  // 2 bytes of the 4-byte length
+      const chunk2 = fullPacket.subarray(2);     // rest: remaining length + flags + ts + nalu
+
+      const mockProcess = makeMockChildProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      const sessionId = 'session-h264-split-header';
+      const emitter = service.startCapture(sessionId, 'ios', 'UDID-SPLIT-HDR', 30, 'Test', 'h264');
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const naluPromise = waitForEvent(emitter, 'nalu');
+      mockProcess.stdout.push(chunk1);
+      mockProcess.stdout.push(chunk2);
+
+      const frame = await naluPromise;
+      service.stopCapture(sessionId);
+
+      // Assert
+      const naluFrame = frame as { naluData: Buffer; timestampUs: bigint };
+      expect(naluFrame.naluData.equals(naluData)).toBe(true);
+      expect(naluFrame.timestampUs).toBe(1234n);
+    });
+
+    it('parses multiple H.264 frames from a single stdout chunk', async () => {
+      // Arrange — build 3 separate H.264 packets and concatenate them into one chunk
+      const nalu1 = Buffer.from([0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1f]); // SPS
+      const nalu2 = Buffer.from([0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x38, 0x80]); // PPS
+      const nalu3 = Buffer.from([0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x00]); // IDR
+
+      const combined = Buffer.concat([
+        buildH264FramePacket(nalu1, true, 1000n),
+        buildH264FramePacket(nalu2, false, 2000n),
+        buildH264FramePacket(nalu3, false, 3000n),
+      ]);
+
+      const mockProcess = makeMockChildProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      const sessionId = 'session-h264-multi';
+      const emitter = service.startCapture(sessionId, 'ios', 'UDID-MULTI-H264', 30, 'Test', 'h264');
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const receivedFrames: Array<{ naluData: Buffer; isKeyframe: boolean; timestampUs: bigint }> = [];
+      emitter.on('nalu', (f: unknown) => {
+        receivedFrames.push(f as { naluData: Buffer; isKeyframe: boolean; timestampUs: bigint });
+      });
+
+      // Act — push all 3 packets in a single stdout chunk
+      mockProcess.stdout.push(combined);
+
+      // Give the event loop a tick to flush all synchronous handlers
+      await new Promise(resolve => setTimeout(resolve, 10));
+      service.stopCapture(sessionId);
+
+      // Assert — all 3 frames parsed and emitted as separate nalu events
+      expect(receivedFrames.length).toBe(3);
+      expect(receivedFrames[0]!.naluData.equals(nalu1)).toBe(true);
+      expect(receivedFrames[0]!.isKeyframe).toBe(true);
+      expect(receivedFrames[0]!.timestampUs).toBe(1000n);
+      expect(receivedFrames[1]!.naluData.equals(nalu2)).toBe(true);
+      expect(receivedFrames[1]!.isKeyframe).toBe(false);
+      expect(receivedFrames[1]!.timestampUs).toBe(2000n);
+      expect(receivedFrames[2]!.naluData.equals(nalu3)).toBe(true);
+      expect(receivedFrames[2]!.isKeyframe).toBe(false);
+      expect(receivedFrames[2]!.timestampUs).toBe(3000n);
+    });
+
+    it('spawns the capture binary with --format h264 args when captureFormat is h264', async () => {
+      // Arrange
+      const mockProcess = makeMockChildProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      // Act — start capture explicitly with the h264 format
+      service.startCapture('session-h264-spawn-args', 'ios', 'UDID-H264-ARGS', 30, 'Test Device', 'h264');
+
+      // Yield so the promise chain resolves
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      // Assert — spawn was called with '--format' and 'h264' in the args array
+      expect(mockSpawn).toHaveBeenCalledWith(
+        expect.stringContaining('wms-ios-capture-stream'),
+        expect.arrayContaining(['--format', 'h264']),
+        expect.any(Object),
+      );
+    });
+
+    it('does NOT pass --format flag when captureFormat is jpeg', async () => {
+      // Arrange
+      const mockProcess = makeMockChildProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      // Act — start capture with the default jpeg format
+      service.startCapture('session-jpeg-no-flag', 'ios', 'UDID-JPEG-ARGS', 30, 'Test Device', 'jpeg');
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      // Assert — spawn args must NOT include 'h264'
+      const spawnArgs = mockSpawn.mock.calls[0]?.[1] as string[] | undefined;
+      expect(spawnArgs).toBeDefined();
+      expect(spawnArgs).not.toContain('h264');
+    });
+
+    it('sends K\\n to stdin when requestKeyframe is called', async () => {
+      // Arrange — spy on stdin.write to capture what is written
+      const writtenChunks: string[] = [];
+      const mockProcess = makeMockChildProcess();
+      vi.spyOn(mockProcess.stdin, 'write').mockImplementation((chunk: unknown) => {
+        writtenChunks.push(String(chunk));
+        return true;
+      });
+
+      mockSpawn.mockReturnValue(mockProcess);
+
+      const sessionId = 'session-keyframe-request';
+      service.startCapture(sessionId, 'ios', 'UDID-KF-REQ', 30, 'Test Device', 'h264');
+
+      // Wait for the process to be spawned so captureProcess is set on the session
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      // Act — request a keyframe
+      service.requestKeyframe(sessionId);
+
+      service.stopCapture(sessionId);
+
+      // Assert — 'K\n' was written to stdin
+      expect(writtenChunks).toContain('K\n');
+    });
+
+    it('requestKeyframe is a no-op when no capture is running for that sessionId', () => {
+      // Act & Assert — must not throw even with unknown sessionId
+      expect(() => service.requestKeyframe('nonexistent-session-h264')).not.toThrow();
+    });
+
+    it('does not emit nalu events after stopCapture is called', async () => {
+      // Arrange
+      const naluData = Buffer.from([0x00, 0x00, 0x00, 0x01, 0x67]);
+      const packet = buildH264FramePacket(naluData, true, 1000n);
+
+      const mockProcess = makeMockChildProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      const sessionId = 'session-h264-stop-no-nalu';
+      const emitter = service.startCapture(sessionId, 'ios', 'UDID-STOP-NALU', 30, 'Test', 'h264');
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      let naluCount = 0;
+      emitter.on('nalu', () => { naluCount++; });
+
+      // Stop BEFORE pushing data
+      service.stopCapture(sessionId);
+
+      // Push data after stopping — session.active is false, so no event should fire
+      mockProcess.stdout.push(packet);
+
+      // Give the event loop a tick
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      // Assert — no nalu event was emitted
+      expect(naluCount).toBe(0);
+    });
+
+    it('correctly handles large NALU payloads (> 1 KB)', async () => {
+      // Arrange — 2000-byte NALU payload tests that the parser handles large data
+      const innerPayload = Buffer.alloc(2000, 0xcc);
+      const naluData = Buffer.concat([Buffer.from([0x00, 0x00, 0x00, 0x01, 0x65]), innerPayload]);
+      const packet = buildH264FramePacket(naluData, true, 9999999999n);
+
+      const mockProcess = makeMockChildProcess();
+      mockSpawn.mockReturnValue(mockProcess);
+
+      const sessionId = 'session-h264-large';
+      const emitter = service.startCapture(sessionId, 'ios', 'UDID-LARGE', 30, 'Test', 'h264');
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const naluPromise = waitForEvent(emitter, 'nalu');
+      mockProcess.stdout.push(packet);
+
+      const frame = await naluPromise;
+      service.stopCapture(sessionId);
+
+      // Assert — all bytes are correctly transmitted through the parser
+      const naluFrame = frame as { naluData: Buffer; timestampUs: bigint };
+      expect(naluFrame.naluData.length).toBe(naluData.length);
+      expect(naluFrame.naluData.equals(naluData)).toBe(true);
+      expect(naluFrame.timestampUs).toBe(9999999999n);
     });
   });
 });

@@ -213,7 +213,7 @@ describe('IOSSimulatorService', () => {
     // both ensureInputBinary() and ensureIndigoHIDBinary() skip recompilation.
     mockReadFileSync.mockImplementation((filePath: string) => {
       if (typeof filePath === 'string' && filePath.includes('wms-indigo-hid.ver')) {
-        return '1'; // INDIGO_BINARY_VERSION
+        return '6'; // INDIGO_BINARY_VERSION (must match ios-simulator.ts constant)
       }
       return '4'; // INPUT_BINARY_VERSION
     });
@@ -1551,7 +1551,7 @@ describe('IOSSimulatorService', () => {
       mockExistsSync.mockReturnValue(true);
       mockReadFileSync.mockImplementation((filePath: string) => {
         if (typeof filePath === 'string' && filePath.includes('wms-indigo-hid.ver')) {
-          return '1';
+          return '6';
         }
         return '4';
       });

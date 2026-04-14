@@ -114,7 +114,7 @@ const CAPTURE_SWIFT_TMP_PATH = join(tmpdir(), 'wms-ios-capture-stream.swift');
 const MAX_IOS_CAPTURE_RESTARTS = 5;
 
 /** Version tag for the compiled iOS capture binary. Increment to force recompilation. */
-const CAPTURE_BINARY_VERSION = '7';
+const CAPTURE_BINARY_VERSION = '8';
 
 /** Sidecar file that stores the version of the currently-cached binary. */
 const CAPTURE_BINARY_VERSION_PATH = join(tmpdir(), 'wms-ios-capture-stream.ver');
@@ -470,7 +470,7 @@ func startCapture() async {
     // Discover the Simulator window once at startup, retrying until found.
     while retryCount < maxRetries {
         do {
-            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
             let simulatorWindows = content.windows.filter {
                 $0.owningApplication?.bundleIdentifier == "com.apple.iphonesimulator"
             }
