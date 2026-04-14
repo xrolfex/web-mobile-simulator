@@ -21,7 +21,7 @@ import {
   SimulatorButton,
 } from '../../core/types/api.types';
 import { SimulatorViewerComponent } from './simulator-viewer.component';
-import type { ConnectionState } from './simulator-viewer.component';
+import type { ConnectionState, StreamMode } from './simulator-viewer.component';
 
 /** How often (ms) to poll the session endpoint while waiting for it to become active. */
 const POLL_INTERVAL_MS = 2_000;
@@ -58,6 +58,9 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
 
   /** VNC connection state forwarded from the viewer child. */
   protected readonly vncState = signal<ConnectionState>('connecting');
+
+  /** Stream mode for the viewer — WebRTC for iOS, MJPEG for Android. */
+  protected readonly streamMode = signal<StreamMode>('mjpeg');
 
   /** Whether a stop-session request is in-flight. */
   protected readonly stopping = signal<boolean>(false);
@@ -462,6 +465,15 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
   }
 
   /**
+   * Determine the stream mode based on the session's platform.
+   * iOS uses WebRTC (H.264); Android stays on MJPEG.
+   * @param session The loaded session.
+   */
+  private determineStreamMode(session: Session): StreamMode {
+    return session.device.platform === 'ios' ? 'webrtc' : 'mjpeg';
+  }
+
+  /**
    * Upload a file to the session API and handle the response.
    * @param file The file to upload.
    */
@@ -549,6 +561,7 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
           }
 
           if (loadedSession.status === 'active' && loadedSession.streamUrl) {
+            this.streamMode.set(this.determineStreamMode(loadedSession));
             this.loading.set(false);
             this.stopPolling();
             return;
@@ -577,6 +590,7 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
         if (!response.success || !response.data) return;
         this.session.set(response.data.session);
         if (response.data.session.status === 'active' && response.data.session.streamUrl) {
+          this.streamMode.set(this.determineStreamMode(response.data.session));
           this.loading.set(false);
           this.stopPolling();
         } else if (this.isTerminalStatus(response.data.session.status)) {

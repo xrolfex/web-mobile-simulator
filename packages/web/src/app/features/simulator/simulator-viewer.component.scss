@@ -120,6 +120,20 @@
   font-family: var(--font-mono);
 }
 
+// ── Stream mode badge (WebRTC / MJPEG) ────────────────────────────────────────
+
+.stream-mode-badge {
+  font-size: 0.65rem;
+  color: var(--color-text-muted);
+  padding: 0.1rem 0.35rem;
+  background: rgba(99, 102, 241, 0.15);
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
 // ── Toolbar controls ──────────────────────────────────────────────────────────
 
 .scale-select {
@@ -244,6 +258,36 @@
   &:focus-visible {
     outline: 2px solid var(--color-accent);
     outline-offset: 2px;
+  }
+
+  &--hidden {
+    display: none;
+  }
+}
+
+// ── WebRTC video element ──────────────────────────────────────────────────────
+
+.display-video {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  cursor: pointer;
+  // Prevent browser scroll/zoom interference during drag gestures
+  touch-action: none;
+  background: transparent;
+
+  &:focus {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+
+  &--hidden {
+    display: none;
   }
 }
 

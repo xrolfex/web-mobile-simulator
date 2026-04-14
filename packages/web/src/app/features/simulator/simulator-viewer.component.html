@@ -22,6 +22,14 @@
           {{ frameWidth() }}×{{ frameHeight() }}
         </span>
       }
+      @if (connectionState() === 'connected') {
+        <span
+          class="stream-mode-badge"
+          [title]="streamMode === 'webrtc' ? 'WebRTC (H.264)' : 'MJPEG'"
+        >
+          {{ streamMode === 'webrtc' ? 'WebRTC' : 'MJPEG' }}
+        </span>
+      }
     </div>
 
     <div class="viewer-toolbar__actions">
@@ -53,9 +61,12 @@
 
   <!-- ── Canvas Container ────────────────────────────────────────────── -->
   <div class="canvas-container" aria-label="Simulator display">
+
+    <!-- MJPEG canvas — hidden in WebRTC mode -->
     <canvas
       #displayCanvas
       class="display-canvas"
+      [class.display-canvas--hidden]="streamMode === 'webrtc'"
       tabindex="0"
       (pointerdown)="onCanvasPointerDown($event)"
       (pointerup)="onCanvasPointerUp($event)"
@@ -63,6 +74,22 @@
       (keydown)="onCanvasKeyDown($event)"
       aria-label="Simulator screen — click, drag, or type to interact"
     ></canvas>
+
+    <!-- WebRTC video — hidden when not in WebRTC mode or stream not yet attached -->
+    <video
+      #displayVideo
+      class="display-video"
+      [class.display-video--hidden]="streamMode !== 'webrtc' || !remoteStream()"
+      autoplay
+      playsinline
+      muted
+      tabindex="0"
+      (pointerdown)="onCanvasPointerDown($event)"
+      (pointerup)="onCanvasPointerUp($event)"
+      (pointermove)="onCanvasPointerMove($event)"
+      (keydown)="onCanvasKeyDown($event)"
+      aria-label="Simulator screen — click, drag, or type to interact"
+    ></video>
 
     @if (connectionState() === 'connecting') {
       <div class="overlay overlay--connecting" role="status" aria-live="polite">

@@ -369,6 +369,8 @@
     @if (!loading() && !errorMessage() && isReady()) {
       <app-simulator-viewer
         [wsUrl]="session()!.streamUrl!"
+        [sessionId]="session()!.id"
+        [streamMode]="streamMode()"
         [platform]="session()!.device.platform"
         (connectionStateChange)="onVncStateChange($event)"
         (disconnectRequest)="onViewerDisconnect()"

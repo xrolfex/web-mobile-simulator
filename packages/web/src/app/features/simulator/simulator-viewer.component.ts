@@ -12,6 +12,7 @@ import {
   NgZone,
 } from '@angular/core';
 import { TitleCasePipe } from '@angular/common';
+import { WebRtcService } from '../../core/services/webrtc.service';
 
 /** Connection state of the streaming session. */
 export type ConnectionState =
@@ -24,14 +25,27 @@ export type ConnectionState =
 export type ScaleMode = 'auto' | '1x' | '0.75x' | '0.5x';
 
 /**
+ * Stream rendering mode.
+ * - `'webrtc'` – H.264 video via WebRTC (primary path, iOS preferred).
+ * - `'mjpeg'` – JPEG frames over WebSocket canvas (fallback, Android / error cases).
+ */
+export type StreamMode = 'webrtc' | 'mjpeg';
+
+/**
  * SimulatorViewerComponent
  *
- * Renders a live simulator display by receiving JPEG/PNG frames over a
- * WebSocket connection and painting them onto an HTML <canvas>.
+ * Renders a live simulator display via one of two modes:
  *
- * Touch and click events on the canvas are captured, normalized to 0–1
- * coordinates relative to the device screen dimensions, and sent back
- * through the WebSocket as JSON messages for server-side input injection.
+ * **MJPEG mode** (default): receives JPEG/PNG frames over a WebSocket and
+ * paints them onto an HTML `<canvas>`.
+ *
+ * **WebRTC mode**: uses `WebRtcService` to establish an H.264 peer connection
+ * and renders the remote `MediaStream` into a `<video>` element.
+ *
+ * Touch, pointer, and keyboard events on the active display element are
+ * captured, normalized to 0–1 coordinates, and sent back over a WebSocket
+ * (the MJPEG stream socket in MJPEG mode, a dedicated input socket in WebRTC
+ * mode) as JSON messages for server-side input injection.
  */
 @Component({
   selector: 'app-simulator-viewer',
@@ -41,8 +55,21 @@ export type ScaleMode = 'auto' | '1x' | '0.75x' | '0.5x';
   styleUrl: './simulator-viewer.component.scss',
 })
 export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
-  /** WebSocket URL to connect to (e.g. /ws/stream/<sessionId>). */
+  /** WebSocket URL to connect to (e.g. `/ws/stream/<sessionId>`). Required in both modes. */
   @Input({ required: true }) wsUrl!: string;
+
+  /**
+   * WMS session UUID used for WebRTC signaling.
+   * Must be provided when `streamMode === 'webrtc'`.
+   */
+  @Input() sessionId: string = '';
+
+  /**
+   * Which rendering path to use.
+   * - `'webrtc'` – H.264 video via `WebRtcService`; the `<canvas>` is hidden.
+   * - `'mjpeg'` – JPEG frames painted to `<canvas>` over WebSocket (default).
+   */
+  @Input() streamMode: StreamMode = 'mjpeg';
 
   /** Platform being displayed — affects UI chrome. */
   @Input() platform: 'ios' | 'android' = 'ios';
@@ -53,9 +80,17 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
   /** Emitted when the user clicks the Disconnect button. */
   @Output() disconnectRequest = new EventEmitter<void>();
 
-  /** @ViewChild reference to the canvas element. */
+  // ── ViewChild references ──────────────────────────────────────────────────
+
+  /** @ViewChild reference to the canvas element used in MJPEG mode. */
   @ViewChild('displayCanvas')
   private readonly canvasRef!: ElementRef<HTMLCanvasElement>;
+
+  /** @ViewChild reference to the video element used in WebRTC mode. */
+  @ViewChild('displayVideo')
+  private readonly videoRef!: ElementRef<HTMLVideoElement>;
+
+  // ── Public signals (template-accessible) ─────────────────────────────────
 
   /** Current connection state, exposed to the template as a signal. */
   protected readonly connectionState = signal<ConnectionState>('connecting');
@@ -73,8 +108,32 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
   protected readonly frameWidth = signal<number>(0);
   protected readonly frameHeight = signal<number>(0);
 
+  /**
+   * Mirror of `WebRtcService.remoteStream` for template binding.
+   * Set when the WebRTC stream is attached; `null` before connection and after disconnect.
+   */
+  protected readonly remoteStream = signal<MediaStream | null>(null);
+
+  // ── Private state ─────────────────────────────────────────────────────────
+
+  /**
+   * The MJPEG WebSocket.
+   * In MJPEG mode this is both the stream source and the input channel.
+   * In WebRTC mode this is `null` (a dedicated `inputWs` is used instead).
+   */
   private ws: WebSocket | null = null;
+
+  /**
+   * The WebSocket used exclusively to send JSON input events (tap, swipe, key).
+   *
+   * - In **MJPEG mode**: shares the same reference as `ws` (set inside `connect()`).
+   * - In **WebRTC mode**: a dedicated WebSocket opened to `wsUrl` so that input
+   *   commands can be forwarded even though we are not consuming the binary frame stream.
+   */
+  private inputWs: WebSocket | null = null;
+
   private readonly ngZone = inject(NgZone);
+  private readonly webRtcService = inject(WebRtcService);
 
   // FPS tracking
   private frameCount = 0;
@@ -94,11 +153,16 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
     clientY: number;
   } | null = null;
 
-  // ── Lifecycle ──────────────────────────────────────────────────────────
+  // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   ngAfterViewInit(): void {
-    this.connect();
-    // Start FPS counter
+    if (this.streamMode === 'webrtc') {
+      this.connectWebRTC();
+    } else {
+      this.connect();
+    }
+
+    // Start the per-second FPS counter (works for both modes).
     this.fpsInterval = setInterval(() => {
       this.ngZone.run(() => {
         this.fps.set(this.frameCount);
@@ -115,14 +179,18 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
     }
   }
 
-  // ── Template event handlers ────────────────────────────────────────────
+  // ── Template event handlers ────────────────────────────────────────────────
 
   /** Tear down the existing connection and open a fresh one. */
   protected reconnect(): void {
     this.disconnect();
     this.connectionState.set('connecting');
     this.errorMessage.set('');
-    this.connect();
+    if (this.streamMode === 'webrtc') {
+      this.connectWebRTC();
+    } else {
+      this.connect();
+    }
   }
 
   /** Disconnect and emit the disconnect request event. */
@@ -131,7 +199,7 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
     this.disconnectRequest.emit();
   }
 
-  /** Handle scale-mode selection from the toolbar <select>. */
+  /** Handle scale-mode selection from the toolbar `<select>`. */
   protected onScaleModeChange(event: Event): void {
     const select = event.target as HTMLSelectElement;
     const mode = select.value as ScaleMode;
@@ -140,66 +208,37 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
   }
 
   /**
-   * Handle click/tap on the canvas — forward as a touch event to the server.
-   * Normalizes coordinates to 0–1 range relative to the device screen.
-   */
-  private onCanvasClick(event: MouseEvent | PointerEvent): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-
-    const canvas = this.canvasRef.nativeElement;
-    const rect = canvas.getBoundingClientRect();
-
-    // Calculate position relative to canvas display area
-    const displayX = event.clientX - rect.left;
-    const displayY = event.clientY - rect.top;
-
-    // Normalize to 0–1 based on the canvas display size
-    const x = displayX / rect.width;
-    const y = displayY / rect.height;
-
-    // Only send if within bounds
-    if (x >= 0 && x <= 1 && y >= 0 && y <= 1) {
-      this.ws.send(
-        JSON.stringify({
-          type: 'touch',
-          action: 'tap',
-          x,
-          y,
-          // Include raw device pixel coordinates for backends that need them
-          deviceX: Math.round(x * this.frameWidth()),
-          deviceY: Math.round(y * this.frameHeight()),
-        }),
-      );
-    }
-  }
-
-  /**
-   * Handle pointer-down on the canvas — record the drag start position and
-   * capture the pointer so subsequent events fire even outside the element.
+   * Handle pointer-down on the display element.
+   *
+   * Records the drag start position and captures the pointer so that
+   * subsequent `pointermove`/`pointerup` events fire even if the pointer
+   * leaves the element boundary.
+   *
+   * Works for both `<canvas>` (MJPEG) and `<video>` (WebRTC) elements because
+   * coordinates are derived from `event.currentTarget` rather than a hard-coded
+   * element reference.
    */
   protected onCanvasPointerDown(event: PointerEvent): void {
-    const canvas = this.canvasRef.nativeElement;
-    const rect = canvas.getBoundingClientRect();
+    const el = event.currentTarget as HTMLElement;
+    const rect = el.getBoundingClientRect();
 
     const displayX = event.clientX - rect.left;
     const displayY = event.clientY - rect.top;
 
-    // Normalize to 0–1 based on the canvas display size
     const x = displayX / rect.width;
     const y = displayY / rect.height;
 
     this.dragStart = { x, y, clientX: event.clientX, clientY: event.clientY };
 
-    // Capture pointer so pointermove/pointerup fire even if pointer leaves canvas
-    canvas.setPointerCapture(event.pointerId);
+    // Capture pointer so pointermove/pointerup fire even if pointer leaves element.
+    el.setPointerCapture(event.pointerId);
   }
 
   /**
-   * Handle pointer-up on the canvas.
+   * Handle pointer-up on the display element.
    *
-   * - If the total displacement exceeds {@link SWIPE_THRESHOLD_PX}, sends a
-   *   swipe message to the server.
-   * - Otherwise, delegates to {@link onCanvasClick} to send a tap message.
+   * - If total displacement ≥ {@link SWIPE_THRESHOLD_PX}, sends a `swipe` message.
+   * - Otherwise delegates to the tap handler.
    */
   protected onCanvasPointerUp(event: PointerEvent): void {
     if (!this.dragStart) return;
@@ -213,10 +252,11 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
 
     if (distance >= this.SWIPE_THRESHOLD_PX) {
       // Treat as a swipe
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      const ws = this.getInputWebSocket();
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
-      const canvas = this.canvasRef.nativeElement;
-      const rect = canvas.getBoundingClientRect();
+      const el = event.currentTarget as HTMLElement;
+      const rect = el.getBoundingClientRect();
 
       const endDisplayX = event.clientX - rect.left;
       const endDisplayY = event.clientY - rect.top;
@@ -224,7 +264,7 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
       const endX = endDisplayX / rect.width;
       const endY = endDisplayY / rect.height;
 
-      this.ws.send(
+      ws.send(
         JSON.stringify({
           type: 'touch',
           action: 'swipe',
@@ -239,13 +279,13 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
         }),
       );
     } else {
-      // Treat as a tap — reuse existing tap logic
-      this.onCanvasClick(event);
+      // Treat as a tap
+      this.sendTap(event);
     }
   }
 
   /**
-   * Handle pointer-move on the canvas.
+   * Handle pointer-move on the display element.
    * Prevents default browser behaviour (text selection, scroll, zoom)
    * during a drag gesture.
    */
@@ -256,18 +296,19 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
   }
 
   /**
-   * Handle keydown events on the canvas — forward as a key event to the server.
-   * Prevents default browser behavior for keys that would interfere
-   * (arrows, space, tab, etc.) while the canvas is focused.
+   * Handle keydown events on the display element — forwards a key event to
+   * the server. Prevents default browser behaviour for keys that would
+   * interfere (arrows, space, tab, etc.) while the element is focused.
    */
   protected onCanvasKeyDown(event: KeyboardEvent): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    const ws = this.getInputWebSocket();
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
     // Don't capture modifier-only presses (Shift, Ctrl, Alt, Meta alone)
     if (['Shift', 'Control', 'Alt', 'Meta'].includes(event.key)) return;
 
     // Prevent default browser behavior for keys that would scroll/navigate
-    // while the simulator canvas is focused
+    // while the simulator display element is focused.
     const preventDefaultKeys = [
       'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
       'Space', ' ', 'Tab', 'Backspace', 'Enter', 'Escape',
@@ -276,7 +317,7 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
       event.preventDefault();
     }
 
-    this.ws.send(
+    ws.send(
       JSON.stringify({
         type: 'key',
         action: 'down',
@@ -290,17 +331,189 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
     );
   }
 
-  // ── Public API ─────────────────────────────────────────────────────────
-
-  /** Programmatically focus the canvas element so keyboard events are captured. */
-  public focusCanvas(): void {
-    this.canvasRef?.nativeElement?.focus();
-  }
-
-  // ── Private helpers ────────────────────────────────────────────────────
+  // ── Public API ─────────────────────────────────────────────────────────────
 
   /**
-   * Create a WebSocket connection and wire up binary frame handling.
+   * Programmatically focus the active display element so that keyboard events
+   * are captured. Focuses the `<video>` element in WebRTC mode and the
+   * `<canvas>` element in MJPEG mode.
+   */
+  public focusCanvas(): void {
+    if (this.streamMode === 'webrtc') {
+      this.videoRef?.nativeElement?.focus();
+    } else {
+      this.canvasRef?.nativeElement?.focus();
+    }
+  }
+
+  // ── Private helpers ────────────────────────────────────────────────────────
+
+  /**
+   * Return the open WebSocket to use for sending JSON input events.
+   *
+   * - **MJPEG mode**: returns `this.ws` (the stream socket, set by `connect()`).
+   * - **WebRTC mode**: returns `this.inputWs` (dedicated input socket, set by
+   *   `connectWebRTC()`).
+   *
+   * Returns `null` if no input socket is currently available.
+   */
+  private getInputWebSocket(): WebSocket | null {
+    return this.inputWs;
+  }
+
+  /**
+   * Send a tap event at the pointer position, normalised to 0–1 coordinates.
+   *
+   * @param event - The pointer event containing the client position.
+   */
+  private sendTap(event: MouseEvent | PointerEvent): void {
+    const ws = this.getInputWebSocket();
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    const el = event.currentTarget as HTMLElement;
+    const rect = el.getBoundingClientRect();
+
+    const displayX = event.clientX - rect.left;
+    const displayY = event.clientY - rect.top;
+
+    const x = displayX / rect.width;
+    const y = displayY / rect.height;
+
+    if (x >= 0 && x <= 1 && y >= 0 && y <= 1) {
+      ws.send(
+        JSON.stringify({
+          type: 'touch',
+          action: 'tap',
+          x,
+          y,
+          deviceX: Math.round(x * this.frameWidth()),
+          deviceY: Math.round(y * this.frameHeight()),
+        }),
+      );
+    }
+  }
+
+  /**
+   * Establish the WebRTC connection.
+   *
+   * Steps:
+   * 1. Opens a dedicated input-only WebSocket to `wsUrl` for forwarding input
+   *    events (binary frames received on this socket are intentionally ignored).
+   * 2. Calls `WebRtcService.connect()` to set up the RTCPeerConnection and
+   *    perform SDP negotiation.
+   * 3. On success, attaches the remote `MediaStream` to the `<video>` element
+   *    and sets up `requestVideoFrameCallback`-based FPS counting.
+   */
+  private connectWebRTC(): void {
+    if (!this.sessionId) {
+      this.errorMessage.set('No session ID provided for WebRTC');
+      this.setConnectionState('error');
+      return;
+    }
+
+    // Open a dedicated input-only WebSocket before starting WebRTC.
+    // We intentionally do NOT set an onmessage handler — binary JPEG frames
+    // will be sent by the server briefly (until the WebRTC signaling WS
+    // takes over screen capture) but we don't need to process them.
+    this.ngZone.runOutsideAngular(() => {
+      try {
+        const inputUrl = this.resolveWsUrl();
+        this.inputWs = new WebSocket(inputUrl);
+        this.inputWs.binaryType = 'arraybuffer';
+        // Handle errors on the input socket so they don't become unhandled rejections.
+        this.inputWs.onerror = () => {
+          console.warn('[SimulatorViewer] Input WebSocket error (WebRTC mode)');
+        };
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Failed to open input WebSocket';
+        console.warn('[SimulatorViewer] Could not open input WebSocket:', message);
+        // Non-fatal — WebRTC video still works; only input will be unavailable.
+      }
+    });
+
+    this.ngZone.runOutsideAngular(() => {
+      this.webRtcService.connect(this.sessionId)
+        .then(() => {
+          this.ngZone.run(() => {
+            this.setConnectionState('connected');
+
+            // Attach stream to video element
+            const stream = this.webRtcService.remoteStream();
+            if (stream) {
+              this.remoteStream.set(stream);
+              this.attachStreamToVideo(stream);
+            }
+
+            // Focus the video element for keyboard input
+            this.videoRef?.nativeElement?.focus();
+          });
+        })
+        .catch((err: unknown) => {
+          this.ngZone.run(() => {
+            const message = err instanceof Error ? err.message : 'WebRTC connection failed';
+            console.warn('[SimulatorViewer] WebRTC connection failed:', message);
+            this.errorMessage.set(message);
+            this.setConnectionState('error');
+          });
+        });
+    });
+  }
+
+  /**
+   * Attach a remote `MediaStream` to the `<video>` element and start
+   * FPS counting via `requestVideoFrameCallback` if supported.
+   *
+   * Also listens to the `resize` event on the video element to keep
+   * `frameWidth` / `frameHeight` signals up to date.
+   *
+   * @param stream - The remote `MediaStream` from `WebRtcService`.
+   */
+  private attachStreamToVideo(stream: MediaStream): void {
+    const video = this.videoRef?.nativeElement;
+    if (!video) return;
+
+    video.srcObject = stream;
+
+    // Use requestVideoFrameCallback for FPS counting when available.
+    // This API is not yet in the TypeScript lib types, so we check at runtime
+    // and cast through `any` for the call-site.
+    if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
+      const countFrame = (): void => {
+        this.frameCount++;
+
+        // Update resolution from video dimensions on first valid frame.
+        if (video.videoWidth > 0 && this.frameWidth() === 0) {
+          this.ngZone.run(() => {
+            this.frameWidth.set(video.videoWidth);
+            this.frameHeight.set(video.videoHeight);
+            this.applyScaleMode();
+          });
+        }
+
+        // Re-register for the next frame.
+        (video as HTMLVideoElement & { requestVideoFrameCallback(cb: () => void): void })
+          .requestVideoFrameCallback(countFrame);
+      };
+
+      (video as HTMLVideoElement & { requestVideoFrameCallback(cb: () => void): void })
+        .requestVideoFrameCallback(countFrame);
+    }
+
+    // Keep resolution signals updated whenever the video track size changes.
+    video.addEventListener('resize', () => {
+      this.ngZone.run(() => {
+        if (video.videoWidth > 0) {
+          this.frameWidth.set(video.videoWidth);
+          this.frameHeight.set(video.videoHeight);
+          this.applyScaleMode();
+        }
+      });
+    });
+  }
+
+  /**
+   * Create a WebSocket connection for MJPEG streaming and wire up binary
+   * frame handling and input routing.
    */
   private connect(): void {
     const url = this.resolveWsUrl();
@@ -308,12 +521,14 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
     this.ngZone.runOutsideAngular(() => {
       try {
         this.ws = new WebSocket(url);
+        // In MJPEG mode the stream socket doubles as the input socket.
+        this.inputWs = this.ws;
         this.ws.binaryType = 'arraybuffer';
 
         this.ws.onopen = () => {
           this.ngZone.run(() => {
             this.setConnectionState('connected');
-            // Auto-focus the canvas so keyboard events are captured immediately
+            // Auto-focus the canvas so keyboard events are captured immediately.
             this.canvasRef?.nativeElement?.focus();
           });
         };
@@ -366,7 +581,9 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
 
   /**
    * Render a binary frame (JPEG/PNG) onto the canvas.
-   * Uses createImageBitmap for efficient off-main-thread decoding.
+   * Uses `createImageBitmap` for efficient off-main-thread decoding.
+   *
+   * @param data - Raw binary frame data from the WebSocket.
    */
   private renderFrame(data: ArrayBuffer): void {
     const blob = new Blob([data]); // browser auto-detects JPEG vs PNG
@@ -376,7 +593,7 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
         const canvas = this.canvasRef?.nativeElement;
         if (!canvas) return;
 
-        // Update canvas size to match frame if changed
+        // Update canvas size to match frame if changed.
         if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
           canvas.width = bitmap.width;
           canvas.height = bitmap.height;
@@ -396,18 +613,18 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
         this.frameCount++;
       })
       .catch(() => {
-        // Ignore decode errors for individual frames — next frame will come soon
+        // Ignore decode errors for individual frames — next frame will come soon.
       });
   }
 
   /**
-   * Resolve wsUrl to a fully-qualified WebSocket URL.
+   * Resolve `wsUrl` to a fully-qualified WebSocket URL.
    *
-   * If wsUrl is already an absolute WebSocket URL (ws:// or wss://) it is
-   * returned unchanged. Otherwise it is treated as a path relative to the
+   * If `wsUrl` is already an absolute WebSocket URL (`ws://` or `wss://`) it
+   * is returned unchanged. Otherwise it is treated as a path relative to the
    * current page origin and expanded using the appropriate protocol:
-   * - https: pages → wss:
-   * - http:  pages → ws:
+   * - `https:` pages → `wss:`
+   * - `http:`  pages → `ws:`
    */
   private resolveWsUrl(): string {
     if (this.wsUrl.startsWith('ws://') || this.wsUrl.startsWith('wss://')) {
@@ -418,23 +635,40 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
   }
 
   /**
-   * Close the WebSocket connection.
+   * Close all open connections (MJPEG WebSocket, input WebSocket, WebRTC peer).
    * Safe to call multiple times.
    */
   private disconnect(): void {
+    // Close the MJPEG stream WebSocket.
     if (this.ws) {
       try {
         this.ws.close();
       } catch {
-        // Ignore errors during cleanup
+        // Ignore errors during cleanup.
       }
       this.ws = null;
+    }
+
+    // Close the input-only WebSocket if it is a separate reference (WebRTC mode).
+    if (this.inputWs && this.inputWs !== this.ws) {
+      try {
+        this.inputWs.close();
+      } catch {
+        // Ignore errors during cleanup.
+      }
+    }
+    this.inputWs = null;
+
+    // Disconnect the WebRTC peer connection if active.
+    if (this.streamMode === 'webrtc') {
+      this.webRtcService.disconnect();
+      this.remoteStream.set(null);
     }
   }
 
   /**
    * Update the connection-state signal and emit the change output.
-   * @param state New connection state.
+   * @param state - New connection state.
    */
   private setConnectionState(state: ConnectionState): void {
     this.connectionState.set(state);
@@ -442,23 +676,25 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
   }
 
   /**
-   * Apply the current scale mode to the canvas container.
-   * In 'auto' mode, the canvas CSS is set to fill the container while
-   * maintaining aspect ratio via max-width/max-height (controlled in SCSS).
-   * In fixed modes (1x, 0.75x, 0.5x), a CSS transform is applied.
+   * Apply the current scale mode to the active display element (`<canvas>` or
+   * `<video>` depending on `streamMode`).
+   *
+   * In `'auto'` mode, CSS handles scaling via `max-width`/`max-height`.
+   * In fixed modes (`1x`, `0.75x`, `0.5x`), a CSS `transform: scale()` is applied.
    */
   private applyScaleMode(): void {
-    const canvas = this.canvasRef?.nativeElement;
-    if (!canvas) return;
+    const el = this.streamMode === 'webrtc'
+      ? this.videoRef?.nativeElement
+      : this.canvasRef?.nativeElement;
+    if (!el) return;
 
     const mode = this.scaleMode();
 
     if (mode === 'auto') {
-      // CSS handles scaling via max-width/max-height on the canvas
-      canvas.style.transform = '';
-      canvas.style.transformOrigin = '';
-      canvas.style.width = '';
-      canvas.style.height = '';
+      el.style.transform = '';
+      el.style.transformOrigin = '';
+      el.style.width = '';
+      el.style.height = '';
     } else {
       const scaleFactors: Record<ScaleMode, number> = {
         auto: 1,
@@ -467,8 +703,8 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
         '0.5x': 0.5,
       };
       const scale = scaleFactors[mode];
-      canvas.style.transformOrigin = 'top left';
-      canvas.style.transform = `scale(${scale})`;
+      el.style.transformOrigin = 'top left';
+      el.style.transform = `scale(${scale})`;
     }
   }
 }
