@@ -209,7 +209,14 @@ describe('IOSSimulatorService', () => {
     // Make ensureInputBinary() believe the binary is already compiled so it
     // doesn't add an extra exec('swiftc', …) call in tests that don't need it.
     mockExistsSync.mockReturnValue(true);
-    mockReadFileSync.mockReturnValue('4'); // Current version matches INPUT_BINARY_VERSION
+    // Return the correct version string for each binary's version file so that
+    // both ensureInputBinary() and ensureIndigoHIDBinary() skip recompilation.
+    mockReadFileSync.mockImplementation((filePath: string) => {
+      if (typeof filePath === 'string' && filePath.includes('wms-indigo-hid.ver')) {
+        return '1'; // INDIGO_BINARY_VERSION
+      }
+      return '4'; // INPUT_BINARY_VERSION
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -676,60 +683,60 @@ describe('IOSSimulatorService', () => {
   // -------------------------------------------------------------------------
 
   describe('pressButton(udid, button)', () => {
-    macosOnly('calls precompiled binary with shortcut cmd,shift+H for home button', async () => {
+    macosOnly('calls IndigoHID binary with [udid, button, home] for home button', async () => {
       // Arrange — pressButton does NOT call assertSimctlAvailable; only 1 exec call needed
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.pressButton('TEST-UDID', 'home');
 
-      // Assert — exec called with binary and shortcut args for home (kVK_ANSI_H = 4, cmd+shift)
+      // Assert — exec called with IndigoHID binary and button args for home
       const binaryPath = mockExec.mock.calls[0]![0] as string;
-      expect(binaryPath).toContain('wms-ios-input');
+      expect(binaryPath).toContain('wms-indigo-hid');
       const args = mockExec.mock.calls[0]![1] as string[];
-      expect(args).toEqual(['shortcut', '4', 'cmd,shift']);
+      expect(args).toEqual(['TEST-UDID', 'button', 'home']);
     });
 
-    macosOnly('calls precompiled binary with shortcut cmd+L for lock button', async () => {
+    macosOnly('calls IndigoHID binary with [udid, button, lock] for lock button', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.pressButton('TEST-UDID', 'lock');
 
-      // Assert — binary called with shortcut for Lock Screen (kVK_ANSI_L = 37, cmd)
+      // Assert — IndigoHID binary called with button command for lock
       const binaryPath = mockExec.mock.calls[0]![0] as string;
-      expect(binaryPath).toContain('wms-ios-input');
+      expect(binaryPath).toContain('wms-indigo-hid');
       const args = mockExec.mock.calls[0]![1] as string[];
-      expect(args).toEqual(['shortcut', '37', 'cmd']);
+      expect(args).toEqual(['TEST-UDID', 'button', 'lock']);
     });
 
-    macosOnly('calls precompiled binary with shortcut cmd+Up for volumeUp', async () => {
+    macosOnly('calls IndigoHID binary with [udid, button, volumeUp] for volumeUp', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.pressButton('TEST-UDID', 'volumeUp');
 
-      // Assert — binary called with shortcut for Volume Up (kVK_UpArrow = 126, cmd)
+      // Assert — IndigoHID binary called with button command for volumeUp
       const binaryPath = mockExec.mock.calls[0]![0] as string;
-      expect(binaryPath).toContain('wms-ios-input');
+      expect(binaryPath).toContain('wms-indigo-hid');
       const args = mockExec.mock.calls[0]![1] as string[];
-      expect(args).toEqual(['shortcut', '126', 'cmd']);
+      expect(args).toEqual(['TEST-UDID', 'button', 'volumeUp']);
     });
 
-    macosOnly('calls precompiled binary with shortcut cmd+Down for volumeDown', async () => {
+    macosOnly('calls IndigoHID binary with [udid, button, volumeDown] for volumeDown', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.pressButton('TEST-UDID', 'volumeDown');
 
-      // Assert — binary called with shortcut for Volume Down (kVK_DownArrow = 125, cmd)
+      // Assert — IndigoHID binary called with button command for volumeDown
       const binaryPath = mockExec.mock.calls[0]![0] as string;
-      expect(binaryPath).toContain('wms-ios-input');
+      expect(binaryPath).toContain('wms-indigo-hid');
       const args = mockExec.mock.calls[0]![1] as string[];
-      expect(args).toEqual(['shortcut', '125', 'cmd']);
+      expect(args).toEqual(['TEST-UDID', 'button', 'volumeDown']);
     });
 
     macosOnly('exec is called exactly once (no assertSimctlAvailable)', async () => {
@@ -739,22 +746,23 @@ describe('IOSSimulatorService', () => {
       // Act
       await service.pressButton('TEST-UDID', 'home');
 
-      // Assert — exactly 1 exec call: just the binary shortcut invocation
+      // Assert — exactly 1 exec call: just the IndigoHID binary button invocation
       expect(mockExec).toHaveBeenCalledTimes(1);
     });
 
-    macosOnly('uses precompiled binary with shortcut command', async () => {
+    macosOnly('uses IndigoHID binary with button command and udid as first arg', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.pressButton('TEST-UDID', 'home');
 
-      // Assert — the binary path contains 'wms-ios-input' and first arg is 'shortcut'
+      // Assert — the binary path contains 'wms-indigo-hid', first arg is udid, second is 'button'
       const binaryPath = mockExec.mock.calls[0]![0] as string;
-      expect(binaryPath).toContain('wms-ios-input');
+      expect(binaryPath).toContain('wms-indigo-hid');
       const args = mockExec.mock.calls[0]![1] as string[];
-      expect(args[0]).toBe('shortcut');
+      expect(args[0]).toBe('TEST-UDID');
+      expect(args[1]).toBe('button');
     });
 
     macosOnly('propagates exec failures as thrown errors', async () => {
@@ -1198,40 +1206,40 @@ describe('IOSSimulatorService', () => {
   // -------------------------------------------------------------------------
 
   describe('sendText(udid, text)', () => {
-    macosOnly('calls precompiled binary with type command (not xcrun simctl)', async () => {
+    macosOnly('calls IndigoHID binary with [udid, type, text] command (not xcrun simctl)', async () => {
       // Arrange — sendText does NOT call assertSimctlAvailable, so only 1 exec call needed
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendText('TEST-UDID', 'Hello World');
 
-      // Assert — first (and only) call is the precompiled binary with 'type' command
+      // Assert — first (and only) call is the IndigoHID binary with [udid, 'type', text]
       const binaryPath = mockExec.mock.calls[0]![0] as string;
-      expect(binaryPath).toContain('wms-ios-input');
+      expect(binaryPath).toContain('wms-indigo-hid');
       const args = mockExec.mock.calls[0]![1] as string[];
-      expect(args).toEqual(['type', 'Hello World']);
+      expect(args).toEqual(['TEST-UDID', 'type', 'Hello World']);
     });
 
-    macosOnly('passes the full text as a single argument to the binary type command (preserving spaces)', async () => {
+    macosOnly('passes the full text as argument after udid and type command (preserving spaces)', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendText('TEST-UDID', 'hello world test');
 
-      // Assert — the binary is called with ['type', 'hello world test']
+      // Assert — the binary is called with ['TEST-UDID', 'type', 'hello world test']
       const args = mockExec.mock.calls[0]![1] as string[];
-      expect(args).toEqual(['type', 'hello world test']);
+      expect(args).toEqual(['TEST-UDID', 'type', 'hello world test']);
     });
 
-    macosOnly('exec is called exactly once (no assertSimctlAvailable, just binary type)', async () => {
+    macosOnly('exec is called exactly once (no assertSimctlAvailable, just IndigoHID type)', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendText('TEST-UDID', 'hello');
 
-      // Assert — only 1 exec call: the binary type command
+      // Assert — only 1 exec call: the IndigoHID binary type command
       expect(mockExec).toHaveBeenCalledTimes(1);
     });
 
@@ -1244,7 +1252,7 @@ describe('IOSSimulatorService', () => {
 
       // Assert — text is passed as-is to the binary (no AppleScript escaping)
       const args = mockExec.mock.calls[0]![1] as string[];
-      expect(args).toEqual(['type', 'path\\to\\file']);
+      expect(args).toEqual(['TEST-UDID', 'type', 'path\\to\\file']);
     });
 
     macosOnly('passes text with double-quotes raw to the binary (no escaping needed)', async () => {
@@ -1256,7 +1264,7 @@ describe('IOSSimulatorService', () => {
 
       // Assert — text is passed as-is to the binary (no AppleScript escaping)
       const args = mockExec.mock.calls[0]![1] as string[];
-      expect(args).toEqual(['type', 'say "hello"']);
+      expect(args).toEqual(['TEST-UDID', 'type', 'say "hello"']);
     });
 
     macosOnly('propagates exec failures as thrown errors', async () => {
@@ -1415,109 +1423,76 @@ describe('IOSSimulatorService', () => {
   // -------------------------------------------------------------------------
 
   describe('sendTap(udid, normX, normY)', () => {
-    // Window geometry returned by binary: windowX=100, windowY=150, windowWidth=400, windowHeight=880
-    // screenX = windowX + normX * windowWidth
-    // screenY = windowY + normY * windowHeight
-    const GEO_STDOUT = '100,150,400,880';
-
-    macosOnly('calls exec exactly 2 times: geometry + swift CGEvent tap', async () => {
+    macosOnly('calls exec exactly 1 time: IndigoHID tap (no geometry lookup)', async () => {
       // Arrange
-      mockExec
-        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' }) // getSimulatorContentGeometry
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });         // swift CGEvent tap
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' }); // IndigoHID tap
 
       // Act
       await service.sendTap('TEST-UDID', 0.5, 0.5);
 
-      // Assert
-      expect(mockExec).toHaveBeenCalledTimes(2);
+      // Assert — only 1 exec call (no geometry query needed with IndigoHID)
+      expect(mockExec).toHaveBeenCalledTimes(1);
     });
 
-    macosOnly('computes correct screen coords for center point (0.5, 0.5)', async () => {
+    macosOnly('passes normalised coords directly to IndigoHID tap for center point (0.5, 0.5)', async () => {
       // Arrange
-      // screenX = 100 + 0.5 * 400 = 300
-      // screenY = 150 + 0.5 * 880 = 590
-      mockExec
-        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' })
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendTap('TEST-UDID', 0.5, 0.5);
 
-      // Assert — second exec call is the precompiled binary with computed screen coords
-      const binaryPath = mockExec.mock.calls[1]![0] as string;
-      expect(binaryPath).toContain('wms-ios-input');
-      const tapArgs = mockExec.mock.calls[1]![1] as string[];
-      expect(tapArgs).toEqual(['tap', '300', '590']);
+      // Assert — exec called with IndigoHID binary and normalised coords
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-indigo-hid');
+      const tapArgs = mockExec.mock.calls[0]![1] as string[];
+      expect(tapArgs).toEqual(['TEST-UDID', 'tap', '0.5', '0.5']);
     });
 
-    macosOnly('computes correct screen coords for top-left corner (0, 0)', async () => {
+    macosOnly('passes normalised coords directly to IndigoHID tap for top-left corner (0, 0)', async () => {
       // Arrange
-      // screenX = 100 + 0 * 400 = 100
-      // screenY = 150 + 0 * 880 = 150
-      mockExec
-        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' })
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendTap('TEST-UDID', 0, 0);
 
-      // Assert — second exec call is the precompiled binary with computed screen coords
-      const binaryPath = mockExec.mock.calls[1]![0] as string;
-      expect(binaryPath).toContain('wms-ios-input');
-      const tapArgs = mockExec.mock.calls[1]![1] as string[];
-      expect(tapArgs).toEqual(['tap', '100', '150']);
+      // Assert — IndigoHID binary called with [udid, 'tap', '0', '0']
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-indigo-hid');
+      const tapArgs = mockExec.mock.calls[0]![1] as string[];
+      expect(tapArgs).toEqual(['TEST-UDID', 'tap', '0', '0']);
     });
 
-    macosOnly('computes correct screen coords for bottom-right corner (1, 1)', async () => {
+    macosOnly('passes normalised coords directly to IndigoHID tap for bottom-right corner (1, 1)', async () => {
       // Arrange
-      // screenX = 100 + 1 * 400 = 500
-      // screenY = 150 + 1 * 880 = 1030
-      mockExec
-        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' })
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendTap('TEST-UDID', 1, 1);
 
-      // Assert — second exec call is the precompiled binary with computed screen coords
-      const binaryPath = mockExec.mock.calls[1]![0] as string;
-      expect(binaryPath).toContain('wms-ios-input');
-      const tapArgs = mockExec.mock.calls[1]![1] as string[];
-      expect(tapArgs).toEqual(['tap', '500', '1030']);
+      // Assert — IndigoHID binary called with [udid, 'tap', '1', '1']
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-indigo-hid');
+      const tapArgs = mockExec.mock.calls[0]![1] as string[];
+      expect(tapArgs).toEqual(['TEST-UDID', 'tap', '1', '1']);
     });
 
-    macosOnly('second exec call uses precompiled CGEvent binary (not osascript click)', async () => {
+    macosOnly('uses IndigoHID binary with tap command (not osascript click or CGEvent)', async () => {
       // Arrange
-      mockExec
-        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' })
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendTap('TEST-UDID', 0.5, 0.5);
 
-      // Assert — second call is the precompiled binary (not swift -e or osascript)
-      const binaryPath = mockExec.mock.calls[1]![0] as string;
-      expect(binaryPath).toContain('wms-ios-input');
-      const tapArgs = mockExec.mock.calls[1]![1] as string[];
-      expect(tapArgs[0]).toBe('tap');
+      // Assert — call is the IndigoHID binary (not swift -e or osascript)
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-indigo-hid');
+      const tapArgs = mockExec.mock.calls[0]![1] as string[];
+      expect(tapArgs[1]).toBe('tap');
     });
 
-    macosOnly('throws when geometry binary returns unparseable output', async () => {
-      // Arrange — geometry call returns invalid output → throws immediately (no fallback)
-      mockExec
-        .mockResolvedValueOnce({ stdout: 'invalid output', stderr: '' }); // geometry fails to parse → throws
-
-      // Act & Assert
-      await expect(service.sendTap('TEST-UDID', 0.5, 0.5)).rejects.toThrow(
-        'Failed to parse Simulator window geometry',
-      );
-    });
-
-    macosOnly('throws when the geometry exec call fails', async () => {
-      // Arrange — geometry query rejects → error propagates (no fallback)
-      mockExec
-        .mockRejectedValueOnce(new Error('binary: Simulator is not running')); // geometry throws → propagates
+    macosOnly('propagates exec failures as thrown errors', async () => {
+      // Arrange
+      mockExec.mockRejectedValueOnce(new Error('binary: Simulator is not running'));
 
       // Act & Assert
       await expect(service.sendTap('TEST-UDID', 0.5, 0.5)).rejects.toThrow(
@@ -1525,62 +1500,61 @@ describe('IOSSimulatorService', () => {
       );
     });
 
-    macosOnly('correctly uses 4-value geometry output (windowX, windowY, windowWidth, windowHeight)', async () => {
-      // Arrange: geometry returns 4 values; verify coordinate mapping
-      // screenX = windowX + normX * windowWidth = 100 + 0.5 * 400 = 300
-      // screenY = windowY + normY * windowHeight = 150 + 0.5 * 880 = 590
-      mockExec
-        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' }) // geometry
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });         // precompiled binary tap
+    macosOnly('passes arbitrary normalised float coords as strings via String()', async () => {
+      // Arrange
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
-      await service.sendTap('TEST-UDID', 0.5, 0.5);
+      await service.sendTap('TEST-UDID', 0.25, 0.75);
 
-      // Assert — the tap call uses coordinates derived from the 4-value geometry
-      const binaryPath = mockExec.mock.calls[1]![0] as string;
-      expect(binaryPath).toContain('wms-ios-input');
-      const tapArgs = mockExec.mock.calls[1]![1] as string[];
-      expect(tapArgs).toEqual(['tap', '300', '590']);
+      // Assert — normalised coords passed as-is via String() conversion
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-indigo-hid');
+      const tapArgs = mockExec.mock.calls[0]![1] as string[];
+      expect(tapArgs).toEqual(['TEST-UDID', 'tap', '0.25', '0.75']);
     });
 
-    macosOnly('compiles the input binary when it is not cached', async () => {
-      // Arrange — binary does not exist; flow: swiftc → geometry → tap
+    macosOnly('compiles the IndigoHID binary when it is not cached', async () => {
+      // Arrange — binary does not exist; flow: swiftc → tap (2 calls total)
       mockExistsSync.mockReturnValue(false);
       mockExec
-        .mockResolvedValueOnce({ stdout: '', stderr: '' })         // swiftc compilation
-        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' }) // geometry
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });        // binary tap
+        .mockResolvedValueOnce({ stdout: '', stderr: '' })  // swiftc compilation
+        .mockResolvedValueOnce({ stdout: '', stderr: '' }); // IndigoHID binary tap
 
       // Act
       await service.sendTap('TEST-UDID', 0.5, 0.5);
 
-      // Assert — swiftc was called to compile (first exec call)
-      expect(mockExec).toHaveBeenCalledTimes(3);
+      // Assert — swiftc was called to compile (first exec call), then tap
+      expect(mockExec).toHaveBeenCalledTimes(2);
       expect(mockExec.mock.calls[0]![0]).toBe('swiftc');
       // writeFileSync was called to write source and version
       expect(mockWriteFileSync).toHaveBeenCalled();
     });
 
-    macosOnly('recompiles when binary exists but version is stale', async () => {
-      // Arrange — binary exists but version doesn't match; flow: swiftc → geometry → tap
+    macosOnly('recompiles IndigoHID binary when it exists but version is stale', async () => {
+      // Arrange — binary exists but version doesn't match; flow: swiftc → tap (2 calls total)
       mockExistsSync.mockReturnValue(true);
-      mockReadFileSync.mockReturnValue('0'); // stale version (current is '2')
+      mockReadFileSync.mockReturnValue('0'); // stale version for BOTH binaries
       mockExec
-        .mockResolvedValueOnce({ stdout: '', stderr: '' })          // swiftc recompilation
-        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' }) // geometry
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });         // binary tap
+        .mockResolvedValueOnce({ stdout: '', stderr: '' })  // swiftc recompilation
+        .mockResolvedValueOnce({ stdout: '', stderr: '' }); // IndigoHID binary tap
 
       // Act
       await service.sendTap('TEST-UDID', 0.5, 0.5);
 
       // Assert — swiftc was called to recompile (first exec call)
-      expect(mockExec).toHaveBeenCalledTimes(3);
+      expect(mockExec).toHaveBeenCalledTimes(2);
       expect(mockExec.mock.calls[0]![0]).toBe('swiftc');
       expect(mockWriteFileSync).toHaveBeenCalled();
 
       // Restore defaults for other tests
       mockExistsSync.mockReturnValue(true);
-      mockReadFileSync.mockReturnValue('4');
+      mockReadFileSync.mockImplementation((filePath: string) => {
+        if (typeof filePath === 'string' && filePath.includes('wms-indigo-hid.ver')) {
+          return '1';
+        }
+        return '4';
+      });
     });
   });
 
@@ -1589,101 +1563,76 @@ describe('IOSSimulatorService', () => {
   // -------------------------------------------------------------------------
 
   describe('sendSwipe(udid, normX1, normY1, normX2, normY2, durationMs)', () => {
-    // Window: x=100, y=150, w=400, h=880
-    const GEO_STDOUT = '100,150,400,880';
-
-    macosOnly('calls exec exactly 2 times: geometry + swift CGEvent swipe', async () => {
+    macosOnly('calls exec exactly 1 time: IndigoHID swipe (no geometry lookup)', async () => {
       // Arrange
-      mockExec
-        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' }) // getSimulatorContentGeometry
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });         // swift CGEvent swipe
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' }); // IndigoHID swipe
 
       // Act
       await service.sendSwipe('TEST-UDID', 0.0, 0.0, 1.0, 1.0, 300);
 
-      // Assert
-      expect(mockExec).toHaveBeenCalledTimes(2);
+      // Assert — only 1 exec call (no geometry query needed with IndigoHID)
+      expect(mockExec).toHaveBeenCalledTimes(1);
     });
 
-    macosOnly('second exec call uses precompiled CGEvent binary', async () => {
+    macosOnly('uses IndigoHID binary (not CGEvent binary)', async () => {
       // Arrange
-      mockExec
-        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' })
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendSwipe('TEST-UDID', 0.0, 0.0, 1.0, 1.0);
 
-      // Assert — second call is the precompiled binary (not swift -e)
-      const binaryPath = mockExec.mock.calls[1]![0] as string;
-      expect(binaryPath).toContain('wms-ios-input');
+      // Assert — call is the IndigoHID binary (not wms-ios-input)
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-indigo-hid');
     });
 
-    macosOnly('passes correct screen coordinates to the precompiled binary', async () => {
+    macosOnly('passes normalised coords and computed steps/durationMs to IndigoHID binary', async () => {
       // Arrange
-      // startX = round(100 + 0.0 * 400) = 100
-      // startY = round(150 + 0.0 * 880) = 150
-      // endX   = round(100 + 1.0 * 400) = 500
-      // endY   = round(150 + 1.0 * 880) = 1030
-      // steps     = Math.max(5, Math.round(300 / 30)) = 10
-      // stepDelay = (300 / 1000) / 10 = 0.03
-      mockExec
-        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' })
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+      // steps = Math.max(5, Math.round(300 / 30)) = 10
+      // durationMs = 300 (passed as-is as string)
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendSwipe('TEST-UDID', 0.0, 0.0, 1.0, 1.0, 300);
 
-      // Assert — second exec call is precompiled binary with correct args
-      const binaryPath = mockExec.mock.calls[1]![0] as string;
-      expect(binaryPath).toContain('wms-ios-input');
-      const swipeArgs = mockExec.mock.calls[1]![1] as string[];
-      expect(swipeArgs).toEqual(['swipe', '100', '150', '500', '1030', '10', '0.03']);
+      // Assert — exec called with IndigoHID binary and correct args
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-indigo-hid');
+      const swipeArgs = mockExec.mock.calls[0]![1] as string[];
+      expect(swipeArgs).toEqual(['TEST-UDID', 'swipe', '0', '0', '1', '1', '10', '300']);
     });
 
-    macosOnly('calls precompiled binary with swipe command', async () => {
+    macosOnly('calls IndigoHID binary with swipe command', async () => {
       // Arrange
-      mockExec
-        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' })
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendSwipe('TEST-UDID', 0.0, 0.0, 1.0, 1.0, 300);
 
-      // Assert — binary is called with 'swipe' as the first argument.
-      // (Simulator activation is baked into the precompiled binary itself.)
-      const binaryPath = mockExec.mock.calls[1]![0] as string;
-      expect(binaryPath).toContain('wms-ios-input');
-      const swipeArgs = mockExec.mock.calls[1]![1] as string[];
-      expect(swipeArgs[0]).toBe('swipe');
+      // Assert — binary is called with udid as first arg, 'swipe' as second
+      const binaryPath = mockExec.mock.calls[0]![0] as string;
+      expect(binaryPath).toContain('wms-indigo-hid');
+      const swipeArgs = mockExec.mock.calls[0]![1] as string[];
+      expect(swipeArgs[0]).toBe('TEST-UDID');
+      expect(swipeArgs[1]).toBe('swipe');
     });
 
-    macosOnly('correctly uses 4-value geometry output for swipe coordinate mapping', async () => {
-      // Arrange: geometry returns 4 values; verify coordinate mapping for swipe
-      // startX = round(100 + 0.0 * 400) = 100
-      // startY = round(150 + 0.0 * 880) = 150
-      // endX   = round(100 + 1.0 * 400) = 500
-      // endY   = round(150 + 1.0 * 880) = 1030
-      // steps     = Math.max(5, Math.round(300 / 30)) = 10
-      // stepDelay = (300 / 1000) / 10 = 0.03
-      mockExec
-        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' }) // geometry (4 values)
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });         // precompiled binary swipe
+    macosOnly('computes steps as Math.max(5, Math.round(durationMs / 30))', async () => {
+      // Arrange — with durationMs=60: steps = Math.max(5, Math.round(60/30)) = Math.max(5,2) = 5
+      mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
-      await service.sendSwipe('TEST-UDID', 0.0, 0.0, 1.0, 1.0, 300);
+      await service.sendSwipe('TEST-UDID', 0.0, 0.0, 1.0, 1.0, 60);
 
-      // Assert — binary is called with swipe args derived from 4-value geometry
-      const binaryPath = mockExec.mock.calls[1]![0] as string;
-      expect(binaryPath).toContain('wms-ios-input');
-      const swipeArgs = mockExec.mock.calls[1]![1] as string[];
-      expect(swipeArgs).toEqual(['swipe', '100', '150', '500', '1030', '10', '0.03']);
+      // Assert — steps is clamped to minimum 5
+      const swipeArgs = mockExec.mock.calls[0]![1] as string[];
+      expect(swipeArgs[6]).toBe('5'); // steps
+      expect(swipeArgs[7]).toBe('60'); // durationMs
     });
 
-    macosOnly('propagates geometry exec failure as thrown error', async () => {
-      // Arrange — geometry query rejects → error propagates (no fallback)
-      mockExec
-        .mockRejectedValueOnce(new Error('binary: Simulator not found')); // geometry throws → propagates
+    macosOnly('propagates IndigoHID exec failure as thrown error', async () => {
+      // Arrange — exec call rejects
+      mockExec.mockRejectedValueOnce(new Error('binary: Simulator not found'));
 
       // Act & Assert
       await expect(
@@ -1693,163 +1642,93 @@ describe('IOSSimulatorService', () => {
   });
 
   // -------------------------------------------------------------------------
-  // geometry caching (getSimulatorContentGeometry TTL)
-  // -------------------------------------------------------------------------
-
-  describe('geometry caching (getSimulatorContentGeometry TTL)', () => {
-    const GEO_STDOUT = '100,150,400,880';
-
-    macosOnly('reuses cached geometry on consecutive taps without re-querying', async () => {
-      // Arrange — provide geometry once, then binary calls
-      mockExec
-        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' }) // geometry (first tap)
-        .mockResolvedValueOnce({ stdout: '', stderr: '' })         // binary tap (first tap)
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });        // binary tap (second tap — no geometry query!)
-
-      // Act
-      await service.sendTap('TEST-UDID', 0.5, 0.5);
-      await service.sendTap('TEST-UDID', 0.3, 0.7);
-
-      // Assert — only 3 exec calls total (1 geometry + 2 taps), NOT 4 (2 geometry + 2 taps)
-      expect(mockExec).toHaveBeenCalledTimes(3);
-      // First call is geometry (precompiled binary)
-      expect(mockExec.mock.calls[0]![0]).toContain('wms-ios-input');
-      // Second call is first tap
-      const tap1Args = mockExec.mock.calls[1]![1] as string[];
-      expect(tap1Args[0]).toBe('tap');
-      // Third call is second tap (no geometry query before it!)
-      const tap2Args = mockExec.mock.calls[2]![1] as string[];
-      expect(tap2Args[0]).toBe('tap');
-    });
-
-    macosOnly('invalidateGeometryCache() forces re-query on next interaction', async () => {
-      // Arrange
-      mockExec
-        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' }) // geometry (first tap)
-        .mockResolvedValueOnce({ stdout: '', stderr: '' })         // binary tap
-        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' }) // geometry (re-query after invalidation)
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });        // binary tap
-
-      // Act
-      await service.sendTap('TEST-UDID', 0.5, 0.5);
-      service.invalidateGeometryCache();
-      await service.sendTap('TEST-UDID', 0.5, 0.5);
-
-      // Assert — 4 exec calls: geometry + tap + geometry + tap
-      expect(mockExec).toHaveBeenCalledTimes(4);
-      expect(mockExec.mock.calls[0]![0]).toContain('wms-ios-input');
-      expect(mockExec.mock.calls[2]![0]).toContain('wms-ios-input');
-    });
-
-    macosOnly('re-queries geometry after TTL expires (2 s)', async () => {
-      vi.useFakeTimers();
-      mockExec
-        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' }) // first geometry query
-        .mockResolvedValueOnce({ stdout: '', stderr: '' })          // tap 1 (binary call)
-        .mockResolvedValueOnce({ stdout: GEO_STDOUT, stderr: '' }) // second geometry query (post-TTL)
-        .mockResolvedValueOnce({ stdout: '', stderr: '' });         // tap 2 (binary call)
-
-      await service.sendTap('TEST-UDID', 0.5, 0.5);
-      vi.advanceTimersByTime(2001);                                 // TTL expired
-      await service.sendTap('TEST-UDID', 0.5, 0.5);
-
-      // 4 exec calls: geometry + tap + geometry + tap (geometry re-queried after TTL)
-      expect(mockExec).toHaveBeenCalledTimes(4);
-      expect(mockExec.mock.calls[0]![0]).toContain('wms-ios-input'); // first geometry
-      expect(mockExec.mock.calls[2]![0]).toContain('wms-ios-input'); // second geometry (re-queried)
-
-      vi.useRealTimers();
-    });
-  });
-
-  // -------------------------------------------------------------------------
   // sendKeyEvent()
   // -------------------------------------------------------------------------
 
   describe('sendKeyEvent(udid, key, code)', () => {
-    macosOnly('sends key code 36 for the Enter key via precompiled binary', async () => {
+    macosOnly('sends IndigoHID key "Enter" for the Enter key via IndigoHID binary', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendKeyEvent('TEST-UDID', 'Enter', 'Enter');
 
-      // Assert — binary called with ['key', '36']
+      // Assert — IndigoHID binary called with ['TEST-UDID', 'key', 'Enter']
       expect(mockExec).toHaveBeenCalledTimes(1);
       const binaryPath = mockExec.mock.calls[0]![0] as string;
-      expect(binaryPath).toContain('wms-ios-input');
+      expect(binaryPath).toContain('wms-indigo-hid');
       const args = mockExec.mock.calls[0]![1] as string[];
-      expect(args).toEqual(['key', '36']);
+      expect(args).toEqual(['TEST-UDID', 'key', 'Enter']);
     });
 
-    macosOnly('sends key code 51 for the Backspace key via precompiled binary', async () => {
+    macosOnly('sends IndigoHID key "Backspace" for the Backspace key via IndigoHID binary', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendKeyEvent('TEST-UDID', 'Backspace', 'Backspace');
 
-      // Assert — binary called with ['key', '51']
+      // Assert — IndigoHID binary called with ['TEST-UDID', 'key', 'Backspace']
       const binaryPath = mockExec.mock.calls[0]![0] as string;
-      expect(binaryPath).toContain('wms-ios-input');
+      expect(binaryPath).toContain('wms-indigo-hid');
       const args = mockExec.mock.calls[0]![1] as string[];
-      expect(args).toEqual(['key', '51']);
+      expect(args).toEqual(['TEST-UDID', 'key', 'Backspace']);
     });
 
-    macosOnly('sends key code 126 for the ArrowUp key via precompiled binary', async () => {
+    macosOnly('sends IndigoHID key "ArrowUp" for the ArrowUp key via IndigoHID binary', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendKeyEvent('TEST-UDID', 'ArrowUp', 'ArrowUp');
 
-      // Assert — binary called with ['key', '126']
+      // Assert — IndigoHID binary called with ['TEST-UDID', 'key', 'ArrowUp']
       const binaryPath = mockExec.mock.calls[0]![0] as string;
-      expect(binaryPath).toContain('wms-ios-input');
+      expect(binaryPath).toContain('wms-indigo-hid');
       const args = mockExec.mock.calls[0]![1] as string[];
-      expect(args).toEqual(['key', '126']);
+      expect(args).toEqual(['TEST-UDID', 'key', 'ArrowUp']);
     });
 
-    macosOnly('sends key code 125 for the ArrowDown key via precompiled binary', async () => {
+    macosOnly('sends IndigoHID key "ArrowDown" for the ArrowDown key via IndigoHID binary', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendKeyEvent('TEST-UDID', 'ArrowDown', 'ArrowDown');
 
-      // Assert — binary called with ['key', '125']
+      // Assert — IndigoHID binary called with ['TEST-UDID', 'key', 'ArrowDown']
       const binaryPath = mockExec.mock.calls[0]![0] as string;
-      expect(binaryPath).toContain('wms-ios-input');
+      expect(binaryPath).toContain('wms-indigo-hid');
       const args = mockExec.mock.calls[0]![1] as string[];
-      expect(args).toEqual(['key', '125']);
+      expect(args).toEqual(['TEST-UDID', 'key', 'ArrowDown']);
     });
 
-    macosOnly('sends key code 53 for the Escape key via precompiled binary', async () => {
+    macosOnly('sends IndigoHID key "Escape" for the Escape key via IndigoHID binary', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendKeyEvent('TEST-UDID', 'Escape', 'Escape');
 
-      // Assert — binary called with ['key', '53']
+      // Assert — IndigoHID binary called with ['TEST-UDID', 'key', 'Escape']
       const binaryPath = mockExec.mock.calls[0]![0] as string;
-      expect(binaryPath).toContain('wms-ios-input');
+      expect(binaryPath).toContain('wms-indigo-hid');
       const args = mockExec.mock.calls[0]![1] as string[];
-      expect(args).toEqual(['key', '53']);
+      expect(args).toEqual(['TEST-UDID', 'key', 'Escape']);
     });
 
-    macosOnly('sends keystroke command for a single printable character', async () => {
+    macosOnly('sends IndigoHID key command for a single printable character', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendKeyEvent('TEST-UDID', 'a', 'KeyA');
 
-      // Assert — binary called with ['keystroke', 'a'] (not key code)
+      // Assert — IndigoHID binary called with ['TEST-UDID', 'key', 'a'] (uses 'key', not 'keystroke')
       const binaryPath = mockExec.mock.calls[0]![0] as string;
-      expect(binaryPath).toContain('wms-ios-input');
+      expect(binaryPath).toContain('wms-indigo-hid');
       const args = mockExec.mock.calls[0]![1] as string[];
-      expect(args).toEqual(['keystroke', 'a']);
+      expect(args).toEqual(['TEST-UDID', 'key', 'a']);
     });
 
     macosOnly('exec is called exactly once for valid keys (no assertSimctlAvailable)', async () => {
@@ -1889,18 +1768,18 @@ describe('IOSSimulatorService', () => {
       expect(mockExec).toHaveBeenCalledTimes(0);
     });
 
-    macosOnly('uses precompiled binary with key command for special keys', async () => {
+    macosOnly('uses IndigoHID binary with key command for special keys', async () => {
       // Arrange
       mockExec.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       // Act
       await service.sendKeyEvent('TEST-UDID', 'Enter', 'Enter');
 
-      // Assert — binary path contains 'wms-ios-input' and first arg is 'key'
+      // Assert — binary path contains 'wms-indigo-hid', second arg is 'key'
       const binaryPath = mockExec.mock.calls[0]![0] as string;
-      expect(binaryPath).toContain('wms-ios-input');
+      expect(binaryPath).toContain('wms-indigo-hid');
       const args = mockExec.mock.calls[0]![1] as string[];
-      expect(args[0]).toBe('key');
+      expect(args[1]).toBe('key');
     });
 
     macosOnly('propagates exec failures as thrown errors', async () => {

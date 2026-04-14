@@ -95,6 +95,18 @@ const INPUT_BINARY_VERSION = '4';
 /** Sidecar file storing the version of the cached binary. */
 const INPUT_BINARY_VERSION_PATH = join(WMS_INPUT_TMP_DIR, 'wms-ios-input.ver');
 
+/** Path where the compiled IndigoHID binary is cached. */
+const INDIGO_BINARY_PATH = join(WMS_INPUT_TMP_DIR, 'wms-indigo-hid');
+
+/** Temp path for Swift source before compilation. */
+const INDIGO_SWIFT_TMP_PATH = join(WMS_INPUT_TMP_DIR, 'wms-indigo-hid.swift');
+
+/** Version tag — increment to force recompilation of IndigoHID binary. */
+const INDIGO_BINARY_VERSION = '1';
+
+/** Sidecar file storing the version of the cached IndigoHID binary. */
+const INDIGO_BINARY_VERSION_PATH = join(WMS_INPUT_TMP_DIR, 'wms-indigo-hid.ver');
+
 /**
  * Environment overrides for all `xcrun` calls.
  * Sets `DEVELOPER_DIR` so `xcrun` resolves tools (like `simctl`) from the
@@ -392,6 +404,1313 @@ default:
 }
 `;
 
+/** Embedded Swift source for the IndigoHID binary (wms-indigo-hid).
+ * Uses SimulatorKit's private IndigoHID APIs to inject touch, keyboard,
+ * and button events directly to the simulator's backboard — no Simulator.app
+ * focus required.
+ */
+const INDIGO_HID_SWIFT_SOURCE = `/// wms-indigo-poc.swift
+///
+/// Proof-of-Concept: Inject touch events into an iOS Simulator using
+/// SimulatorKit's IndigoHID mechanism, bypassing the macOS window server
+/// entirely (no CGEvent, no Simulator.app focus required).
+///
+/// Build:   see build.sh
+/// Usage:
+///   wms-indigo-poc --discover
+///   wms-indigo-poc <udid> tap <normX> <normY>
+///
+/// Technique:
+///   1. dlopen CoreSimulator + SimulatorKit private frameworks
+///   2. Use NSClassFromString / ObjC runtime to find SimServiceContext,
+///      SimDeviceSet, and the target SimDevice by UDID
+///   3. Create a SimDeviceLegacyHIDClient for the device (Swift class in
+///      SimulatorKit — accessed via ObjC runtime bridging)
+///   4. Synthesise an IndigoHIDMessageStruct touch (down + up) using
+///      IndigoHIDMessageForMouseNSEvent (C function in SimulatorKit)
+///   5. Send the message via SimDeviceLegacyHIDClient.send(message:)
+///
+/// Author: WMS POC — Eric (via Builder agent), 2026
+
+import Foundation
+import AppKit
+import ObjectiveC
+
+// ──────────────────────────────────────────────────────────────────────────────
+// MARK: - Framework loading
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Paths to the private frameworks we need.
+let kCoreSimulatorPath =
+    "/Library/Developer/PrivateFrameworks/CoreSimulator.framework/CoreSimulator"
+let kSimulatorKitPath =
+    "/Applications/Xcode.app/Contents/Developer/Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit"
+
+/// Load a dynamic library, aborting with a diagnostic if it fails.
+func loadFramework(_ path: String) {
+    guard dlopen(path, RTLD_NOW | RTLD_GLOBAL) != nil else {
+        let reason = String(cString: dlerror())
+        fputs("❌ Failed to load \\(path)\\n   Reason: \\(reason)\\n", stderr)
+        exit(1)
+    }
+    print("✅ Loaded \\(path)")
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// MARK: - ObjC runtime helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Perform a zero-argument selector on an object, returning the result as AnyObject?.
+@discardableResult
+func objcCall(_ obj: AnyObject, sel: Selector) -> AnyObject? {
+    guard obj.responds(to: sel) else { return nil }
+    return obj.perform(sel)?.takeUnretainedValue()
+}
+
+/// Perform a one-argument selector on an object.
+@discardableResult
+func objcCall(_ obj: AnyObject, sel: Selector, with arg: AnyObject?) -> AnyObject? {
+    guard obj.responds(to: sel) else { return nil }
+    return obj.perform(sel, with: arg)?.takeUnretainedValue()
+}
+
+/// Perform a two-argument selector on an object.
+@discardableResult
+func objcCall(_ obj: AnyObject, sel: Selector, with arg1: AnyObject?, and arg2: AnyObject?) -> AnyObject? {
+    guard obj.responds(to: sel) else { return nil }
+    return obj.perform(sel, with: arg1, with: arg2)?.takeUnretainedValue()
+}
+
+/// Return all method names on an ObjC class.
+func methodNames(of cls: AnyClass) -> [String] {
+    var count: UInt32 = 0
+    guard let methods = class_copyMethodList(cls, &count) else { return [] }
+    defer { free(methods) }
+    return (0..<Int(count)).map { NSStringFromSelector(method_getName(methods[$0])) }
+}
+
+/// Return all class method names on an ObjC class.
+func classMethodNames(of cls: AnyClass) -> [String] {
+    guard let meta = object_getClass(cls) else { return [] }
+    return methodNames(of: meta)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// MARK: - IndigoHIDMessageStruct (opaque)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Opaque representation of IndigoHIDMessageStruct.
+/// The actual layout is private, but we only need to hold a pointer
+/// returned by IndigoHIDMessageForMouseNSEvent and pass it to send().
+/// Size is at least 0x200 bytes based on disassembly of IndigoHIDMessageForMouseNSEvent
+/// (calloc(1, 0x200) observed at 0x11284–0x112ec in SimulatorKit arm64e).
+struct IndigoHIDMessageStruct {
+    var storage: (
+        UInt64, UInt64, UInt64, UInt64, UInt64, UInt64, UInt64, UInt64,
+        UInt64, UInt64, UInt64, UInt64, UInt64, UInt64, UInt64, UInt64,
+        UInt64, UInt64, UInt64, UInt64, UInt64, UInt64, UInt64, UInt64,
+        UInt64, UInt64, UInt64, UInt64, UInt64, UInt64, UInt64, UInt64,
+        UInt64, UInt64, UInt64, UInt64, UInt64, UInt64, UInt64, UInt64,
+        UInt64, UInt64, UInt64, UInt64, UInt64, UInt64, UInt64, UInt64,
+        UInt64, UInt64, UInt64, UInt64, UInt64, UInt64, UInt64, UInt64,
+        UInt64, UInt64, UInt64, UInt64, UInt64, UInt64, UInt64, UInt64
+    ) = (
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    )
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// MARK: - IndigoHID C-function signatures (resolved via dlsym)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// IndigoHIDMessageForMouseNSEvent signature (reverse-engineered from the
+/// embedded debug string in SimulatorKit binary).
+///
+/// C signature:
+///   IndigoHIDMessage *IndigoHIDMessageForMouseNSEvent(
+///       CGPoint *point0,        // x0 — pointer to primary touch coords (0.0–1.0)
+///       CGPoint *point1,        // x1 — pointer to secondary touch coords (NULL for single)
+///       IndigoHIDTarget target, // x2 — HID target (0x40000000 for digitizer touch, 0x35 for pointer)
+///       NSEventType eventType,  // x3 — 1 = ButtonEventTypeDown, 2 = ButtonEventTypeUp
+///       NSSize size,            // d0 = width, d1 = height — scale divisors (1.0, 1.0)
+///       IndigoHIDEdge edge      // x4 — edge flags (0 = none)
+///   )
+///
+/// arm64 register layout (integer and float register files are independent):
+///   x0 = point0  (pointer)
+///   x1 = point1  (pointer, nil for single touch)
+///   x2 = target  (integer, 0x40000000 for digitizer touch)
+///   x3 = eventType (integer, 1=down / 2=up)
+///   x4 = edge    (integer, 0 = none)
+///   d0 = size.width  (float, 1.0)
+///   d1 = size.height (float, 1.0)
+///
+/// Swift @convention(c) assigns x-registers to pointer/integer params in
+/// declaration order, and d-registers to float params in declaration order,
+/// independently — so listing all pointer/int params first, then floats,
+/// then the trailing int correctly maps every argument to its register.
+///
+/// Returns: heap-allocated pointer to IndigoHIDMessageStruct (caller should
+///          not free when passing freeWhenDone:false to the send call).
+typealias IndigoHIDMessageForMouseNSEventFn = @convention(c) (
+    UnsafeMutableRawPointer?,   // x0 — point0 (CGPoint*, primary touch coords)
+    UnsafeMutableRawPointer?,   // x1 — point1 (CGPoint*, nil for single touch)
+    UInt,                        // x2 — target (0x40000000 for digitizer, 0x35 for pointer)
+    UInt,                        // x3 — eventType (1=down, 2=up)
+    Double,                      // d0 — size.width  (1.0)
+    Double,                      // d1 — size.height (1.0)
+    UInt                         // x4 — edge (0 = none)
+) -> UnsafeMutableRawPointer?
+
+/// IndigoHIDMessageForKeyboardArbitrary — keyboard events via USB HID usage code.
+///
+/// C signature (reverse-engineered from SimulatorKit disassembly):
+///   IndigoHIDMessage *IndigoHIDMessageForKeyboardArbitrary(
+///       uint32_t usageCode,   // x0 — USB HID Keyboard/Keypad page usage code
+///       uint32_t keyState     // x1 — 1=down, 2=up
+///   )
+///
+/// The function allocates a 0xC0-byte struct, sets message type to 3 (keyboard),
+/// populates the usage code and key state. No target parameter needed.
+typealias IndigoHIDMessageForKeyboardArbitraryFn = @convention(c) (
+    UInt32,   // x0 — usageCode (USB HID usage code, e.g. 0x04='a', 0x28=Enter)
+    UInt32    // x1 — keyState (1=down, 2=up)
+) -> UnsafeMutableRawPointer?
+
+/// IndigoHIDMessageForButton — hardware button events (home, lock, volume).
+///
+/// C signature (reverse-engineered from SimulatorKit disassembly):
+///   IndigoHIDMessage *IndigoHIDMessageForButton(
+///       uint32_t buttonCode,  // x0 — button key code
+///       uint32_t keyState,    // x1 — 1=down, 2=up
+///       uint32_t target       // x2 — IndigoHIDTarget (0x33 for iPhone)
+///   )
+///
+/// Button codes (from Simulator.app disassembly):
+///   0    = Home button (Face ID devices — wzr)
+///   401  = Home button (Touch ID devices — 0x191)
+///   1    = Lock/Power/Side button
+typealias IndigoHIDMessageForButtonFn = @convention(c) (
+    UInt32,   // x0 — buttonCode
+    UInt32,   // x1 — keyState (1=down, 2=up)
+    UInt32    // x2 — target (0x33 for iPhone/iPad)
+) -> UnsafeMutableRawPointer?
+
+/// IndigoHIDMessageForHIDArbitrary — arbitrary USB HID page events.
+///
+/// C signature (from embedded debug string in SimulatorKit):
+///   IndigoHIDMessage *IndigoHIDMessageForHIDArbitrary(
+///       IndigoHIDTarget target,    // x0 — HID target (0x33 for iPhone)
+///       uint32_t        usagePage, // x1 — HID Usage Page (e.g. 0x0c = Consumer Control)
+///       uint32_t        usageCode, // x2 — HID Usage Code (e.g. 0xe9 = Volume Up)
+///       IndigoHIDButtonOp buttonOp // x3 — 1=down, 2=up
+///   )
+///
+/// Used for volume buttons (usagePage=0x0c Consumer Control):
+///   Volume Up:   usageCode=0xe9
+///   Volume Down: usageCode=0xea
+typealias IndigoHIDMessageForHIDArbitraryFn = @convention(c) (
+    UInt32,   // x0 — target (0x33 for iPhone/iPad)
+    UInt32,   // x1 — usagePage
+    UInt32,   // x2 — usageCode
+    UInt32    // x3 — buttonOp (1=down, 2=up)
+) -> UnsafeMutableRawPointer?
+
+// ──────────────────────────────────────────────────────────────────────────────
+// MARK: - Discover mode
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Print a formatted list of known CoreSimulator / SimulatorKit ObjC classes
+/// and their instance + class methods. Uses targeted \`NSClassFromString\` lookups
+/// rather than \`objc_copyClassList\`, which hangs when iterating ~60 k classes
+/// (triggers Swift runtime realization for every class in the loaded images).
+func discoverClasses() {
+    // Known ObjC/Swift class names in CoreSimulator and SimulatorKit.
+    // Add more names here as needed; each is looked up with NSClassFromString.
+    let knownNames: [String] = [
+        // CoreSimulator
+        "SimServiceContext",
+        "SimDeviceSet",
+        "SimDevice",
+        "SimRuntime",
+        "SimDeviceType",
+        // SimulatorKit — Swift classes use mangled names
+        "_TtC12SimulatorKit24SimDeviceLegacyHIDClient",
+        "_TtC12SimulatorKit16SimHIDClientBase",
+        "_TtC12SimulatorKit22SimDeviceHIDIOSurface",
+        "_TtC12SimulatorKit13SimHIDSession",
+        "SimDigitizerInputView",
+        "SimDisplayManager",
+        "SimDisplayDescriptor",
+    ]
+
+    var matched = 0
+    for name in knownNames {
+        guard let cls = NSClassFromString(name) else {
+            print("  ⚠️  \\(name) — not found (class not registered)")
+            continue
+        }
+        matched += 1
+
+        print("\\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        print("CLASS: \\(name)")
+        if let superCls = class_getSuperclass(cls) {
+            print("  Superclass: \\(String(cString: class_getName(superCls)))")
+        }
+
+        let instMethods = methodNames(of: cls)
+        if !instMethods.isEmpty {
+            print("  Instance methods (\\(instMethods.count)):")
+            instMethods.sorted().forEach { print("    - \\($0)") }
+        }
+
+        let clsMethods = classMethodNames(of: cls)
+        if !clsMethods.isEmpty {
+            print("  Class methods (\\(clsMethods.count)):")
+            clsMethods.sorted().forEach { print("    + \\($0)") }
+        }
+    }
+
+    print("\\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print("Found \\(matched)/\\(knownNames.count) targeted class(es).")
+    print("")
+    print("ℹ️  Note: Full objc_copyClassList enumeration (~60 k classes) hangs")
+    print("   due to Swift runtime realization. Use NSClassFromString for any")
+    print("   additional classes you want to inspect.")
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// MARK: - CoreSimulator device lookup
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Locate a SimDevice by UDID using SimServiceContext → defaultDeviceSet → devices.
+///
+/// Returns the SimDevice as an \`AnyObject\` (opaque ObjC class instance), or nil
+/// if the device cannot be found. Diagnostic output is printed throughout.
+func findSimDevice(udid: String) -> AnyObject? {
+    // ── 1. Get SimServiceContext shared instance ──────────────────────────────
+    guard let ctxClass = NSClassFromString("SimServiceContext") else {
+        fputs("❌ SimServiceContext class not found — CoreSimulator not loaded?\\n", stderr)
+        return nil
+    }
+    print("🔍 Found SimServiceContext class: \\(ctxClass)")
+
+    // +sharedServiceContextForDeveloperDir:error:
+    let developerDir = ProcessInfo.processInfo.environment["DEVELOPER_DIR"]
+        ?? "/Applications/Xcode.app/Contents/Developer"
+    print("🔍 Using DEVELOPER_DIR: \\(developerDir)")
+
+    let sharedCtxSel = NSSelectorFromString("sharedServiceContextForDeveloperDir:error:")
+    guard let sharedCtxMethod = class_getClassMethod(ctxClass, sharedCtxSel) else {
+        fputs("❌ SimServiceContext does not have sharedServiceContextForDeveloperDir:error:\\n", stderr)
+        let altMethods = classMethodNames(of: ctxClass)
+        print("  Available class methods: \\(altMethods.joined(separator: ", "))")
+        return nil
+    }
+
+    // IMP: +[SimServiceContext sharedServiceContextForDeveloperDir:error:]
+    // -> SimServiceContext?
+    typealias SharedContextFn = @convention(c) (
+        AnyClass,
+        Selector,
+        NSString,
+        AutoreleasingUnsafeMutablePointer<NSError?>
+    ) -> AnyObject?
+    let sharedContextImpl = unsafeBitCast(
+        method_getImplementation(sharedCtxMethod),
+        to: SharedContextFn.self
+    )
+    var contextError: NSError? = nil
+    guard let serviceContext = sharedContextImpl(
+        ctxClass,
+        sharedCtxSel,
+        developerDir as NSString,
+        &contextError
+    ) else {
+        fputs("❌ sharedServiceContextForDeveloperDir: returned nil", stderr)
+        if let err = contextError {
+            fputs(" — \\(err.localizedDescription)\\n", stderr)
+        } else {
+            fputs("\\n", stderr)
+        }
+        return nil
+    }
+    print("✅ Got SimServiceContext: \\(serviceContext)")
+
+    // ── 2. Get defaultDeviceSet ───────────────────────────────────────────────
+    let defaultSetSel = NSSelectorFromString("defaultDeviceSetWithError:")
+    let serviceContextClass: AnyClass = type(of: serviceContext)
+    guard let defaultSetMethod = class_getInstanceMethod(serviceContextClass, defaultSetSel) else {
+        fputs("❌ SimServiceContext does not respond to defaultDeviceSetWithError:\\n", stderr)
+        let instMethods = methodNames(of: serviceContextClass)
+        print("  Available instance methods (first 30): \\(instMethods.prefix(30).joined(separator: ", "))")
+        return nil
+    }
+
+    typealias DefaultSetFn = @convention(c) (
+        AnyObject,
+        Selector,
+        AutoreleasingUnsafeMutablePointer<NSError?>
+    ) -> AnyObject?
+    let defaultSetImpl = unsafeBitCast(
+        method_getImplementation(defaultSetMethod),
+        to: DefaultSetFn.self
+    )
+    var setError: NSError? = nil
+    guard let deviceSet = defaultSetImpl(serviceContext, defaultSetSel, &setError) else {
+        fputs("❌ defaultDeviceSetWithError: returned nil", stderr)
+        if let err = setError {
+            fputs(" — \\(err.localizedDescription)\\n", stderr)
+        } else {
+            fputs("\\n", stderr)
+        }
+        return nil
+    }
+    print("✅ Got SimDeviceSet: \\(deviceSet)")
+
+    // ── 3. Get devices dictionary via devicesByUDID (keyed by NSUUID) ────────────
+    //
+    // IMPORTANT: The keys in this dictionary are NSUUID objects, NOT NSString.
+    // Searching by string equality silently misses every entry.
+    // We must construct an NSUUID from the caller's udid string and use it
+    // as the dictionary key directly.
+    let byUDIDSel = NSSelectorFromString("devicesByUDID")
+    guard let devicesObj = objcCall(deviceSet, sel: byUDIDSel) else {
+        fputs("❌ SimDeviceSet.devicesByUDID returned nil\\n", stderr)
+        return nil
+    }
+
+    guard let devicesDict = devicesObj as? NSDictionary else {
+        fputs("❌ Could not cast devicesByUDID result to NSDictionary; type=\\(type(of: devicesObj))\\n", stderr)
+        return nil
+    }
+    print("  devicesByUDID count: \\(devicesDict.count)")
+
+    // Build an NSUUID key from the provided UDID string.
+    guard let swiftUUID = UUID(uuidString: udid) else {
+        fputs("❌ '\\(udid)' is not a valid UUID string.\\n", stderr)
+        return nil
+    }
+    let nsUUID = swiftUUID as NSUUID
+
+    if let found = devicesDict[nsUUID] {
+        let device = found as AnyObject
+        print("✅ Found SimDevice for UDID \\(udid): \\(device)")
+        return device
+    }
+
+    fputs("❌ Device with UDID \\(udid) not found in devicesByUDID.\\n", stderr)
+    let availableUDIDs = devicesDict.allKeys.map { String(describing: $0) }.joined(separator: "\\n    ")
+    print("  Available UDIDs:\\n    \\(availableUDIDs)")
+    return nil
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// MARK: - SimDeviceLegacyHIDClient creation
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Create a SimDeviceLegacyHIDClient for the given SimDevice.
+///
+/// SimDeviceLegacyHIDClient is a Swift class in SimulatorKit.
+/// Its ObjC-visible name is \`_TtC12SimulatorKit24SimDeviceLegacyHIDClient\`.
+/// Initializer: init(device: SimDevice) throws
+///
+/// Returns the HID client as AnyObject, or nil on failure.
+func createHIDClient(for device: AnyObject) -> AnyObject? {
+    // The Swift-mangled ObjC class name for SimDeviceLegacyHIDClient.
+    // Swift classes get an ObjC name of the form _TtC<module-len><module><class-len><class>.
+    let possibleNames = [
+        "_TtC12SimulatorKit24SimDeviceLegacyHIDClient",
+        "SimDeviceLegacyHIDClient",
+    ]
+
+    var hidClientClass: AnyClass? = nil
+    for name in possibleNames {
+        if let cls = NSClassFromString(name) {
+            hidClientClass = cls
+            print("✅ Found SimDeviceLegacyHIDClient class as: \\(name)")
+            break
+        }
+    }
+
+    guard let cls = hidClientClass else {
+        fputs("❌ SimDeviceLegacyHIDClient class not found.\\n", stderr)
+        fputs("   Tried: \\(possibleNames.joined(separator: ", "))\\n", stderr)
+        return nil
+    }
+
+    let instMethods = methodNames(of: cls)
+    print("  HIDClient instance methods: \\(instMethods.joined(separator: ", "))")
+    let clsMethodsList = classMethodNames(of: cls)
+    print("  HIDClient class methods: \\(clsMethodsList.joined(separator: ", "))")
+
+    // ── Allocate via +alloc using IMP ─────────────────────────────────────────
+    let allocSel = NSSelectorFromString("alloc")
+    guard let allocMethod = class_getClassMethod(cls, allocSel) else {
+        fputs("❌ Cannot find +alloc on SimDeviceLegacyHIDClient\\n", stderr)
+        return nil
+    }
+    typealias AllocFn = @convention(c) (AnyClass, Selector) -> AnyObject
+    let allocImpl = unsafeBitCast(method_getImplementation(allocMethod), to: AllocFn.self)
+    let alloc: AnyObject = allocImpl(cls, allocSel)
+    print("  Allocated instance: \\(alloc)")
+
+    // ── Try -initWithDevice:error: ────────────────────────────────────────────
+    let initErrSel = NSSelectorFromString("initWithDevice:error:")
+    if let initMethod = class_getInstanceMethod(cls, initErrSel) {
+        typealias InitErrFn = @convention(c) (
+            AnyObject,
+            Selector,
+            AnyObject,
+            AutoreleasingUnsafeMutablePointer<NSError?>
+        ) -> AnyObject?
+        let initImpl = unsafeBitCast(method_getImplementation(initMethod), to: InitErrFn.self)
+        var initError: NSError? = nil
+        let client = initImpl(alloc, initErrSel, device, &initError)
+        if let err = initError {
+            fputs("❌ SimDeviceLegacyHIDClient initWithDevice:error: error: \\(err.localizedDescription)\\n", stderr)
+            return nil
+        }
+        if let c = client {
+            print("✅ Created SimDeviceLegacyHIDClient: \\(c)")
+            return c
+        }
+        fputs("⚠️  initWithDevice:error: returned nil (no error)\\n", stderr)
+    }
+
+    // ── Try -initWithDevice: (no error) ──────────────────────────────────────
+    let initSimpleSel = NSSelectorFromString("initWithDevice:")
+    if let initSimpleMethod = class_getInstanceMethod(cls, initSimpleSel) {
+        typealias InitSimpleFn = @convention(c) (AnyObject, Selector, AnyObject) -> AnyObject?
+        let initSimpleImpl = unsafeBitCast(method_getImplementation(initSimpleMethod), to: InitSimpleFn.self)
+        if let c = initSimpleImpl(alloc, initSimpleSel, device) {
+            print("✅ Created SimDeviceLegacyHIDClient (simple init): \\(c)")
+            return c
+        }
+        fputs("⚠️  initWithDevice: returned nil\\n", stderr)
+    }
+
+    fputs("❌ No usable initializer found on SimDeviceLegacyHIDClient.\\n", stderr)
+    fputs("   Known instance selectors: \\(instMethods.joined(separator: ", "))\\n", stderr)
+    return nil
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// MARK: - IndigoHID touch injection
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// ButtonEventType raw values passed to IndigoHIDMessageForMouseNSEvent as x3.
+/// These happen to match the NSEventType values for left-mouse down/up (1 and 2).
+let kButtonEventTypeDown: UInt = 1
+let kButtonEventTypeUp: UInt   = 2
+
+/// IndigoHID target for the pointer/trackpad service (subtype=3).
+/// NOT used for touch injection — routes through a broken RelativePointerEvent path.
+let kIndigoHIDTargetPointer: UInt = 0x35
+
+/// IndigoHID target for the main iPhone screen touch service.
+///
+/// TARGET ID DETERMINATION (from SimulatorKit digitizerTarget getter):
+///   screenType 0 (main iPhone/iPad): targetID = 0x32 (50)
+///   screenType 3/4/5+ (CarPlay, external): targetID = screenID | 0x40000000
+///
+/// SimulatorHID pre-registers mainScreenTouchService at allServices[@(0x32)]
+/// during initWithEventSystem:. No registration message needed — the service
+/// exists from boot with a fully-configured event callback via
+/// SimHIDMainScreenTouchServiceCallbackProvider.
+let kIndigoHIDTargetDigitizer: UInt = 0x32
+
+/// IndigoHID target for hardware button events on iPhone/iPad.
+/// From SimDeviceScreen.buttonTarget getter in SimulatorKit.
+let kIndigoHIDTargetButton: UInt32 = 0x33
+
+// ──────────────────────────────────────────────────────────────────────────────
+// MARK: - USB HID usage codes
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Map browser KeyboardEvent.key names → USB HID Keyboard/Keypad usage codes.
+/// Reference: USB HID Usage Tables, Section 10 (Keyboard/Keypad Page 0x07).
+let kUSBHIDUsageCodes: [String: UInt32] = [
+    // Letters (a-z)
+    "a": 0x04, "b": 0x05, "c": 0x06, "d": 0x07, "e": 0x08,
+    "f": 0x09, "g": 0x0A, "h": 0x0B, "i": 0x0C, "j": 0x0D,
+    "k": 0x0E, "l": 0x0F, "m": 0x10, "n": 0x11, "o": 0x12,
+    "p": 0x13, "q": 0x14, "r": 0x15, "s": 0x16, "t": 0x17,
+    "u": 0x18, "v": 0x19, "w": 0x1A, "x": 0x1B, "y": 0x1C,
+    "z": 0x1D,
+    // Uppercase letters (same usage code — modifier handles shift)
+    "A": 0x04, "B": 0x05, "C": 0x06, "D": 0x07, "E": 0x08,
+    "F": 0x09, "G": 0x0A, "H": 0x0B, "I": 0x0C, "J": 0x0D,
+    "K": 0x0E, "L": 0x0F, "M": 0x10, "N": 0x11, "O": 0x12,
+    "P": 0x13, "Q": 0x14, "R": 0x15, "S": 0x16, "T": 0x17,
+    "U": 0x18, "V": 0x19, "W": 0x1A, "X": 0x1B, "Y": 0x1C,
+    "Z": 0x1D,
+    // Numbers (0-9)
+    "1": 0x1E, "2": 0x1F, "3": 0x20, "4": 0x21, "5": 0x22,
+    "6": 0x23, "7": 0x24, "8": 0x25, "9": 0x26, "0": 0x27,
+    // Special keys
+    "Enter": 0x28, "Return": 0x28,
+    "Escape": 0x29,
+    "Backspace": 0x2A, "Delete": 0x4C,  // Backspace=0x2A, Forward Delete=0x4C
+    "Tab": 0x2B,
+    " ": 0x2C,  // Space
+    // Punctuation
+    "-": 0x2D, "=": 0x2E, "[": 0x2F, "]": 0x30,
+    "\\\\": 0x31, ";": 0x33, "'": 0x34, "\`": 0x35,
+    ",": 0x36, ".": 0x37, "/": 0x38,
+    // Arrow keys
+    "ArrowRight": 0x4F, "ArrowLeft": 0x50,
+    "ArrowDown": 0x51, "ArrowUp": 0x52,
+    // Function keys
+    "Home": 0x4A, "End": 0x4D,
+    "PageUp": 0x4B, "PageDown": 0x4E,
+]
+
+/// Attempt to inject a single tap (down + up) at the given normalised coordinates
+/// using IndigoHIDMessageForMouseNSEvent and SimDeviceLegacyHIDClient.send(message:).
+///
+/// - Parameters:
+///   - hidClient: The SimDeviceLegacyHIDClient instance (AnyObject).
+///   - normX:     Normalised X coordinate (0.0 = left, 1.0 = right).
+///   - normY:     Normalised Y coordinate (0.0 = top,  1.0 = bottom).
+func injectTap(hidClient: AnyObject, normX: Double, normY: Double) {
+    // ── 1. Resolve IndigoHIDMessageForMouseNSEvent via dlsym ─────────────────
+    guard let simKitHandle = dlopen(kSimulatorKitPath, RTLD_NOLOAD) else {
+        fputs("❌ SimulatorKit not currently loaded — cannot dlsym\\n", stderr)
+        return
+    }
+    defer { dlclose(simKitHandle) }
+
+    guard let rawIndigoPtr = dlsym(simKitHandle, "IndigoHIDMessageForMouseNSEvent") else {
+        fputs("❌ dlsym(IndigoHIDMessageForMouseNSEvent) failed: \\(String(cString: dlerror()))\\n", stderr)
+        return
+    }
+    let indigoFn = unsafeBitCast(rawIndigoPtr, to: IndigoHIDMessageForMouseNSEventFn.self)
+
+    // ── 2. Resolve the correct send selector on the HIDClient ────────────────
+    //
+    // The correct ObjC-bridged selector (confirmed via disassembly / test_hid6)
+    // is \`sendWithMessage:freeWhenDone:completionQueue:completion:\`.
+    // Earlier guesses ("sendMessage:", "send:", "sendWithMessage:") are all wrong.
+    let clientClass: AnyClass = type(of: hidClient)
+    let instMethods = methodNames(of: clientClass)
+
+    let sendSelName = "sendWithMessage:freeWhenDone:completionQueue:completion:"
+    let sendSel = NSSelectorFromString(sendSelName)
+    guard hidClient.responds(to: sendSel),
+          let sendMethod = class_getInstanceMethod(clientClass, sendSel) else {
+        fputs("❌ HIDClient does not respond to \\(sendSelName)\\n", stderr)
+        fputs("   Available methods: \\(instMethods.joined(separator: ", "))\\n", stderr)
+        return
+    }
+
+    // ── 3. No registration needed ──────────────────────────────────────────────
+    //
+    // SimulatorHID pre-registers the main screen touch service at
+    // allServices[@(0x32)] during initWithEventSystem:. Sending registration
+    // messages (CreatePointerService, CreateMouseService, CreateDigitizerService)
+    // is unnecessary and could interfere with the pre-existing properly-configured
+    // services. The pointer (0x35) and mouse (0x36) registrations are also
+    // skipped as they are not needed for touch injection.
+
+    // ── 4. Send touch-down ─────────────────────────────────────────────────────
+    sendTouchEventViaObjC(
+        hidClient: hidClient,
+        sendSel: sendSel,
+        sendMethod: sendMethod,
+        indigoFn: indigoFn,
+        x: normX, y: normY,
+        eventType: kButtonEventTypeDown
+    )
+
+    Thread.sleep(forTimeInterval: 0.05)
+
+    // ── 5. Send touch-up ───────────────────────────────────────────────────────
+    sendTouchEventViaObjC(
+        hidClient: hidClient,
+        sendSel: sendSel,
+        sendMethod: sendMethod,
+        indigoFn: indigoFn,
+        x: normX, y: normY,
+        eventType: kButtonEventTypeUp
+    )
+    print("✅ Tap injection complete.")
+}
+
+/// Send an IndigoHID registration message to register a HID service in the
+/// simulator's backboardd process.  Without this, \`serviceForIndigoHIDData:\`
+/// cannot find any service for the target and crashes with SIGABRT.
+///
+/// Registration message wire format (from reverse-engineering SimulatorKit):
+///   +0x18 (u32)   = element_data_size = 0xa0
+///   +0x1c (u8)    = flag = 0x01
+///   +0x20 (u32)   = message type = 0x7fff0001 (registration)
+///   +0x30 (u32)   = subtype (3=CreatePointer, 5=CreateMouse, 1=CreateDigitizer)
+///   +0x40 (u32)   = targetID
+///   Total size: 0xc0 (192 bytes)
+///
+/// - Parameters:
+///   - hidClient:  The SimDeviceLegacyHIDClient instance.
+///   - sendSel:    The resolved send selector.
+///   - sendMethod: The Method for the send selector.
+///   - subtype:    Registration subtype (3=CreatePointer, 5=CreateMouse).
+///   - targetID:   The HID target identifier to register (e.g. 0x35 for pointer).
+private func sendRegistrationMessage(
+    hidClient: AnyObject,
+    sendSel: Selector,
+    sendMethod: Method,
+    subtype: UInt32,
+    targetID: UInt32
+) {
+    let buf = calloc(1, 0xc0)!
+
+    // Write fields at their exact byte offsets
+    buf.storeBytes(of: UInt32(0xa0),       toByteOffset: 0x18, as: UInt32.self)  // element_data_size
+    buf.storeBytes(of: UInt8(0x01),        toByteOffset: 0x1c, as: UInt8.self)   // flag
+    buf.storeBytes(of: UInt32(0x7fff0001), toByteOffset: 0x20, as: UInt32.self)  // message type = registration
+    buf.storeBytes(of: subtype,            toByteOffset: 0x30, as: UInt32.self)  // subtype
+    buf.storeBytes(of: targetID,           toByteOffset: 0x40, as: UInt32.self)  // targetID
+
+    typealias SendFn = @convention(c) (
+        AnyObject,               // self
+        Selector,                // _cmd
+        UnsafeMutableRawPointer, // message
+        Bool,                    // freeWhenDone
+        AnyObject?,              // completionQueue
+        AnyObject?               // completion
+    ) -> Void
+    let sendFn = unsafeBitCast(method_getImplementation(sendMethod), to: SendFn.self)
+    sendFn(hidClient, sendSel, buf, true, nil, nil)
+    // freeWhenDone:true — framework takes ownership
+}
+
+/// Send an IndigoHID digitizer registration message (subtype=1) to register
+/// the screen touch digitizer service in backboardd's allServices dictionary.
+///
+/// Wire format (confirmed from SimulatorHID block_invoke disassembly):
+///   +0x18 (u32)       = element_data_size = 0xa0
+///   +0x1c (u8)        = flag = 0x01
+///   +0x20 (u32)       = message type = 0x7fff0001 (registration)
+///   +0x30 (u32)       = subtype = 1 (createDigitizer)
+///   +0x40 (u32)       = targetID (must have bit 30 set, e.g. 0x40000000)
+///   +0x44 (c-string)  = displayUID, null-terminated UTF-8, max 63 chars
+///                       = "PurpleMain" for the main iPhone screen
+///   Total size: 0xc0 (192 bytes)
+private func sendDigitizerRegistrationMessage(
+    hidClient: AnyObject,
+    sendSel: Selector,
+    sendMethod: Method,
+    targetID: UInt32,
+    displayUID: String
+) {
+    let buf = calloc(1, 0xc0)!
+
+    buf.storeBytes(of: UInt32(0xa0),       toByteOffset: 0x18, as: UInt32.self)
+    buf.storeBytes(of: UInt8(0x01),        toByteOffset: 0x1c, as: UInt8.self)
+    buf.storeBytes(of: UInt32(0x7fff0001), toByteOffset: 0x20, as: UInt32.self)
+    buf.storeBytes(of: UInt32(1),          toByteOffset: 0x30, as: UInt32.self)  // subtype = CreateDigitizer
+    buf.storeBytes(of: targetID,           toByteOffset: 0x40, as: UInt32.self)
+
+    // Write displayUID as null-terminated UTF-8 at offset 0x44, max 63 chars
+    let uidBytes = Array(displayUID.utf8.prefix(63))
+    for (i, byte) in uidBytes.enumerated() {
+        buf.storeBytes(of: byte, toByteOffset: 0x44 + i, as: UInt8.self)
+    }
+    // null terminator already present from calloc zeroing
+
+    typealias SendFn = @convention(c) (
+        AnyObject, Selector, UnsafeMutableRawPointer, Bool, AnyObject?, AnyObject?
+    ) -> Void
+    let sendFn = unsafeBitCast(method_getImplementation(sendMethod), to: SendFn.self)
+    sendFn(hidClient, sendSel, buf, true, nil, nil)
+}
+
+/// Normalised (x, y) coordinate pair passed as x0 to IndigoHIDMessageForMouseNSEvent.
+///
+/// The first argument of IndigoHIDMessageForMouseNSEvent is a pointer to this struct
+/// (NOT nil as originally assumed). Passing nil causes a SIGSEGV.
+struct TouchCoords {
+    var x: Double
+    var y: Double
+}
+
+/// Build one IndigoHID message and dispatch it via the HIDClient.
+///
+/// - Parameters:
+///   - hidClient:   The \`SimDeviceLegacyHIDClient\` instance.
+///   - sendSel:     The resolved \`sendWithMessage:freeWhenDone:completionQueue:completion:\` selector.
+///   - sendMethod:  The \`Method\` for that selector (already looked up by the caller).
+///   - indigoFn:    Resolved \`IndigoHIDMessageForMouseNSEvent\` function pointer.
+///   - x:           Normalised x coordinate (0–1).
+///   - y:           Normalised y coordinate (0–1).
+///   - eventType:   ButtonEventType raw value (1 = down, 2 = up).
+private func sendTouchEventViaObjC(
+    hidClient: AnyObject,
+    sendSel: Selector,
+    sendMethod: Method,
+    indigoFn: IndigoHIDMessageForMouseNSEventFn,
+    x: Double, y: Double,
+    eventType: UInt
+) {
+    // Build the coords struct on the stack and pass a pointer to it as x0 (point0).
+    // x1 (point1) = nil  — single touch, no secondary point.
+    // x2 (target) = 0x40000000 — digitizer touch screen target (bit 30 set).
+    // x3 (eventType) = 1 (down) or 2 (up).
+    // d0/d1 (size) = 1.0, 1.0 — scale divisors (normalised coords need no scaling).
+    // x4 (edge) = 0 — no edge flags.
+    var coords = TouchCoords(x: x, y: y)
+    let msgPtr = withUnsafeMutablePointer(to: &coords) { coordsPtr in
+        indigoFn(coordsPtr, nil, kIndigoHIDTargetDigitizer, eventType, 1.0, 1.0, 0)
+    }
+
+    guard let msg = msgPtr else {
+        fputs("⚠️  IndigoHIDMessageForMouseNSEvent returned nil (eventType=\\(eventType))\\n", stderr)
+        return
+    }
+    // PATCH: IndigoHIDMessageForMouseNSEvent hardcodes phase=2 (kIOHIDPhaseChanged)
+    // at buf+0x74 for ALL event types.  The touch state machine requires:
+    //   Began(1) → Changed(2)* → Ended(4)
+    // Without this patch, events are silently dropped (no preceding Began).
+    let correctPhase: UInt32
+    switch eventType {
+    case kButtonEventTypeDown: correctPhase = 1  // kIOHIDPhaseBegan
+    case kButtonEventTypeUp:   correctPhase = 4  // kIOHIDPhaseEnded
+    default:                   correctPhase = 2  // kIOHIDPhaseChanged
+    }
+    msg.storeBytes(of: correctPhase, toByteOffset: 0x74, as: UInt32.self)
+    // NOTE: freeWhenDone is passed as \`false\` to the send call below, so the
+    // framework keeps ownership of the message buffer — do NOT free(msg) here.
+
+    // IMP for sendWithMessage:freeWhenDone:completionQueue:completion:
+    // Parameters (after self + _cmd):
+    //   message        (UnsafeMutableRawPointer)
+    //   freeWhenDone   (Bool / ObjC BOOL)
+    //   completionQueue (DispatchQueue? bridged as AnyObject?)
+    //   completion      (block / AnyObject?)
+    typealias SendFn = @convention(c) (
+        AnyObject,              // self
+        Selector,               // _cmd
+        UnsafeMutableRawPointer, // message
+        Bool,                   // freeWhenDone
+        AnyObject?,             // completionQueue
+        AnyObject?              // completion
+    ) -> Void
+    let sendFn = unsafeBitCast(method_getImplementation(sendMethod), to: SendFn.self)
+    sendFn(hidClient, sendSel, msg, false, nil, nil)
+}
+
+/// Fallback: find and call the Swift dispatch thunk for
+/// SimDeviceLegacyHIDClient.send(message:) directly via dlsym of the
+/// Swift-mangled symbol.
+///
+/// The Swift mangled name is:
+///   $s12SimulatorKit24SimDeviceLegacyHIDClientC4send7messageySpySo22IndigoHIDMessageStructVG_tFTj
+/// (dispatch thunk of SimulatorKit.SimDeviceLegacyHIDClient.send(message:))
+private func attemptSwiftDirectCall(
+    hidClient: AnyObject,
+    indigoFn: IndigoHIDMessageForMouseNSEventFn,
+    normX: Double,
+    normY: Double
+) {
+    let simKitHandle = dlopen(kSimulatorKitPath, RTLD_NOLOAD)
+    defer { if let h = simKitHandle { dlclose(h) } }
+
+    // Mangle: SimulatorKit.SimDeviceLegacyHIDClient.send(message:) dispatch thunk
+    let mangledName = "$s12SimulatorKit24SimDeviceLegacyHIDClientC4send7messageySpySo22IndigoHIDMessageStructVG_tFTj"
+    guard let fnPtr = dlsym(simKitHandle, mangledName) else {
+        fputs("❌ dlsym for Swift mangled send(message:) failed: \\(String(cString: dlerror()))\\n", stderr)
+        fputs("   Mangled name attempted: \\(mangledName)\\n", stderr)
+        return
+    }
+    print("✅ Found Swift send(message:) dispatch thunk at \\(fnPtr)")
+
+    // The Swift dispatch thunk has the following calling convention:
+    // arg0 (x0) = UnsafeMutablePointer<IndigoHIDMessageStruct>
+    // self (x20) = SimDeviceLegacyHIDClient (Swift self register, arm64e ABI)
+    //
+    // Since we can't pass Swift's \`self\` register from C calling convention,
+    // we use a workaround: call the underlying implementation directly.
+    // Try the non-thunk symbol first:
+    let implMangledName = "$s12SimulatorKit24SimDeviceLegacyHIDClientC4send7messageySpySo22IndigoHIDMessageStructVG_tF"
+    let implFnPtr = dlsym(simKitHandle, implMangledName) ?? fnPtr
+    print("  Using impl at \\(implFnPtr)")
+
+    let events: [(UInt, String)] = [
+        (kButtonEventTypeDown, "touch-down"),
+        (kButtonEventTypeUp,   "touch-up"),
+    ]
+
+    for (eventType, label) in events {
+        if label == "touch-up" { Thread.sleep(forTimeInterval: 0.05) }
+
+        guard let msgPtr = indigoFn(nil, nil, kIndigoHIDTargetDigitizer, eventType, 1.0, 1.0, 0) else {
+            fputs("⚠️  IndigoHIDMessageForMouseNSEvent returned nil for \\(label)\\n", stderr)
+            continue
+        }
+        defer { free(msgPtr) }
+        print("📤 Swift direct: \\(label) at (\\(normX), \\(normY))…")
+
+        // Attempt: cast the thunk to a C function that takes (message_ptr, self).
+        // NOTE: This may crash if the ABI assumption is wrong; it's a best-effort.
+        // On arm64e, Swift methods use x20 for self, but many thunks accept
+        // self as an extra trailing argument — behaviour depends on exact thunk.
+        typealias SwiftSendFn = @convention(c) (UnsafeMutableRawPointer, AnyObject) -> Void
+        let sendFn = unsafeBitCast(implFnPtr, to: SwiftSendFn.self)
+        sendFn(msgPtr, hidClient)
+        print("   Swift direct send called for \\(label).")
+    }
+    print("✅ Swift direct call tap injection attempt complete.")
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// MARK: - Keyboard injection
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Inject a keyboard event (key down + key up) for a single key.
+///
+/// - Parameters:
+///   - hidClient: The SimDeviceLegacyHIDClient instance.
+///   - keyName:   Key name (e.g. "a", "Enter", "Backspace", "ArrowUp").
+func injectKeyEvent(hidClient: AnyObject, keyName: String) {
+    guard let usageCode = kUSBHIDUsageCodes[keyName] else {
+        fputs("❌ Unknown key name: \\"\\(keyName)\\" — not in USB HID usage table\\n", stderr)
+        exit(1)
+    }
+
+    // Resolve function
+    guard let simKitHandle = dlopen(kSimulatorKitPath, RTLD_NOLOAD) else {
+        fputs("❌ SimulatorKit not loaded\\n", stderr)
+        return
+    }
+    defer { dlclose(simKitHandle) }
+
+    guard let rawPtr = dlsym(simKitHandle, "IndigoHIDMessageForKeyboardArbitrary") else {
+        fputs("❌ dlsym(IndigoHIDMessageForKeyboardArbitrary) failed\\n", stderr)
+        return
+    }
+    let keyFn = unsafeBitCast(rawPtr, to: IndigoHIDMessageForKeyboardArbitraryFn.self)
+
+    // Resolve send method
+    let clientClass: AnyClass = type(of: hidClient)
+    let sendSelName = "sendWithMessage:freeWhenDone:completionQueue:completion:"
+    let sendSel = NSSelectorFromString(sendSelName)
+    guard hidClient.responds(to: sendSel),
+          let sendMethod = class_getInstanceMethod(clientClass, sendSel) else {
+        fputs("❌ HIDClient does not respond to send selector\\n", stderr)
+        return
+    }
+
+    typealias SendFn = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, Bool, AnyObject?, AnyObject?) -> Void
+    let sendFn = unsafeBitCast(method_getImplementation(sendMethod), to: SendFn.self)
+
+    // Key down
+    guard let msgDown = keyFn(usageCode, 1) else {
+        fputs("❌ IndigoHIDMessageForKeyboardArbitrary returned nil for key down\\n", stderr)
+        return
+    }
+    sendFn(hidClient, sendSel, msgDown, false, nil, nil)
+
+    Thread.sleep(forTimeInterval: 0.02)
+
+    // Key up
+    guard let msgUp = keyFn(usageCode, 2) else {
+        fputs("❌ IndigoHIDMessageForKeyboardArbitrary returned nil for key up\\n", stderr)
+        return
+    }
+    sendFn(hidClient, sendSel, msgUp, false, nil, nil)
+
+    print("✅ Key event sent: \\"\\(keyName)\\" (USB HID 0x\\(String(usageCode, radix: 16)))")
+}
+
+/// Inject a text string as a series of key events.
+///
+/// - Parameters:
+///   - hidClient: The SimDeviceLegacyHIDClient instance.
+///   - text:      The text to type.
+func injectTextInput(hidClient: AnyObject, text: String) {
+    // Resolve function
+    guard let simKitHandle = dlopen(kSimulatorKitPath, RTLD_NOLOAD) else {
+        fputs("❌ SimulatorKit not loaded\\n", stderr)
+        return
+    }
+    defer { dlclose(simKitHandle) }
+
+    guard let rawPtr = dlsym(simKitHandle, "IndigoHIDMessageForKeyboardArbitrary") else {
+        fputs("❌ dlsym(IndigoHIDMessageForKeyboardArbitrary) failed\\n", stderr)
+        return
+    }
+    let keyFn = unsafeBitCast(rawPtr, to: IndigoHIDMessageForKeyboardArbitraryFn.self)
+
+    // Resolve send method
+    let clientClass: AnyClass = type(of: hidClient)
+    let sendSelName = "sendWithMessage:freeWhenDone:completionQueue:completion:"
+    let sendSel = NSSelectorFromString(sendSelName)
+    guard hidClient.responds(to: sendSel),
+          let sendMethod = class_getInstanceMethod(clientClass, sendSel) else {
+        fputs("❌ HIDClient does not respond to send selector\\n", stderr)
+        return
+    }
+
+    typealias SendFn = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, Bool, AnyObject?, AnyObject?) -> Void
+    let sendFn = unsafeBitCast(method_getImplementation(sendMethod), to: SendFn.self)
+
+    for char in text {
+        let charStr = String(char)
+        guard let usageCode = kUSBHIDUsageCodes[charStr] else {
+            fputs("⚠️  Skipping unsupported character: \\"\\(charStr)\\"\\n", stderr)
+            continue
+        }
+
+        // Key down
+        if let msgDown = keyFn(usageCode, 1) {
+            sendFn(hidClient, sendSel, msgDown, false, nil, nil)
+        }
+
+        Thread.sleep(forTimeInterval: 0.01)
+
+        // Key up
+        if let msgUp = keyFn(usageCode, 2) {
+            sendFn(hidClient, sendSel, msgUp, false, nil, nil)
+        }
+
+        Thread.sleep(forTimeInterval: 0.01)
+    }
+
+    print("✅ Text input sent: \\"\\(text.prefix(50))\\(text.count > 50 ? "…" : "")\\" (\\(text.count) chars)")
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// MARK: - Swipe injection
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Inject a swipe gesture from one normalised coordinate to another.
+///
+/// Uses a Began → Changed* → Ended phase sequence with interpolated coordinates.
+///
+/// - Parameters:
+///   - hidClient: The SimDeviceLegacyHIDClient instance.
+///   - fromX, fromY: Start coordinates (normalised 0.0–1.0).
+///   - toX, toY:     End coordinates (normalised 0.0–1.0).
+///   - steps:        Number of intermediate move events (default 10).
+///   - durationMs:   Total swipe duration in milliseconds (default 300).
+func injectSwipe(
+    hidClient: AnyObject,
+    fromX: Double, fromY: Double,
+    toX: Double, toY: Double,
+    steps: Int = 10,
+    durationMs: Int = 300
+) {
+    // Resolve IndigoHIDMessageForMouseNSEvent
+    guard let simKitHandle = dlopen(kSimulatorKitPath, RTLD_NOLOAD) else {
+        fputs("❌ SimulatorKit not loaded\\n", stderr)
+        return
+    }
+    defer { dlclose(simKitHandle) }
+
+    guard let rawPtr = dlsym(simKitHandle, "IndigoHIDMessageForMouseNSEvent") else {
+        fputs("❌ dlsym(IndigoHIDMessageForMouseNSEvent) failed\\n", stderr)
+        return
+    }
+    let indigoFn = unsafeBitCast(rawPtr, to: IndigoHIDMessageForMouseNSEventFn.self)
+
+    // Resolve send method
+    let clientClass: AnyClass = type(of: hidClient)
+    let sendSelName = "sendWithMessage:freeWhenDone:completionQueue:completion:"
+    let sendSel = NSSelectorFromString(sendSelName)
+    guard hidClient.responds(to: sendSel),
+          let sendMethod = class_getInstanceMethod(clientClass, sendSel) else {
+        fputs("❌ HIDClient does not respond to send selector\\n", stderr)
+        return
+    }
+
+    typealias SendFn = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, Bool, AnyObject?, AnyObject?) -> Void
+    let sendFn = unsafeBitCast(method_getImplementation(sendMethod), to: SendFn.self)
+
+    let stepDelay = Double(durationMs) / 1000.0 / Double(steps)
+
+    // Helper to send a single touch event with proper phase patching
+    func sendTouch(x: Double, y: Double, eventType: UInt, phase: UInt32) {
+        var coords = TouchCoords(x: x, y: y)
+        guard let msg = withUnsafeMutablePointer(to: &coords, { ptr in
+            indigoFn(ptr, nil, kIndigoHIDTargetDigitizer, eventType, 1.0, 1.0, 0)
+        }) else {
+            fputs("⚠️  IndigoHIDMessageForMouseNSEvent returned nil\\n", stderr)
+            return
+        }
+        // Patch phase field (same fix as injectTap)
+        msg.storeBytes(of: phase, toByteOffset: 0x74, as: UInt32.self)
+        sendFn(hidClient, sendSel, msg, false, nil, nil)
+    }
+
+    // ── 1. Touch down at start (Began) ──
+    sendTouch(x: fromX, y: fromY, eventType: kButtonEventTypeDown, phase: 1)
+
+    // ── 2. Intermediate moves (Changed) ──
+    for i in 1...steps {
+        Thread.sleep(forTimeInterval: stepDelay)
+        let t = Double(i) / Double(steps)
+        let x = fromX + (toX - fromX) * t
+        let y = fromY + (toY - fromY) * t
+        // For move events, use eventType=down (1) with phase=Changed (2)
+        sendTouch(x: x, y: y, eventType: kButtonEventTypeDown, phase: 2)
+    }
+
+    // ── 3. Touch up at end (Ended) ──
+    Thread.sleep(forTimeInterval: 0.01)
+    sendTouch(x: toX, y: toY, eventType: kButtonEventTypeUp, phase: 4)
+
+    print("✅ Swipe sent: (\\(fromX), \\(fromY)) → (\\(toX), \\(toY)) in \\(steps) steps over \\(durationMs)ms")
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// MARK: - Button injection
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Inject a hardware button press (down + up).
+///
+/// Button routing (from Simulator.app / SimulatorKit disassembly):
+///   - home, lock → IndigoHIDMessageForButton(code, keyState, target)
+///   - volumeUp, volumeDown → IndigoHIDMessageForHIDArbitrary(target, 0x0c, usage, keyState)
+///
+/// Button codes:
+///   home (Face ID)  = 0     (hasHomeButton==false → wzr)
+///   home (Touch ID) = 401   (0x191, hasHomeButton==true)
+///   lock/power      = 1     (lockButtonPressed: hardcoded)
+///   volumeUp        = HID Consumer Control page 0x0c, usage 0xe9
+///   volumeDown      = HID Consumer Control page 0x0c, usage 0xea
+func injectButton(hidClient: AnyObject, buttonName: String) {
+    guard let simKitHandle = dlopen(kSimulatorKitPath, RTLD_NOLOAD) else {
+        fputs("❌ SimulatorKit not loaded\\n", stderr)
+        return
+    }
+    defer { dlclose(simKitHandle) }
+
+    // Resolve send method
+    let clientClass: AnyClass = type(of: hidClient)
+    let sendSelName = "sendWithMessage:freeWhenDone:completionQueue:completion:"
+    let sendSel = NSSelectorFromString(sendSelName)
+    guard hidClient.responds(to: sendSel),
+          let sendMethod = class_getInstanceMethod(clientClass, sendSel) else {
+        fputs("❌ HIDClient does not respond to send selector\\n", stderr)
+        return
+    }
+    typealias SendFn = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, Bool, AnyObject?, AnyObject?) -> Void
+    let sendFn = unsafeBitCast(method_getImplementation(sendMethod), to: SendFn.self)
+
+    // ── Volume buttons use IndigoHIDMessageForHIDArbitrary ──
+    if buttonName == "volumeUp" || buttonName == "volumeDown" {
+        guard let rawPtr = dlsym(simKitHandle, "IndigoHIDMessageForHIDArbitrary") else {
+            fputs("❌ dlsym(IndigoHIDMessageForHIDArbitrary) failed\\n", stderr)
+            return
+        }
+        let arbitraryFn = unsafeBitCast(rawPtr, to: IndigoHIDMessageForHIDArbitraryFn.self)
+
+        let kConsumerControlPage: UInt32 = 0x0c
+        let usageCode: UInt32 = (buttonName == "volumeUp") ? 0xe9 : 0xea
+
+        // Button down
+        guard let msgDown = arbitraryFn(kIndigoHIDTargetButton, kConsumerControlPage, usageCode, 1) else {
+            fputs("❌ IndigoHIDMessageForHIDArbitrary returned nil (down)\\n", stderr)
+            return
+        }
+        sendFn(hidClient, sendSel, msgDown, false, nil, nil)
+        Thread.sleep(forTimeInterval: 0.05)
+
+        // Button up
+        guard let msgUp = arbitraryFn(kIndigoHIDTargetButton, kConsumerControlPage, usageCode, 2) else {
+            fputs("❌ IndigoHIDMessageForHIDArbitrary returned nil (up)\\n", stderr)
+            return
+        }
+        sendFn(hidClient, sendSel, msgUp, false, nil, nil)
+
+        print("✅ Volume button: \\"\\(buttonName)\\" (page=0x0c, usage=0x\\(String(usageCode, radix: 16)))")
+        return
+    }
+
+    // ── All other buttons use IndigoHIDMessageForButton ──
+    // Button code mapping (from Simulator.app disassembly):
+    //   home: Face ID = 0, Touch ID = 401 (0x191)
+    //   lock: 1
+    // For now we default to Face ID (code=0) since iPhone 17 Pro is our test device.
+    // TODO: Query device.hasHomeButton via ObjC runtime to auto-detect.
+    let buttonCodes: [String: UInt32] = [
+        "home": 0,      // Face ID home (goes to home screen)
+        "lock": 1,      // Lock/Power/Side button
+    ]
+
+    guard let buttonCode = buttonCodes[buttonName] else {
+        fputs("❌ Unknown button: \\"\\(buttonName)\\". Valid: home, lock, volumeUp, volumeDown\\n", stderr)
+        exit(1)
+    }
+
+    guard let rawPtr = dlsym(simKitHandle, "IndigoHIDMessageForButton") else {
+        fputs("❌ dlsym(IndigoHIDMessageForButton) failed\\n", stderr)
+        return
+    }
+    let buttonFn = unsafeBitCast(rawPtr, to: IndigoHIDMessageForButtonFn.self)
+
+    // Button down
+    guard let msgDown = buttonFn(buttonCode, 1, kIndigoHIDTargetButton) else {
+        fputs("❌ IndigoHIDMessageForButton returned nil (down)\\n", stderr)
+        return
+    }
+    sendFn(hidClient, sendSel, msgDown, false, nil, nil)
+    Thread.sleep(forTimeInterval: 0.05)
+
+    // Button up
+    guard let msgUp = buttonFn(buttonCode, 2, kIndigoHIDTargetButton) else {
+        fputs("❌ IndigoHIDMessageForButton returned nil (up)\\n", stderr)
+        return
+    }
+    sendFn(hidClient, sendSel, msgUp, false, nil, nil)
+
+    print("✅ Button pressed: \\"\\(buttonName)\\" (code=\\(buttonCode), target=0x\\(String(kIndigoHIDTargetButton, radix: 16)))")
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// MARK: - Main entry point
+// ──────────────────────────────────────────────────────────────────────────────
+
+func printUsage() -> Never {
+    fputs("""
+    Usage:
+      wms-indigo-poc --discover
+          List SimulatorKit/CoreSimulator ObjC classes and their methods.
+
+      wms-indigo-poc <udid> tap <normX> <normY>
+          Inject a tap at normalised coordinates (0.0–1.0).
+
+      wms-indigo-poc <udid> swipe <x1> <y1> <x2> <y2> [steps] [durationMs]
+          Inject a swipe gesture between normalised coordinates.
+          Default: 10 steps, 300ms duration.
+
+      wms-indigo-poc <udid> key <keyName>
+          Inject a single key press (down + up).
+          Key names: a-z, 0-9, Enter, Backspace, Delete, Tab, Escape,
+                     ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Space, etc.
+
+      wms-indigo-poc <udid> type <text>
+          Type a text string as a series of key events.
+
+      wms-indigo-poc <udid> button <buttonName>
+          Press a hardware button: home, lock, volumeUp, volumeDown.
+
+    Examples:
+      wms-indigo-poc --discover
+      wms-indigo-poc ABCD-1234 tap 0.5 0.5
+      wms-indigo-poc ABCD-1234 swipe 0.5 0.8 0.5 0.2
+      wms-indigo-poc ABCD-1234 key Enter
+      wms-indigo-poc ABCD-1234 type "hello world"
+      wms-indigo-poc ABCD-1234 button home
+
+    """, stderr)
+    exit(1)
+}
+
+let args = CommandLine.arguments
+
+guard args.count >= 2 else { printUsage() }
+
+// ── Load frameworks first (required before any ObjC introspection) ────────────
+print("──────────────────────────────────────────────────────────")
+print("  WMS IndigoHID POC")
+print("──────────────────────────────────────────────────────────")
+loadFramework(kCoreSimulatorPath)
+loadFramework(kSimulatorKitPath)
+print("")
+
+// ── Dispatch on command ───────────────────────────────────────────────────────
+let command = args[1]
+
+if command == "--discover" {
+    print("🔍 Discovering SimulatorKit and CoreSimulator ObjC classes…\\n")
+    discoverClasses()
+} else {
+    // All other commands require: <udid> <command> [args...]
+    guard args.count >= 3 else { printUsage() }
+    let udid = command
+    let subcommand = args[2]
+
+    // Find device and create HID client (common for all commands)
+    print("🎯 Target UDID: \\(udid)\\n")
+
+    guard let device = findSimDevice(udid: udid) else {
+        fputs("❌ Could not locate SimDevice — see diagnostics above.\\n", stderr)
+        exit(1)
+    }
+
+    if let nameVal = objcCall(device, sel: NSSelectorFromString("name")),
+       let stateVal = objcCall(device, sel: NSSelectorFromString("stateString")) {
+        print("  Device: \\(nameVal) (\\(stateVal))")
+    }
+    print("")
+
+    guard let hidClient = createHIDClient(for: device) else {
+        fputs("❌ Could not create SimDeviceLegacyHIDClient.\\n", stderr)
+        exit(1)
+    }
+    print("")
+
+    switch subcommand {
+    case "tap":
+        guard args.count >= 5,
+              let normX = Double(args[3]), let normY = Double(args[4]),
+              (0.0...1.0).contains(normX), (0.0...1.0).contains(normY) else {
+            fputs("Usage: wms-indigo-poc <udid> tap <normX> <normY>\\n", stderr)
+            exit(1)
+        }
+        print("🎯 Tap at (\\(normX), \\(normY))")
+        injectTap(hidClient: hidClient, normX: normX, normY: normY)
+
+    case "swipe":
+        guard args.count >= 7,
+              let x1 = Double(args[3]), let y1 = Double(args[4]),
+              let x2 = Double(args[5]), let y2 = Double(args[6]) else {
+            fputs("Usage: wms-indigo-poc <udid> swipe <x1> <y1> <x2> <y2> [steps] [durationMs]\\n", stderr)
+            exit(1)
+        }
+        let steps = args.count >= 8 ? (Int(args[7]) ?? 10) : 10
+        let durationMs = args.count >= 9 ? (Int(args[8]) ?? 300) : 300
+        print("🎯 Swipe (\\(x1),\\(y1)) → (\\(x2),\\(y2)) steps=\\(steps) duration=\\(durationMs)ms")
+        injectSwipe(hidClient: hidClient, fromX: x1, fromY: y1, toX: x2, toY: y2, steps: steps, durationMs: durationMs)
+
+    case "key":
+        guard args.count >= 4 else {
+            fputs("Usage: wms-indigo-poc <udid> key <keyName>\\n", stderr)
+            exit(1)
+        }
+        let keyName = args[3]
+        print("🎯 Key: \\"\\(keyName)\\"")
+        injectKeyEvent(hidClient: hidClient, keyName: keyName)
+
+    case "type":
+        guard args.count >= 4 else {
+            fputs("Usage: wms-indigo-poc <udid> type <text>\\n", stderr)
+            exit(1)
+        }
+        let text = args[3]
+        print("🎯 Type: \\"\\(text.prefix(50))\\(text.count > 50 ? "…" : "")\\"")
+        injectTextInput(hidClient: hidClient, text: text)
+
+    case "button":
+        guard args.count >= 4 else {
+            fputs("Usage: wms-indigo-poc <udid> button <home|lock|volumeUp|volumeDown>\\n", stderr)
+            exit(1)
+        }
+        let buttonName = args[3]
+        print("🎯 Button: \\"\\(buttonName)\\"")
+        injectButton(hidClient: hidClient, buttonName: buttonName)
+
+    default:
+        fputs("❌ Unknown command: \\(subcommand)\\n", stderr)
+        printUsage()
+    }
+}
+`;
+
 // ---------------------------------------------------------------------------
 // Service class
 // ---------------------------------------------------------------------------
@@ -419,6 +1738,9 @@ export class IOSSimulatorService {
 
   /** In-flight promise for binary compilation (prevents parallel compilations). */
   private ensureInputBinaryPromise: Promise<string> | null = null;
+
+  /** In-flight promise for IndigoHID binary compilation (prevents parallel compilations). */
+  private ensureIndigoHIDBinaryPromise: Promise<string> | null = null;
 
   // -------------------------------------------------------------------------
   // Input binary management
@@ -468,6 +1790,57 @@ export class IOSSimulatorService {
       });
     }
     return this.ensureInputBinaryPromise;
+  }
+
+  /**
+   * Ensure the IndigoHID binary is compiled and ready.
+   * Uses SimulatorKit's private IndigoHID APIs to inject touch, keyboard,
+   * and button events directly to the simulator's backboard — no Simulator.app
+   * focus required.
+   * Concurrent calls share a single compilation Promise so the binary is
+   * compiled at most once per process. Returns the path to the compiled binary.
+   */
+  private ensureIndigoHIDBinary(): Promise<string> {
+    if (!this.ensureIndigoHIDBinaryPromise) {
+      this.ensureIndigoHIDBinaryPromise = (async (): Promise<string> => {
+        // Check if already compiled with current version
+        if (existsSync(INDIGO_BINARY_PATH) && existsSync(INDIGO_BINARY_VERSION_PATH)) {
+          let cachedVersion = '';
+          try {
+            cachedVersion = readFileSync(INDIGO_BINARY_VERSION_PATH, 'utf-8').trim();
+          } catch {
+            // Unreadable version file — treat as stale, fall through to recompile.
+          }
+          if (cachedVersion === INDIGO_BINARY_VERSION) {
+            return INDIGO_BINARY_PATH;
+          }
+        }
+
+        // Delete stale binary before recompiling.
+        try { unlinkSync(INDIGO_BINARY_PATH); } catch { /* already gone */ }
+        try { unlinkSync(INDIGO_BINARY_VERSION_PATH); } catch { /* already gone */ }
+
+        log('Compiling IndigoHID binary…');
+        writeFileSync(INDIGO_SWIFT_TMP_PATH, INDIGO_HID_SWIFT_SOURCE);
+        await exec('swiftc', [
+          INDIGO_SWIFT_TMP_PATH,
+          '-o', INDIGO_BINARY_PATH,
+          '-framework', 'Foundation',
+          '-framework', 'AppKit',
+          '-framework', 'CoreGraphics',
+          '-O',
+          '-whole-module-optimization',
+        ], { timeout: 120_000 });
+        writeFileSync(INDIGO_BINARY_VERSION_PATH, INDIGO_BINARY_VERSION);
+        log('IndigoHID binary compiled successfully.');
+        return INDIGO_BINARY_PATH;
+      })().catch((err: unknown) => {
+        // Reset so a subsequent call can retry compilation.
+        this.ensureIndigoHIDBinaryPromise = null;
+        throw err;
+      });
+    }
+    return this.ensureIndigoHIDBinaryPromise;
   }
 
   // -------------------------------------------------------------------------
@@ -810,22 +2183,18 @@ export class IOSSimulatorService {
   // -------------------------------------------------------------------------
 
   /**
-   * Simulate pressing a hardware button on the device via the precompiled
-   * CGEvent binary.
+   * Simulate pressing a hardware button on the device via the IndigoHID binary.
    *
-   * Triggers Simulator.app keyboard shortcuts rather than `xcrun simctl ui
-   * pressButton`, which does not exist — `simctl ui` only supports
-   * `appearance`, `increase_contrast`, and `content_size`.
+   * Uses SimulatorKit's private IndigoHID APIs to inject hardware button events
+   * directly to the simulator's backboard — no Simulator.app focus required.
    *
-   * Button → Simulator.app keyboard shortcut mapping:
-   * - `home`       → Cmd+Shift+H  (Device > Home)          kVK_ANSI_H = 4
-   * - `lock`       → Cmd+L        (Device > Lock Screen)   kVK_ANSI_L = 37
-   * - `volumeUp`   → Cmd+Up       (Device > Volume Up)     kVK_UpArrow = 126
-   * - `volumeDown` → Cmd+Down     (Device > Volume Down)   kVK_DownArrow = 125
+   * Supported buttons:
+   * - `home`       — Home button (Face ID: code 0)
+   * - `lock`       — Lock/Power/Side button (code 1)
+   * - `volumeUp`   — Volume Up (HID Consumer Control page 0x0c, usage 0xe9)
+   * - `volumeDown` — Volume Down (HID Consumer Control page 0x0c, usage 0xea)
    *
-   * Simulator.app must be running and connected to the device.
-   *
-   * @param udid   - The device UDID (used for logging).
+   * @param udid   - The device UDID.
    * @param button - Button to press: `'home' | 'lock' | 'volumeUp' | 'volumeDown'`
    */
   async pressButton(
@@ -834,32 +2203,11 @@ export class IOSSimulatorService {
   ): Promise<void> {
     log(`Pressing button "${button}" on device ${udid}`);
 
-    const binary = await this.ensureInputBinary();
+    const binary = await this.ensureIndigoHIDBinary();
 
-    // Map each button to a Simulator.app keyboard shortcut.
-    // These are the same shortcuts the Simulator.app Device menu uses.
-    switch (button) {
-      case 'home':
-        // Device > Home (Cmd+Shift+H) — kVK_ANSI_H = 4
-        await exec(binary, ['shortcut', '4', 'cmd,shift'], { timeout: 5_000 });
-        break;
-      case 'lock':
-        // Device > Lock Screen (Cmd+L) — kVK_ANSI_L = 37
-        await exec(binary, ['shortcut', '37', 'cmd'], { timeout: 5_000 });
-        break;
-      case 'volumeUp':
-        // Device > Volume Up (Cmd+ArrowUp on some versions, but no reliable shortcut)
-        // Use Cmd+Up — kVK_UpArrow = 126
-        await exec(binary, ['shortcut', '126', 'cmd'], { timeout: 5_000 });
-        break;
-      case 'volumeDown':
-        // Device > Volume Down (Cmd+ArrowDown on some versions, but no reliable shortcut)
-        // Use Cmd+Down — kVK_DownArrow = 125
-        await exec(binary, ['shortcut', '125', 'cmd'], { timeout: 5_000 });
-        break;
-      default:
-        throw new Error(`Unknown button: ${button}`);
-    }
+    // IndigoHID button command: wms-indigo-hid <udid> button <buttonName>
+    // Supported buttons: home, lock, volumeUp, volumeDown
+    await exec(binary, [udid, 'button', button], { timeout: 5_000 });
 
     log(`Button "${button}" pressed on device ${udid}`);
   }
@@ -1101,79 +2449,54 @@ export class IOSSimulatorService {
 
   /**
    * Type text into the currently focused text field on the device.
-   * Uses the precompiled CGEvent binary `type` command, which posts Unicode
-   * keyboard events per character — no `xcrun simctl` command exists for
-   * typing text.
+   * Uses the IndigoHID binary's `type` command to inject keyboard events
+   * directly via USB HID usage codes — no Simulator.app focus required.
    *
-   * Requires Simulator.app to be running and connected to the device.
-   *
-   * @param udid - The device UDID (used for logging).
+   * @param udid - The device UDID.
    * @param text - The text string to type.
    */
   async sendText(udid: string, text: string): Promise<void> {
     log(`Sending text to device ${udid}: "${text.substring(0, 50)}${text.length > 50 ? '…' : ''}"`);
 
-    const binary = await this.ensureInputBinary();
-    await exec(binary, ['type', text], { timeout: 10_000 });
+    const binary = await this.ensureIndigoHIDBinary();
+    await exec(binary, [udid, 'type', text], { timeout: 10_000 });
     log(`Text sent to device ${udid}`);
   }
 
   /**
    * Send a tap at the given normalised coordinates on the iOS simulator.
-   * Uses a precompiled Swift / CoreGraphics CGEvent binary (mouse-down →
-   * mouse-up) posted via `post(tap: .cghidEventTap)` after activating
-   * Simulator.app.
+   * Uses the IndigoHID binary's `tap` command to inject a touch event
+   * directly via SimulatorKit's private IndigoHID APIs.
    *
-   * Unlike the legacy AppleScript `System Events click at {x, y}` approach,
-   * this avoids macOS TCC errors (-25211, -25204) that arise from the global
-   * `click at` command. Simulator.app is brought to the foreground before
-   * events are posted so they are routed to it.
+   * No geometry lookup is required — IndigoHID accepts normalised coordinates
+   * (0.0–1.0) directly. No Simulator.app focus required.
    *
-   * Coordinate mapping:
-   *   screenX = windowX + normX × windowWidth
-   *   screenY = windowY + normY × windowHeight
-   *
-   * @param udid  - The device UDID (used for logging only).
+   * @param udid  - The device UDID.
    * @param normX - Normalised X coordinate (0.0 = left edge, 1.0 = right edge).
    * @param normY - Normalised Y coordinate (0.0 = top edge, 1.0 = bottom edge).
-   * @throws If Simulator.app is not running or the input binary is unavailable.
    */
   async sendTap(udid: string, normX: number, normY: number): Promise<void> {
     log(`Sending tap to device ${udid} at normalised (${normX.toFixed(3)}, ${normY.toFixed(3)})`);
 
-    const content = await this.getSimulatorContentGeometry();
-
-    const screenX = Math.round(content.windowX + normX * content.windowWidth);
-    const screenY = Math.round(content.windowY + normY * content.windowHeight);
-
-    const binary = await this.ensureInputBinary();
-    await exec(binary, ['tap', String(screenX), String(screenY)], { timeout: 5_000 });
-    log(`Tap sent to device ${udid} at screen (${screenX}, ${screenY})`);
+    const binary = await this.ensureIndigoHIDBinary();
+    await exec(binary, [udid, 'tap', String(normX), String(normY)], { timeout: 5_000 });
+    log(`Tap sent to device ${udid} at (${normX.toFixed(3)}, ${normY.toFixed(3)})`);
   }
 
   /**
    * Send a swipe gesture on the iOS simulator.
-   * Uses a precompiled Swift / CoreGraphics CGEvent binary (mouse-down → drag
-   * → mouse-up) posted via `post(tap: .cghidEventTap)` after activating
-   * Simulator.app.
+   * Uses the IndigoHID binary's `swipe` command to inject a touch drag
+   * directly via SimulatorKit's private IndigoHID APIs.
    *
-   * Unlike `postToPid`, `post(tap: .cghidEventTap)` requires Accessibility
-   * permission (not Input Monitoring). Simulator.app is brought to the
-   * foreground before events are posted so they are routed to it.
+   * No geometry lookup required — IndigoHID accepts normalised coordinates
+   * (0.0–1.0) directly. No Simulator.app focus required.
    *
-   * Coordinate mapping:
-   *   startX = windowX + normX1 × windowWidth   (absolute screen coordinates)
-   *   startY = windowY + normY1 × windowHeight
-   *   endX   = windowX + normX2 × windowWidth
-   *   endY   = windowY + normY2 × windowHeight
-   *
-   * @param udid       - The device UDID (used for logging only).
+   * @param udid       - The device UDID.
    * @param normX1     - Normalised start X (0.0–1.0).
    * @param normY1     - Normalised start Y (0.0–1.0).
    * @param normX2     - Normalised end X (0.0–1.0).
    * @param normY2     - Normalised end Y (0.0–1.0).
    * @param durationMs - Duration of the swipe in milliseconds (default 300).
-   * @throws If Simulator.app is not running or the input binary is unavailable.
    */
   async sendSwipe(
     udid: string,
@@ -1189,72 +2512,65 @@ export class IOSSimulatorService {
       `(${normX2.toFixed(3)},${normY2.toFixed(3)})`,
     );
 
-    const content = await this.getSimulatorContentGeometry();
-
-    const startX = Math.round(content.windowX + normX1 * content.windowWidth);
-    const startY = Math.round(content.windowY + normY1 * content.windowHeight);
-    const endX   = Math.round(content.windowX + normX2 * content.windowWidth);
-    const endY   = Math.round(content.windowY + normY2 * content.windowHeight);
-
     const steps = Math.max(5, Math.round(durationMs / 30));
-    const stepDelaySecs = (durationMs / 1000) / steps;
 
-    const binary = await this.ensureInputBinary();
+    const binary = await this.ensureIndigoHIDBinary();
     await exec(binary, [
-      'swipe',
-      String(startX), String(startY),
-      String(endX), String(endY),
-      String(steps), String(stepDelaySecs),
+      udid, 'swipe',
+      String(normX1), String(normY1),
+      String(normX2), String(normY2),
+      String(steps), String(durationMs),
     ], { timeout: 10_000 });
-    log(`Swipe sent to device ${udid} from (${startX}, ${startY}) to (${endX}, ${endY})`);
+    log(`Swipe sent to device ${udid} from (${normX1}, ${normY1}) to (${normX2}, ${normY2})`);
   }
 
   /**
-   * Send a key event to the iOS simulator via the precompiled CGEvent binary.
+   * Send a key event to the iOS simulator via the IndigoHID binary.
    *
-   * - Special keys (Enter, Backspace, arrows, etc.) are sent using the `key`
-   *   command with the macOS virtual key code (CGEvent key down+up).
-   * - Single printable characters are sent using the `keystroke` command
-   *   (CGEvent Unicode posting).
+   * Uses IndigoHID key injection via USB HID usage codes — no Simulator.app
+   * focus required. IndigoHID's internal kUSBHIDUsageCodes table handles the
+   * mapping from key name to USB HID code.
+   *
+   * - Special keys (Enter, Backspace, arrows, etc.) are mapped to IndigoHID
+   *   key names and sent via the `key` command.
+   * - Single printable characters are sent via the `key` command directly.
    * - Multi-character keys not in the map (Shift, Control, etc.) are ignored.
    *
-   * Requires Simulator.app to be running and connected to the device.
-   *
-   * @param udid - The device UDID (used for logging).
+   * @param udid - The device UDID.
    * @param key  - Logical key value from `KeyboardEvent.key`
    *               (e.g. `'a'`, `'Enter'`, `'Backspace'`).
    * @param code - Physical key code from `KeyboardEvent.code` (reserved, unused).
    */
   async sendKeyEvent(udid: string, key: string, code: string): Promise<void> {
-    // Map browser KeyboardEvent.key names → macOS virtual key codes.
-    // Reference: HIToolbox/Events.h (kVK_* constants).
-    const specialKeyMap: Record<string, number> = {
-      'Enter':      36,  // kVK_Return
-      'Backspace':  51,  // kVK_Delete (backspace)
-      'Delete':    117,  // kVK_ForwardDelete
-      'Tab':        48,  // kVK_Tab
-      'Escape':     53,  // kVK_Escape
-      'ArrowUp':   126,  // kVK_UpArrow
-      'ArrowDown': 125,  // kVK_DownArrow
-      'ArrowLeft': 123,  // kVK_LeftArrow
-      'ArrowRight':124,  // kVK_RightArrow
-      ' ':          49,  // kVK_Space
-      'Home':      115,  // kVK_Home
-      'End':       119,  // kVK_End
-      'PageUp':    116,  // kVK_PageUp
-      'PageDown':  121,  // kVK_PageDown
+    // Map browser KeyboardEvent.key names to IndigoHID key names.
+    // IndigoHID's kUSBHIDUsageCodes table accepts these names directly.
+    const specialKeyMap: Record<string, string> = {
+      'Enter':      'Enter',
+      'Backspace':  'Backspace',
+      'Delete':     'Delete',
+      'Tab':        'Tab',
+      'Escape':     'Escape',
+      'ArrowUp':    'ArrowUp',
+      'ArrowDown':  'ArrowDown',
+      'ArrowLeft':  'ArrowLeft',
+      'ArrowRight': 'ArrowRight',
+      ' ':          'Space',
+      'Home':       'Home',
+      'End':        'End',
+      'PageUp':     'PageUp',
+      'PageDown':   'PageDown',
     };
 
-    const macKeyCode = specialKeyMap[key];
+    const indigoKeyName = specialKeyMap[key];
 
-    if (macKeyCode !== undefined) {
-      // Special key — use the 'key' command with virtual key code
-      const binary = await this.ensureInputBinary();
-      await exec(binary, ['key', String(macKeyCode)], { timeout: 5_000 });
+    if (indigoKeyName !== undefined) {
+      // Special key — use the IndigoHID 'key' command
+      const binary = await this.ensureIndigoHIDBinary();
+      await exec(binary, [udid, 'key', indigoKeyName], { timeout: 5_000 });
     } else if (key.length === 1) {
-      // Printable character — use the 'keystroke' command
-      const binary = await this.ensureInputBinary();
-      await exec(binary, ['keystroke', key], { timeout: 5_000 });
+      // Single printable character — use the IndigoHID 'key' command with the character
+      const binary = await this.ensureIndigoHIDBinary();
+      await exec(binary, [udid, 'key', key], { timeout: 5_000 });
     } else {
       // Multi-character keys not in the map (Shift, Control, Alt, Meta, etc.) — ignore.
       log(`Ignoring unsupported key: "${key}" (code: "${code}")`);
