@@ -9,7 +9,6 @@ import {
 import { Router } from '@angular/router';
 import { Subscription } from 'rxjs';
 import { HttpErrorResponse } from '@angular/common/http';
-import { KeyValuePipe } from '@angular/common';
 
 import { ApiService } from '../../core/services/api.service';
 import { WebSocketService } from '../../core/services/websocket.service';
@@ -45,7 +44,7 @@ interface PlatformCard {
 @Component({
   selector: 'app-dashboard',
   standalone: true,
-  imports: [LaunchDialogComponent, KeyValuePipe],
+  imports: [LaunchDialogComponent],
   templateUrl: './dashboard.component.html',
   styleUrl: './dashboard.component.scss',
 })

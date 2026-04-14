@@ -1,9 +1,10 @@
-<section class="runtimes">
+<div class="runtimes">
+  <!-- Page header -->
   <header class="runtimes__header">
-    <h2 class="runtimes__title">Manage OS Runtimes</h2>
-    <p class="runtimes__subtitle">
-      View, download, and manage simulator runtimes for iOS and Android platforms.
-    </p>
+    <div class="runtimes__header-left">
+      <h2 class="runtimes__title">Runtimes</h2>
+      <p class="runtimes__subtitle">View, download, and manage simulator runtimes for iOS and Android platforms.</p>
+    </div>
   </header>
 
   <!-- Platform tabs -->
@@ -16,7 +17,10 @@
       aria-controls="runtimes-panel"
       (click)="selectTab('ios')"
     >
-      🍎 iOS
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/>
+      </svg>
+      iOS
     </button>
     <button
       class="runtimes__tab"
@@ -26,7 +30,10 @@
       aria-controls="runtimes-panel"
       (click)="selectTab('android')"
     >
-      🤖 Android
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M17.6 9.48l1.84-3.18c.16-.31.04-.69-.27-.86-.31-.16-.69-.04-.86.27l-1.86 3.22c-1.15-.53-2.43-.83-3.77-.87h-.27c-1.34.04-2.62.34-3.77.87L6.79 5.71c-.16-.31-.54-.43-.86-.27-.31.16-.43.55-.27.86l1.84 3.18C4.67 11.11 2.84 14.09 2.5 17.5h19c-.34-3.41-2.17-6.39-4.9-8.02zM8.5 14.5c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1zm7 0c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1z"/>
+      </svg>
+      Android
     </button>
   </div>
 
@@ -40,7 +47,13 @@
       </div>
     } @else if (errorMessage()) {
       <div class="runtimes__error" role="alert">
-        <span class="runtimes__error-icon" aria-hidden="true">⚠️</span>
+        <span class="runtimes__error-icon" aria-hidden="true">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+            <line x1="12" y1="9" x2="12" y2="13"/>
+            <line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+        </span>
         <p>{{ errorMessage() }}</p>
         <p class="runtimes__error-hint">
           Make sure the API backend is running and reload the page.
@@ -48,7 +61,13 @@
       </div>
     } @else if (currentRuntimes().length === 0) {
       <div class="runtimes__empty" role="status">
-        <span class="runtimes__empty-icon" aria-hidden="true">🔌</span>
+        <span class="runtimes__empty-icon" aria-hidden="true">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+            <line x1="8" y1="21" x2="16" y2="21"/>
+            <line x1="12" y1="17" x2="12" y2="21"/>
+          </svg>
+        </span>
         <p>No runtimes found.</p>
         <p class="runtimes__empty-hint">
           No
@@ -75,10 +94,10 @@
               <td>
                 <span class="status-badge status-badge--{{ runtime.status }}">
                   @switch (runtime.status) {
-                    @case ('installed') { ✓ Installed }
-                    @case ('downloading') { ⟳ Downloading }
-                    @case ('available') { ↓ Available }
-                    @case ('error') { ✕ Error }
+                    @case ('installed') { Installed }
+                    @case ('downloading') { Downloading }
+                    @case ('available') { Available }
+                    @case ('error') { Error }
                     @default { {{ runtime.status }} }
                   }
                 </span>
@@ -114,4 +133,4 @@
       </table>
     }
   </div>
-</section>
+</div>

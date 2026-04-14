@@ -47,7 +47,7 @@
   // Re-enable pointer events on the toast itself.
   pointer-events: auto;
 
-  // ── Type-specific left accent border + gradient tint ──────────────────────
+  // ── Type-specific left accent border with gradient tint ───────────────────
 
   &--success {
     border-left: 3px solid #4ade80;
@@ -73,9 +73,16 @@
 // ── Toast icon ────────────────────────────────────────────────────────────────
 
 .toast__icon {
-  font-size: 1rem;
-  line-height: 1.5;
+  display: flex;
+  align-items: center;
   flex-shrink: 0;
+  margin-top: 0.125rem;
+
+  // Type-specific icon color
+  .toast--success & { color: #4ade80; }
+  .toast--error &   { color: #f87171; }
+  .toast--info &    { color: #818cf8; }
+  .toast--warning & { color: #fbbf24; }
 }
 
 // ── Toast message ─────────────────────────────────────────────────────────────
@@ -93,13 +100,14 @@
 
 .toast__dismiss {
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   background: none;
   border: none;
   color: var(--color-text-muted);
-  font-size: 0.8rem;
-  line-height: 1;
   cursor: pointer;
-  padding: 0.2rem;
+  padding: 0.25rem;
   border-radius: var(--radius-sm);
   transition: all var(--transition-fast);
 
