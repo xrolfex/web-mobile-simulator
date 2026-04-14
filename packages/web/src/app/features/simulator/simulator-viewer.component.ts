@@ -11,6 +11,9 @@ import {
   inject,
   NgZone,
   effect,
+  input,
+  afterNextRender,
+  Injector,
 } from '@angular/core';
 import { TitleCasePipe } from '@angular/common';
 import { WebRtcService } from '../../core/services/webrtc.service';
@@ -70,7 +73,7 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
    * - `'webrtc'` – H.264 video via `WebRtcService`; the `<canvas>` is hidden.
    * - `'mjpeg'` – JPEG frames painted to `<canvas>` over WebSocket (default).
    */
-  @Input() streamMode: StreamMode = 'mjpeg';
+  readonly streamMode = input<StreamMode>('mjpeg');
 
   /** Platform being displayed — affects UI chrome. */
   @Input() platform: 'ios' | 'android' = 'ios';
@@ -135,6 +138,7 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
 
   private readonly ngZone = inject(NgZone);
   private readonly webRtcService = inject(WebRtcService);
+  private readonly injector = inject(Injector);
 
   // FPS tracking
   private frameCount = 0;
@@ -154,6 +158,9 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
     clientY: number;
   } | null = null;
 
+  /** Reference to the current video resize listener (for cleanup). */
+  private videoResizeListener: (() => void) | null = null;
+
   // ── Constructor ───────────────────────────────────────────────────────────
 
   constructor() {
@@ -162,9 +169,14 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
     // regardless of which fires first, the video element gets the stream.
     effect(() => {
       const stream = this.webRtcService.remoteStream();
-      if (stream && this.streamMode === 'webrtc') {
+      if (stream && this.streamMode() === 'webrtc') {
+        // Set the signal first so Angular CD runs and removes display:none from
+        // the <video> element (via the display-video--hidden class).
         this.remoteStream.set(stream);
-        this.attachStreamToVideo(stream);
+        // Defer attachStreamToVideo until after the next render so that
+        // the video element is visible before video.play() is called.
+        // Safari rejects play() on hidden elements with NotAllowedError/AbortError.
+        afterNextRender(() => { this.attachStreamToVideo(stream); }, { injector: this.injector });
       }
     });
   }
@@ -172,13 +184,11 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   ngAfterViewInit(): void {
-    if (this.streamMode === 'webrtc') {
+    if (this.streamMode() === 'webrtc') {
       this.connectWebRTC();
     } else {
       this.connect();
     }
-
-    // Start the per-second FPS counter (works for both modes).
     this.fpsInterval = setInterval(() => {
       this.ngZone.run(() => {
         this.fps.set(this.frameCount);
@@ -202,7 +212,7 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
     this.disconnect();
     this.connectionState.set('connecting');
     this.errorMessage.set('');
-    if (this.streamMode === 'webrtc') {
+    if (this.streamMode() === 'webrtc') {
       this.connectWebRTC();
     } else {
       this.connect();
@@ -355,7 +365,7 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
    * `<canvas>` element in MJPEG mode.
    */
   public focusCanvas(): void {
-    if (this.streamMode === 'webrtc') {
+    if (this.streamMode() === 'webrtc') {
       this.videoRef?.nativeElement?.focus();
     } else {
       this.canvasRef?.nativeElement?.focus();
@@ -515,8 +525,13 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
         .requestVideoFrameCallback(countFrame);
     }
 
+    // Remove any previous resize listener to avoid accumulation on reconnect.
+    if (this.videoResizeListener) {
+      video.removeEventListener('resize', this.videoResizeListener);
+    }
+
     // Keep resolution signals updated whenever the video track size changes.
-    video.addEventListener('resize', () => {
+    this.videoResizeListener = (): void => {
       this.ngZone.run(() => {
         if (video.videoWidth > 0) {
           this.frameWidth.set(video.videoWidth);
@@ -524,7 +539,8 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
           this.applyScaleMode();
         }
       });
-    });
+    };
+    video.addEventListener('resize', this.videoResizeListener);
   }
 
   /**
@@ -655,6 +671,10 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
    * Safe to call multiple times.
    */
   private disconnect(): void {
+    // Save the ws reference before nulling so that the inputWs comparison below
+    // works correctly in MJPEG mode (where inputWs === ws before disconnect).
+    const wsRef = this.ws;
+
     // Close the MJPEG stream WebSocket.
     if (this.ws) {
       try {
@@ -666,7 +686,9 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
     }
 
     // Close the input-only WebSocket if it is a separate reference (WebRTC mode).
-    if (this.inputWs && this.inputWs !== this.ws) {
+    // Compare against wsRef (the pre-null value) to avoid a false-positive when
+    // this.ws is already null after the block above.
+    if (this.inputWs && this.inputWs !== wsRef) {
       try {
         this.inputWs.close();
       } catch {
@@ -676,7 +698,7 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
     this.inputWs = null;
 
     // Disconnect the WebRTC peer connection if active.
-    if (this.streamMode === 'webrtc') {
+    if (this.streamMode() === 'webrtc') {
       this.webRtcService.disconnect();
       this.remoteStream.set(null);
     }
@@ -699,7 +721,7 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
    * In fixed modes (`1x`, `0.75x`, `0.5x`), a CSS `transform: scale()` is applied.
    */
   private applyScaleMode(): void {
-    const el = this.streamMode === 'webrtc'
+    const el = this.streamMode() === 'webrtc'
       ? this.videoRef?.nativeElement
       : this.canvasRef?.nativeElement;
     if (!el) return;

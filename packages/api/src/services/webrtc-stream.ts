@@ -7,6 +7,7 @@ import {
 } from 'werift';
 import type { EventEmitter } from 'node:events';
 import type { NaluFrame } from './screen-capture.js';
+import { screenCaptureService } from './screen-capture.js';
 
 // ---------------------------------------------------------------------------
 // Module-level helpers
@@ -163,14 +164,7 @@ export class WebRTCStreamService {
 
     const pc = new RTCPeerConnection({
       codecs: {
-        video: [
-          // Override default Constrained Baseline (42e01f) to match our
-          // VideoToolbox encoder which produces Main Profile (4d) + CABAC.
-          useH264({
-            parameters:
-              'profile-level-id=4d0028;packetization-mode=1;level-asymmetry-allowed=1',
-          }),
-        ],
+        video: [useH264()],
       },
     });
 
@@ -226,6 +220,24 @@ export class WebRTCStreamService {
     session.naluCleanup = (): void => {
       emitter.off('nalu', onNalu);
     };
+
+    // Subscribe to PLI (Picture Loss Indication) from the browser.
+    // When the browser loses decoder state it sends an RTCP PLI requesting
+    // a new keyframe.  Forward this to the capture binary.
+    const senders = session.pc.getSenders();
+    const videoSender = senders.find((s) => s.track === session.videoTrack);
+    if (videoSender && typeof (videoSender as any).onPictureLossIndication?.subscribe === 'function') {
+      const pliSub = (videoSender as any).onPictureLossIndication.subscribe(() => {
+        log(`PLI received for session ${sessionId} — requesting keyframe`);
+        screenCaptureService.requestKeyframe(sessionId);
+      });
+      // Augment the cleanup to also unsubscribe PLI.
+      const originalCleanup = session.naluCleanup;
+      session.naluCleanup = (): void => {
+        originalCleanup?.();
+        pliSub.unSubscribe();
+      };
+    }
 
     // Reset parameter-set tracking so the first keyframe after connection
     // is properly recognised as carrying the decoder-initialisation data.
@@ -328,8 +340,8 @@ export class WebRTCStreamService {
    * write them to the session's video track.
    *
    * Implements RFC 6184 packetisation:
-   * - **Single NAL unit** packets for NALUs ≤ 1200 bytes.
-   * - **FU-A fragmentation** for NALUs > 1200 bytes.
+   * - **Single NAL unit** packets for NALUs ≤ 1201 bytes.
+   * - **FU-A fragmentation** for NALUs > 1201 bytes.
    *
    * The RTP timestamp is derived from the capture presentation timestamp
    * using the standard H.264 90 kHz clock rate.
@@ -341,7 +353,7 @@ export class WebRTCStreamService {
     const { videoTrack } = session;
 
     // Convert presentation timestamp from µs to 90 kHz RTP clock units.
-    const rtpTimestamp = Number((frame.timestampUs * 90n) / 1000n) & 0xFFFFFFFF;
+    const rtpTimestamp = Number(((frame.timestampUs * 90n) / 1000n) & 0xFFFFFFFFn);
 
     // Split the Annex B stream into individual NALUs.
     const nalus = splitAnnexB(frame.naluData);
@@ -357,19 +369,20 @@ export class WebRTCStreamService {
 
       if (nalu.length === 0) continue;
 
-      if (nalu.length <= 1200) {
+      if (nalu.length <= 1201) {
         // ----------------------------------------------------------------
         // Single NAL unit packet (RFC 6184 §5.6)
         // ----------------------------------------------------------------
         const header = new RtpHeader({
           payloadType: 96,
-          sequenceNumber: session.sequenceNumber++ & 0xFFFF,
+          sequenceNumber: session.sequenceNumber,
           timestamp: rtpTimestamp,
           marker: isLastNalu,
           ssrc,
         });
         const packet = new RtpPacket(header, Buffer.from(nalu));
         videoTrack.writeRtp(packet);
+        session.sequenceNumber = (session.sequenceNumber + 1) & 0xFFFF;
       } else {
         // ----------------------------------------------------------------
         // FU-A fragmentation (RFC 6184 §5.8)
@@ -400,7 +413,7 @@ export class WebRTCStreamService {
 
           const header = new RtpHeader({
             payloadType: 96,
-            sequenceNumber: session.sequenceNumber++ & 0xFFFF,
+            sequenceNumber: session.sequenceNumber,
             timestamp: rtpTimestamp,
             // Marker bit only on the very last fragment of the last NALU in the frame.
             marker: isLastNalu && isEnd,
@@ -408,6 +421,7 @@ export class WebRTCStreamService {
           });
           const packet = new RtpPacket(header, fragment);
           videoTrack.writeRtp(packet);
+          session.sequenceNumber = (session.sequenceNumber + 1) & 0xFFFF;
 
           offset = end;
         }

@@ -281,8 +281,8 @@ export class WebRtcService {
       }
     }
 
-    this.connectionState.set('disconnected');
     this.remoteStream.set(null);
+    this.connectionState.set('disconnected');
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────

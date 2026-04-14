@@ -25,9 +25,9 @@
       @if (connectionState() === 'connected') {
         <span
           class="stream-mode-badge"
-          [title]="streamMode === 'webrtc' ? 'WebRTC (H.264)' : 'MJPEG'"
+          [title]="streamMode() === 'webrtc' ? 'WebRTC (H.264)' : 'MJPEG'"
         >
-          {{ streamMode === 'webrtc' ? 'WebRTC' : 'MJPEG' }}
+          {{ streamMode() === 'webrtc' ? 'WebRTC' : 'MJPEG' }}
         </span>
       }
     </div>
@@ -66,7 +66,7 @@
     <canvas
       #displayCanvas
       class="display-canvas"
-      [class.display-canvas--hidden]="streamMode === 'webrtc'"
+      [class.display-canvas--hidden]="streamMode() === 'webrtc'"
       tabindex="0"
       (pointerdown)="onCanvasPointerDown($event)"
       (pointerup)="onCanvasPointerUp($event)"
@@ -79,7 +79,7 @@
     <video
       #displayVideo
       class="display-video"
-      [class.display-video--hidden]="streamMode !== 'webrtc' || !remoteStream()"
+      [class.display-video--hidden]="streamMode() !== 'webrtc' || !remoteStream()"
       autoplay
       playsinline
       muted
@@ -95,6 +95,13 @@
       <div class="overlay overlay--connecting" role="status" aria-live="polite">
         <div class="spinner" aria-hidden="true"></div>
         <p class="overlay__message">Connecting to simulator…</p>
+      </div>
+    }
+
+    @if (connectionState() === 'connected' && streamMode() === 'webrtc' && !remoteStream()) {
+      <div class="overlay overlay--connecting" role="status" aria-live="polite">
+        <div class="spinner" aria-hidden="true"></div>
+        <p class="overlay__message">Waiting for video stream…</p>
       </div>
     }
 

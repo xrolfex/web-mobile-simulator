@@ -114,7 +114,7 @@ const CAPTURE_SWIFT_TMP_PATH = join(tmpdir(), 'wms-ios-capture-stream.swift');
 const MAX_IOS_CAPTURE_RESTARTS = 5;
 
 /** Version tag for the compiled iOS capture binary. Increment to force recompilation. */
-const CAPTURE_BINARY_VERSION = '5';
+const CAPTURE_BINARY_VERSION = '7';
 
 /** Sidecar file that stores the version of the currently-cached binary. */
 const CAPTURE_BINARY_VERSION_PATH = join(tmpdir(), 'wms-ios-capture-stream.ver');
@@ -174,6 +174,8 @@ NSApplication.shared.setActivationPolicy(.prohibited)
 signal(SIGTERM) { _ in exit(0) }
 signal(SIGINT)  { _ in exit(0) }
 
+var globalFrameHandler: FrameHandler? = nil
+
 let stdoutHandle = FileHandle.standardOutput
 
 // ---------------------------------------------------------------------------
@@ -224,6 +226,7 @@ class H264Encoder {
     private var session: VTCompressionSession?
     private let encoderDeviceName: String
     private let fps: Int
+    var forceNextKeyframe = false
 
     init(width: Int, height: Int, fps: Int, deviceName: String) {
         self.fps = fps
@@ -259,8 +262,7 @@ class H264Encoder {
         // Configure encoder properties.
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime,               value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering,   value: kCFBooleanFalse)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel,            value: kVTProfileLevel_H264_Main_AutoLevel)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_H264EntropyMode,         value: kVTH264EntropyMode_CABAC)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel,            value: kVTProfileLevel_H264_Baseline_AutoLevel)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,     value: (fps * 2) as CFTypeRef)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate,       value: fps as CFTypeRef)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate,          value: (width * height * 2) as CFTypeRef)
@@ -282,25 +284,25 @@ class H264Encoder {
             return
         }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        var frameProperties: CFDictionary? = nil
+        if forceNextKeyframe {
+            forceNextKeyframe = false
+            frameProperties = [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary
+        }
         VTCompressionSessionEncodeFrame(
             session,
             imageBuffer: pixelBuffer,
             presentationTimeStamp: pts,
             duration: CMTime.invalid,
-            frameProperties: nil,
+            frameProperties: frameProperties,
             sourceFrameRefcon: nil,
             infoFlagsOut: nil
         )
     }
 
     /// Request that the next frame be encoded as a keyframe.
-    func forceKeyFrame() {
-        guard let session = session else { return }
-        let props = [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary
-        _ = props // Used via frameProperties in next encode call — stored as hint only.
-        // For simplicity, invalidate and recreate is not done here; callers can
-        // call encode(sampleBuffer:) after setting forceKeyFrame on the session property.
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 0 as CFTypeRef)
+    func requestKeyframe() {
+        forceNextKeyframe = true
     }
 
     // MARK: - Private callback handler
@@ -371,10 +373,13 @@ class H264Encoder {
         // Walk the AVCC bytestream: [4-byte BE NALU length][NALU bytes]...
         var offset = 0
         while offset + 4 <= totalLength {
-            // Read the 4-byte big-endian NALU length.
-            let naluLengthBE = UnsafeRawPointer(dataPointer)
-                .load(fromByteOffset: offset, as: UInt32.self)
-            let naluLength = Int(CFSwapInt32BigToHost(naluLengthBE))
+            // Read the 4-byte big-endian NALU length byte-by-byte to avoid
+            // alignment faults on arm64 (UInt32 load requires 4-byte alignment).
+            let rawPtr = UnsafeRawPointer(dataPointer) + offset
+            let naluLength = Int(rawPtr.load(fromByteOffset: 0, as: UInt8.self)) << 24
+                           | Int(rawPtr.load(fromByteOffset: 1, as: UInt8.self)) << 16
+                           | Int(rawPtr.load(fromByteOffset: 2, as: UInt8.self)) << 8
+                           | Int(rawPtr.load(fromByteOffset: 3, as: UInt8.self))
             offset += 4
             guard offset + naluLength <= totalLength else { break }
 
@@ -450,6 +455,10 @@ class FrameHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         fputs("[\\(capturedDeviceName)] SCStream stopped with error: \\(error)\\n", stderr)
         exit(1)
     }
+
+    func requestKeyframe() {
+        h264Encoder?.requestKeyframe()
+    }
 }
 
 @available(macOS 14.0, *)
@@ -496,6 +505,7 @@ func startCapture() async {
     streamConfig.queueDepth = 3
 
     let handler = FrameHandler(deviceName: deviceName, format: captureFormat, width: captureWidth, height: captureHeight, fps: targetFps)
+    globalFrameHandler = handler
     let stream = SCStream(filter: filter, configuration: streamConfig, delegate: handler)
     let queue = DispatchQueue(label: "com.wms.capture.output", qos: .userInteractive)
 
@@ -511,6 +521,14 @@ func startCapture() async {
 
 if #available(macOS 14.0, *) {
     Task { await startCapture() }
+    // Monitor stdin for keyframe requests ("K\\n").
+    DispatchQueue.global(qos: .utility).async {
+        while let line = readLine() {
+            if line == "K" {
+                globalFrameHandler?.requestKeyframe()
+            }
+        }
+    }
     RunLoop.main.run()
 } else {
     fputs("ERROR: iOS persistent capture requires macOS 14.0 or later\\n", stderr)
@@ -721,6 +739,26 @@ export class ScreenCaptureService {
     return session?.emitter ?? null;
   }
 
+  /**
+   * Request that the capture binary for `sessionId` encode the next frame as
+   * a keyframe.  Sends "K\n" to the binary's stdin which triggers
+   * VideoToolbox's kVTEncodeFrameOptionKey_ForceKeyFrame.
+   *
+   * No-op if no capture is running for `sessionId` or the process has no stdin.
+   *
+   * @param sessionId - Session whose capture should produce a keyframe.
+   */
+  requestKeyframe(sessionId: string): void {
+    const session = this.captures.get(sessionId);
+    if (!session?.captureProcess?.stdin) return;
+
+    try {
+      session.captureProcess.stdin.write('K\n');
+    } catch {
+      // Process may have exited — ignore silently.
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Private — iOS persistent capture binary
   // -------------------------------------------------------------------------
@@ -764,6 +802,7 @@ export class ScreenCaptureService {
           CAPTURE_SWIFT_TMP_PATH,
           '-framework', 'ScreenCaptureKit',
           '-framework', 'VideoToolbox',
+          '-framework', 'CoreMedia',
           '-o', CAPTURE_BINARY_PATH,
         ], { timeout: 60_000 }); // swiftc can be slow
         await writeFile(CAPTURE_BINARY_VERSION_PATH, CAPTURE_BINARY_VERSION, 'utf8');
@@ -803,7 +842,7 @@ export class ScreenCaptureService {
     }
 
     const child = spawn(CAPTURE_BINARY_PATH, spawnArgs, {
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],  // stdin is now 'pipe' instead of 'ignore'
     });
 
     session.captureProcess = child;
@@ -932,9 +971,11 @@ export class ScreenCaptureService {
       const timestampLow = session.frameBuffer.readUInt32BE(HEADER_SIZE + 5);
       const timestampUs = BigInt(timestampHigh) * BigInt(2 ** 32) + BigInt(timestampLow);
 
-      const naluData = session.frameBuffer.subarray(
-        HEADER_SIZE + 1 + 8,
-        HEADER_SIZE + payloadLength,
+      const naluData = Buffer.from(
+        session.frameBuffer.subarray(
+          HEADER_SIZE + 1 + 8,
+          HEADER_SIZE + payloadLength,
+        ),
       );
 
       session.frameBuffer = session.frameBuffer.subarray(HEADER_SIZE + payloadLength);

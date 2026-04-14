@@ -90,12 +90,11 @@ const wsWebRTCRoutes: FastifyPluginAsync = async (fastify) => {
               socket.send(JSON.stringify(response));
             }
 
-            // Start H.264 capture AFTER the SDP answer has been sent, so the
-            // peer connection's video track is ready to receive NALUs.
-            // Connecting the NALU emitter to the track is deferred until the
-            // DTLS handshake completes — RTCRtpSender.sendRtp() silently drops
-            // all packets (including the critical first SPS/PPS keyframe) until
-            // the transport state reaches 'connected'.
+            // Both startCapture() AND connectCapture() are deferred until
+            // DTLS reaches 'connected'.  This ensures the first keyframe
+            // (which carries the critical SPS/PPS parameter sets) is never
+            // lost — the NALU listener is installed before the Swift binary
+            // emits any frames.
             if (msg.type === 'offer') {
               const udid = session.device?.platformDeviceId;
               const iosDeviceName = sessionManagerService.getIosDeviceName(sessionId);
@@ -103,35 +102,36 @@ const wsWebRTCRoutes: FastifyPluginAsync = async (fastify) => {
                 // Stop any existing JPEG capture.
                 screenCaptureService.stopCapture(sessionId);
 
-                // Start H.264 capture (process begins compiling/spawning in
-                // the background while DTLS negotiation proceeds in parallel).
-                const emitter = screenCaptureService.startCapture(
-                  sessionId,
-                  'ios',
-                  udid,           // arg 3: deviceId = UDID ✓
-                  undefined,      // arg 4: targetFps (use default)
-                  iosDeviceName,  // arg 5: deviceName = "wms-session-XXXXXXXX" ✓
-                  'h264',         // arg 6: captureFormat
-                );
-
-                // Defer connecting the NALU stream to the WebRTC video track
-                // until DTLS transport is established — otherwise
-                // RTCRtpSender.sendRtp() silently drops all packets (including
-                // the critical first keyframe with SPS/PPS parameter sets).
+                // Defer BOTH startCapture AND connectCapture until DTLS is
+                // connected.  This ensures the first keyframe (which carries
+                // the critical SPS/PPS parameter sets) is never lost — the
+                // NALU listener is installed before the Swift binary emits any
+                // frames.
                 const attachCapture = (): void => {
-                  log(`DTLS connected for session ${sessionId} — attaching H.264 capture`);
+                  log(`DTLS connected for session ${sessionId} — starting H.264 capture`);
+                  const emitter = screenCaptureService.startCapture(
+                    sessionId,
+                    'ios',
+                    udid,
+                    undefined,
+                    iosDeviceName,
+                    'h264',
+                  );
                   webRTCStreamService.connectCapture(sessionId, emitter);
                 };
 
+                // Subscribe FIRST, then check current state, to avoid a race where
+                // the state transitions between the if-check and the .subscribe() call.
+                const sub = pc.connectionStateChange.subscribe((state: string) => {
+                  if (state === 'connected') {
+                    sub.unSubscribe();
+                    attachCapture();
+                  }
+                });
+                // If already connected by the time we subscribed, fire immediately.
                 if (pc.connectionState === 'connected') {
+                  sub.unSubscribe();
                   attachCapture();
-                } else {
-                  const sub = pc.connectionStateChange.subscribe((state: string) => {
-                    if (state === 'connected') {
-                      sub.unSubscribe();
-                      attachCapture();
-                    }
-                  });
                 }
               }
             }
@@ -149,11 +149,13 @@ const wsWebRTCRoutes: FastifyPluginAsync = async (fastify) => {
       // 5. Clean up on close.
       socket.on('close', () => {
         log(`WebRTC signaling WebSocket closed for session ${sessionId}`);
+        screenCaptureService.stopCapture(sessionId);
         void webRTCStreamService.stopSession(sessionId);
       });
 
       socket.on('error', (err: Error) => {
         warn(`WebRTC signaling WebSocket error for session ${sessionId}: ${err.message}`);
+        screenCaptureService.stopCapture(sessionId);
         void webRTCStreamService.stopSession(sessionId);
       });
     },
