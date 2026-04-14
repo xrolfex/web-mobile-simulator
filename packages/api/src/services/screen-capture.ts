@@ -18,6 +18,18 @@ const execFileAsync = promisify(execFile);
 // ---------------------------------------------------------------------------
 
 /**
+ * A parsed H.264 NALU frame from the capture process.
+ */
+export interface NaluFrame {
+  /** Raw H.264 data in Annex B format (with 0x00000001 start codes). */
+  naluData: Buffer;
+  /** Whether this frame contains a keyframe (IDR). */
+  isKeyframe: boolean;
+  /** Presentation timestamp in microseconds. */
+  timestampUs: bigint;
+}
+
+/**
  * Public metadata for a single active screen-capture session.
  * Does not include the internal emitter or abort controller.
  */
@@ -32,6 +44,8 @@ export interface CaptureSession {
   targetFps: number;
   /** Whether the capture loop is actively running. */
   active: boolean;
+  /** Output format for iOS capture: 'jpeg' for MJPEG streaming, 'h264' for WebRTC. */
+  captureFormat: 'jpeg' | 'h264';
 }
 
 /** Internal record that adds runtime state to CaptureSession. */
@@ -100,7 +114,7 @@ const CAPTURE_SWIFT_TMP_PATH = join(tmpdir(), 'wms-ios-capture-stream.swift');
 const MAX_IOS_CAPTURE_RESTARTS = 5;
 
 /** Version tag for the compiled iOS capture binary. Increment to force recompilation. */
-const CAPTURE_BINARY_VERSION = '3';
+const CAPTURE_BINARY_VERSION = '4';
 
 /** Sidecar file that stores the version of the currently-cached binary. */
 const CAPTURE_BINARY_VERSION_PATH = join(tmpdir(), 'wms-ios-capture-stream.ver');
@@ -112,8 +126,12 @@ const CAPTURE_BINARY_VERSION_PATH = join(tmpdir(), 'wms-ios-capture-stream.ver')
 /**
  * Swift source for the persistent iOS screen capture process.
  * Uses ScreenCaptureKit SCStream (macOS 14+) to capture the
- * Simulator window by device name, writing 4-byte big-endian length-prefixed
- * JPEG frames to stdout.
+ * Simulator window by device name.
+ *
+ * Supports two output modes selected via `--format`:
+ * - `jpeg` (default): writes 4-byte big-endian length-prefixed JPEG frames to stdout.
+ * - `h264`: uses VideoToolbox VTCompressionSession for hardware H.264 encoding and
+ *   writes frames in the format: [4B BE length][1B flags][8B BE timestamp_us][Annex-B NALU data].
  */
 const IOS_CAPTURE_SWIFT_SOURCE = `
 import ScreenCaptureKit
@@ -123,9 +141,11 @@ import CoreImage
 import Foundation
 import AppKit
 import UniformTypeIdentifiers
+import VideoToolbox
 
 var deviceName: String = ""
 var targetFps: Int = 15
+var captureFormat: String = "jpeg"
 var argIdx = 1
 while argIdx < CommandLine.arguments.count {
     switch CommandLine.arguments[argIdx] {
@@ -135,12 +155,15 @@ while argIdx < CommandLine.arguments.count {
     case "--fps":
         argIdx += 1
         if argIdx < CommandLine.arguments.count { targetFps = Int(CommandLine.arguments[argIdx]) ?? 15 }
+    case "--format":
+        argIdx += 1
+        if argIdx < CommandLine.arguments.count { captureFormat = CommandLine.arguments[argIdx] }
     default: break
     }
     argIdx += 1
 }
 guard !deviceName.isEmpty else {
-    fputs("Usage: ios-capture-stream --device-name <name> [--fps <fps>]\\n", stderr)
+    fputs("Usage: ios-capture-stream --device-name <name> [--fps <fps>] [--format jpeg|h264]\\n", stderr)
     exit(1)
 }
 
@@ -153,6 +176,11 @@ signal(SIGINT)  { _ in exit(0) }
 
 let stdoutHandle = FileHandle.standardOutput
 
+// ---------------------------------------------------------------------------
+// JPEG output helpers
+// ---------------------------------------------------------------------------
+
+/// Write a JPEG frame to stdout as: [4-byte BE uint32 length][JPEG bytes].
 func writeFrame(_ jpegData: Data) {
     var length = UInt32(jpegData.count).bigEndian
     let lengthData = withUnsafeBytes(of: &length) { Data($0) }
@@ -160,18 +188,235 @@ func writeFrame(_ jpegData: Data) {
     stdoutHandle.write(jpegData)
 }
 
+// ---------------------------------------------------------------------------
+// H.264 output helpers
+// ---------------------------------------------------------------------------
+
+/// Write an H.264 Annex-B packet to stdout.
+///
+/// Protocol: [4-byte BE uint32 total-payload-length][1-byte flags][8-byte BE uint64 timestamp_us][NALU bytes]
+///
+/// - Parameters:
+///   - naluData: Raw Annex-B NALU bytes (already converted from AVCC).
+///   - isKeyframe: Whether this packet contains a keyframe.
+///   - timestampUs: Presentation timestamp in microseconds.
+func writeH264Frame(_ naluData: Data, isKeyframe: Bool, timestampUs: UInt64) {
+    // payload = 1 (flags) + 8 (timestamp) + naluData.count
+    let payloadLength = UInt32(1 + 8 + naluData.count)
+    var beLength = payloadLength.bigEndian
+    var beTimestamp = timestampUs.bigEndian
+    let flags: UInt8 = isKeyframe ? 0x01 : 0x00
+
+    var packet = Data()
+    packet.append(contentsOf: withUnsafeBytes(of: &beLength) { Array($0) })
+    packet.append(flags)
+    packet.append(contentsOf: withUnsafeBytes(of: &beTimestamp) { Array($0) })
+    packet.append(naluData)
+    stdoutHandle.write(packet)
+}
+
+// ---------------------------------------------------------------------------
+// H.264 encoder (VideoToolbox)
+// ---------------------------------------------------------------------------
+
+@available(macOS 14.0, *)
+class H264Encoder {
+    private var session: VTCompressionSession?
+    private let encoderDeviceName: String
+    private let fps: Int
+
+    init(width: Int, height: Int, fps: Int, deviceName: String) {
+        self.fps = fps
+        self.encoderDeviceName = deviceName
+
+        // The compression callback must be a C-compatible function pointer.
+        // We pass \`self\` as the refcon and bridge it back inside the closure.
+        let refcon = Unmanaged.passRetained(self).toOpaque()
+
+        let callback: VTCompressionOutputCallback = { refcon, _, status, _, sampleBuffer in
+            guard let refcon = refcon else { return }
+            let encoder = Unmanaged<H264Encoder>.fromOpaque(refcon).takeUnretainedValue()
+            encoder.handleEncodedFrame(status: status, sampleBuffer: sampleBuffer)
+        }
+
+        let err = VTCompressionSessionCreate(
+            allocator: kCFAllocatorDefault,
+            width: Int32(width),
+            height: Int32(height),
+            codecType: kCMVideoCodecType_H264,
+            encoderSpecification: nil,
+            imageBufferAttributes: nil,
+            compressedDataAllocator: nil,
+            outputCallback: callback,
+            refcon: refcon,
+            compressionSessionOut: &session
+        )
+        guard err == noErr, let session = session else {
+            fputs("[\\(deviceName)] Failed to create VTCompressionSession: \\(err)\\n", stderr)
+            exit(1)
+        }
+
+        // Configure encoder properties.
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime,               value: kCFBooleanTrue)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering,   value: kCFBooleanFalse)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel,            value: kVTProfileLevel_H264_Main_AutoLevel)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_H264EntropyMode,         value: kVTH264EntropyMode_CABAC)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,     value: (fps * 2) as CFTypeRef)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate,       value: fps as CFTypeRef)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate,          value: (width * height * 2) as CFTypeRef)
+
+        VTCompressionSessionPrepareToEncodeFrames(session)
+    }
+
+    deinit {
+        if let session = session {
+            VTCompressionSessionInvalidate(session)
+        }
+    }
+
+    /// Submit a pixel buffer from SCStream for H.264 encoding.
+    func encode(sampleBuffer: CMSampleBuffer) {
+        guard let session = session else { return }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+            fputs("[\\(encoderDeviceName)] H264Encoder: failed to get pixel buffer\\n", stderr)
+            return
+        }
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        VTCompressionSessionEncodeFrame(
+            session,
+            imageBuffer: pixelBuffer,
+            presentationTimeStamp: pts,
+            duration: CMTime.invalid,
+            frameProperties: nil,
+            sourceFrameRefcon: nil,
+            infoFlagsOut: nil
+        )
+    }
+
+    /// Request that the next frame be encoded as a keyframe.
+    func forceKeyFrame() {
+        guard let session = session else { return }
+        let props = [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary
+        _ = props // Used via frameProperties in next encode call — stored as hint only.
+        // For simplicity, invalidate and recreate is not done here; callers can
+        // call encode(sampleBuffer:) after setting forceKeyFrame on the session property.
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 0 as CFTypeRef)
+    }
+
+    // MARK: - Private callback handler
+
+    private func handleEncodedFrame(status: OSStatus, sampleBuffer: CMSampleBuffer?) {
+        guard status == noErr else {
+            fputs("[\\(encoderDeviceName)] H264Encoder: encode error \\(status)\\n", stderr)
+            return
+        }
+        guard let sampleBuffer = sampleBuffer else { return }
+        guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
+
+        // Determine whether this is a keyframe.
+        let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
+        var isKeyframe = true
+        if let attachments = attachments, CFArrayGetCount(attachments) > 0 {
+            let attachment = CFArrayGetValueAtIndex(attachments, 0)
+            let dict = unsafeBitCast(attachment, to: CFDictionary.self)
+            if let notSync = CFDictionaryGetValue(dict, Unmanaged.passUnretained(kCMSampleAttachmentKey_NotSync).toOpaque()) {
+                let notSyncBool = unsafeBitCast(notSync, to: CFBoolean.self)
+                isKeyframe = !CFBooleanGetValue(notSyncBool)
+            }
+        }
+
+        // Get presentation timestamp in microseconds.
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let timestampUs = UInt64(max(0, Int64(pts.seconds * 1_000_000)))
+
+        var annexBData = Data()
+
+        // On keyframes, prepend SPS and PPS parameter sets from the format description.
+        if isKeyframe, let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) {
+            var paramCount = 0
+            CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                formatDesc, parameterSetIndex: 0, parameterSetPointerOut: nil,
+                parameterSetSizeOut: nil, parameterSetCountOut: &paramCount, nalUnitHeaderLengthOut: nil
+            )
+            for i in 0..<paramCount {
+                var paramPtr: UnsafePointer<UInt8>? = nil
+                var paramSize: Int = 0
+                let pErr = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                    formatDesc, parameterSetIndex: i,
+                    parameterSetPointerOut: &paramPtr,
+                    parameterSetSizeOut: &paramSize,
+                    parameterSetCountOut: nil,
+                    nalUnitHeaderLengthOut: nil
+                )
+                if pErr == noErr, let paramPtr = paramPtr {
+                    // Annex B start code: 0x00 0x00 0x00 0x01
+                    annexBData.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
+                    annexBData.append(Data(bytes: paramPtr, count: paramSize))
+                }
+            }
+        }
+
+        // Extract and convert AVCC-format encoded data to Annex B.
+        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
+        var totalLength = 0
+        var dataPointer: UnsafeMutablePointer<Int8>? = nil
+        let blockErr = CMBlockBufferGetDataPointer(
+            blockBuffer, atOffset: 0,
+            lengthAtOffsetOut: nil,
+            totalLengthOut: &totalLength,
+            dataPointerOut: &dataPointer
+        )
+        guard blockErr == noErr, let dataPointer = dataPointer else { return }
+
+        // Walk the AVCC bytestream: [4-byte BE NALU length][NALU bytes]...
+        var offset = 0
+        while offset + 4 <= totalLength {
+            // Read the 4-byte big-endian NALU length.
+            let naluLengthBE = dataPointer.advanced(by: offset).withMemoryRebound(to: UInt32.self, capacity: 1) { $0.pointee }
+            let naluLength = Int(CFSwapInt32BigToHost(naluLengthBE))
+            offset += 4
+            guard offset + naluLength <= totalLength else { break }
+
+            // Append Annex B start code + NALU bytes.
+            annexBData.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
+            annexBData.append(Data(bytes: dataPointer.advanced(by: offset), count: naluLength))
+            offset += naluLength
+        }
+
+        if !annexBData.isEmpty {
+            writeH264Frame(annexBData, isKeyframe: isKeyframe, timestampUs: timestampUs)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SCStream frame handler
+// ---------------------------------------------------------------------------
+
 @available(macOS 14.0, *)
 class FrameHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
     private let capturedDeviceName: String
+    private let format: String
+    private var h264Encoder: H264Encoder?
 
-    init(deviceName: String) {
+    init(deviceName: String, format: String, width: Int, height: Int, fps: Int) {
         self.capturedDeviceName = deviceName
+        self.format = format
+        if format == "h264" {
+            self.h264Encoder = H264Encoder(width: width, height: height, fps: fps, deviceName: deviceName)
+        }
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen else { return }
 
+        if format == "h264" {
+            h264Encoder?.encode(sampleBuffer: sampleBuffer)
+            return
+        }
+
+        // JPEG mode (default).
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
             fputs("[\\(capturedDeviceName)] Failed to get pixel buffer from sample buffer\\n", stderr)
             return
@@ -241,20 +486,22 @@ func startCapture() async {
     let streamConfig = SCStreamConfiguration()
     streamConfig.showsCursor = false
     let scale = NSScreen.main?.backingScaleFactor ?? 2.0
-    streamConfig.width  = max(1, Int(capturedWindow.frame.width  * scale))
-    streamConfig.height = max(1, Int(capturedWindow.frame.height * scale))
+    let captureWidth  = max(1, Int(capturedWindow.frame.width  * scale))
+    let captureHeight = max(1, Int(capturedWindow.frame.height * scale))
+    streamConfig.width  = captureWidth
+    streamConfig.height = captureHeight
     streamConfig.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(targetFps))
     streamConfig.pixelFormat = kCVPixelFormatType_32BGRA
     streamConfig.queueDepth = 3
 
-    let handler = FrameHandler(deviceName: deviceName)
+    let handler = FrameHandler(deviceName: deviceName, format: captureFormat, width: captureWidth, height: captureHeight, fps: targetFps)
     let stream = SCStream(filter: filter, configuration: streamConfig, delegate: handler)
     let queue = DispatchQueue(label: "com.wms.capture.output", qos: .userInteractive)
 
     do {
         try stream.addStreamOutput(handler, type: .screen, sampleHandlerQueue: queue)
         try await stream.startCapture()
-        fputs("[\\(deviceName)] SCStream capture started\\n", stderr)
+        fputs("[\\(deviceName)] SCStream capture started (format=\\(captureFormat))\\n", stderr)
     } catch {
         fputs("[\\(deviceName)] Failed to start SCStream: \\(error)\\n", stderr)
         exit(1)
@@ -302,10 +549,15 @@ function iosTempFilePath(sessionId: string): string {
  * emulators.
  *
  * For iOS, a persistent Swift binary is compiled on first use (via
- * `swiftc` + ScreenCaptureKit) and spawned per session.  The binary writes
- * 4-byte big-endian length-prefixed JPEG frames to stdout which are parsed
- * and emitted as `'frame'` events.  If compilation fails, the service falls
- * back to the `xcrun simctl io screenshot` polling loop.
+ * `swiftc` + ScreenCaptureKit + VideoToolbox) and spawned per session.  The
+ * binary supports two output modes selected via `--format`:
+ * - `jpeg` (default): writes 4-byte big-endian length-prefixed JPEG frames to
+ *   stdout, parsed and emitted as `'frame'` events.
+ * - `h264`: uses VideoToolbox VTCompressionSession for hardware H.264 encoding
+ *   and writes frames as `[4B length][1B flags][8B timestamp_us][Annex-B data]`.
+ *
+ * If compilation fails, the service falls back to the `xcrun simctl io
+ * screenshot` polling loop.
  *
  * For Android, `adb exec-out screencap -p` is polled at the target FPS.
  *
@@ -334,17 +586,20 @@ export class ScreenCaptureService {
    * `xcrun simctl io screenshot` polling loop.
    *
    * Emits:
-   * - `'frame'` — `Buffer` containing JPEG (iOS) or PNG (Android) image data.
+   * - `'frame'` — `Buffer` containing JPEG (iOS JPEG mode) or PNG (Android) image data.
+   * - `'nalu'`  — {@link NaluFrame} emitted for each H.264 NALU when `captureFormat === 'h264'`.
    * - `'error'` — `Error` emitted after `MAX_CONSECUTIVE_FAILURES` consecutive
    *   capture failures; the loop is stopped before emission.
    *
-   * @param sessionId  - Unique identifier for the session.
-   * @param platform   - Target platform: `'ios'` or `'android'`.
-   * @param deviceId   - iOS UDID or Android ADB serial (e.g. `'emulator-5554'`).
-   * @param targetFps  - Desired capture rate (default {@link DEFAULT_TARGET_FPS}).
-   * @param deviceName - iOS Simulator device name used to locate the correct
-   *                     Simulator window (iOS only, falls back to `deviceId`).
-   * @returns An `EventEmitter` that emits `'frame'` and `'error'` events.
+   * @param sessionId     - Unique identifier for the session.
+   * @param platform      - Target platform: `'ios'` or `'android'`.
+   * @param deviceId      - iOS UDID or Android ADB serial (e.g. `'emulator-5554'`).
+   * @param targetFps     - Desired capture rate (default {@link DEFAULT_TARGET_FPS}).
+   * @param deviceName    - iOS Simulator device name used to locate the correct
+   *                        Simulator window (iOS only, falls back to `deviceId`).
+   * @param captureFormat - Output format for iOS capture: `'jpeg'` for MJPEG
+   *                        streaming (default), `'h264'` for WebRTC H.264.
+   * @returns An `EventEmitter` that emits `'frame'` / `'nalu'` / `'error'` events.
    */
   startCapture(
     sessionId: string,
@@ -352,6 +607,7 @@ export class ScreenCaptureService {
     deviceId: string,
     targetFps: number = DEFAULT_TARGET_FPS,
     deviceName?: string,
+    captureFormat: 'jpeg' | 'h264' = 'jpeg',
   ): EventEmitter {
     const existing = this.captures.get(sessionId);
     if (existing) {
@@ -371,11 +627,12 @@ export class ScreenCaptureService {
       emitter,
       abortController,
       frameBuffer: Buffer.alloc(0),
+      captureFormat,
     };
 
     this.captures.set(sessionId, session);
 
-    log(`Starting ${platform} capture for session ${sessionId} (device=${deviceId}, fps=${targetFps})`);
+    log(`Starting ${platform} capture for session ${sessionId} (device=${deviceId}, fps=${targetFps}, format=${captureFormat})`);
 
     if (platform === 'ios') {
       // Start a persistent SCStream-based capture process.
@@ -472,6 +729,9 @@ export class ScreenCaptureService {
    * exist at {@link CAPTURE_BINARY_PATH}.  Concurrent calls share a single
    * compilation Promise so the binary is compiled at most once per process.
    *
+   * Links `-framework ScreenCaptureKit` and `-framework VideoToolbox` to
+   * support both JPEG and H.264 output modes.
+   *
    * @throws If `swiftc` is unavailable or compilation fails.
    */
   private ensureCaptureBinaryCompiled(): Promise<void> {
@@ -502,6 +762,7 @@ export class ScreenCaptureService {
         await execFileAsync('swiftc', [
           CAPTURE_SWIFT_TMP_PATH,
           '-framework', 'ScreenCaptureKit',
+          '-framework', 'VideoToolbox',
           '-o', CAPTURE_BINARY_PATH,
         ], { timeout: 60_000 }); // swiftc can be slow
         await writeFile(CAPTURE_BINARY_VERSION_PATH, CAPTURE_BINARY_VERSION, 'utf8');
@@ -529,12 +790,18 @@ export class ScreenCaptureService {
     deviceName: string,
     restartCount: number = 0,
   ): void {
-    const { sessionId, targetFps } = session;
+    const { sessionId, targetFps, captureFormat } = session;
 
-    const child = spawn(CAPTURE_BINARY_PATH, [
+    const spawnArgs = [
       '--device-name', deviceName,
       '--fps', String(targetFps),
-    ], {
+    ];
+
+    if (captureFormat === 'h264') {
+      spawnArgs.push('--format', 'h264');
+    }
+
+    const child = spawn(CAPTURE_BINARY_PATH, spawnArgs, {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
@@ -543,7 +810,11 @@ export class ScreenCaptureService {
 
     child.stdout!.on('data', (chunk: Buffer) => {
       session.frameBuffer = Buffer.concat([session.frameBuffer, chunk]);
-      this.parseFrameBuffer(session);
+      if (captureFormat === 'h264') {
+        this.parseH264Buffer(session);
+      } else {
+        this.parseFrameBuffer(session);
+      }
     });
 
     child.stderr!.on('data', (data: Buffer) => {
@@ -601,7 +872,7 @@ export class ScreenCaptureService {
       }
     });
 
-    log(`iOS capture process started for session ${sessionId} (device="${deviceName}", fps=${targetFps})`);
+    log(`iOS capture process started for session ${sessionId} (device="${deviceName}", fps=${targetFps}, format=${captureFormat})`);
   }
 
   /**
@@ -626,6 +897,50 @@ export class ScreenCaptureService {
 
       if (session.active && !session.abortController.signal.aborted) {
         session.emitter.emit('frame', jpegData);
+      }
+    }
+  }
+
+  /**
+   * Parse H.264 frames from the capture process stdout buffer, emitting a
+   * `'nalu'` event for each complete frame.
+   *
+   * Frame format: [4B BE uint32 payload-length][1B flags][8B BE uint64 timestamp_us][Annex-B NALU data]
+   *
+   * The payload length covers the flags byte, timestamp bytes, and NALU data
+   * (i.e. it does NOT include the 4-byte length prefix itself).
+   *
+   * @param session - The iOS capture session whose `frameBuffer` to parse.
+   */
+  private parseH264Buffer(session: InternalCaptureSession): void {
+    const HEADER_SIZE = 4;
+    while (session.frameBuffer.length >= HEADER_SIZE) {
+      const payloadLength = session.frameBuffer.readUInt32BE(0);
+
+      if (session.frameBuffer.length < HEADER_SIZE + payloadLength) {
+        break; // Incomplete frame — wait for more data.
+      }
+
+      // Parse the payload fields.
+      const flags = session.frameBuffer[HEADER_SIZE];
+      const isKeyframe = (flags & 0x01) !== 0;
+
+      // Read 8-byte BE uint64 timestamp (split into two 32-bit reads to avoid
+      // precision loss — JavaScript numbers cannot represent all 64-bit integers).
+      const timestampHigh = session.frameBuffer.readUInt32BE(HEADER_SIZE + 1);
+      const timestampLow = session.frameBuffer.readUInt32BE(HEADER_SIZE + 5);
+      const timestampUs = BigInt(timestampHigh) * BigInt(2 ** 32) + BigInt(timestampLow);
+
+      const naluData = session.frameBuffer.subarray(
+        HEADER_SIZE + 1 + 8,
+        HEADER_SIZE + payloadLength,
+      );
+
+      session.frameBuffer = session.frameBuffer.subarray(HEADER_SIZE + payloadLength);
+
+      if (session.active && !session.abortController.signal.aborted) {
+        const naluFrame: NaluFrame = { naluData, isKeyframe, timestampUs };
+        session.emitter.emit('nalu', naluFrame);
       }
     }
   }

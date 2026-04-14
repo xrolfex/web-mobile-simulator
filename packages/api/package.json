@@ -21,6 +21,7 @@
     "dotenv": "^16.4.0",
     "drizzle-orm": "^0.45.2",
     "fastify": "^5.0.0",
+    "werift": "^0.22.9",
     "ws": "^8.20.0"
   },
   "devDependencies": {
