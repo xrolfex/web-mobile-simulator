@@ -59,7 +59,7 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
   /** VNC connection state forwarded from the viewer child. */
   protected readonly vncState = signal<ConnectionState>('connecting');
 
-  /** Stream mode for the viewer — WebRTC for iOS, MJPEG for Android. */
+  /** Stream mode for the viewer — WebCodecs for iOS, MJPEG for Android. */
   protected readonly streamMode = signal<StreamMode>('mjpeg');
 
   /** Whether a stop-session request is in-flight. */
@@ -466,11 +466,11 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
 
   /**
    * Determine the stream mode based on the session's platform.
-   * iOS uses WebRTC (H.264); Android stays on MJPEG.
+   * iOS uses WebCodecs (H.264); Android stays on MJPEG.
    * @param session The loaded session.
    */
   private determineStreamMode(session: Session): StreamMode {
-    return session.device.platform === 'ios' ? 'webrtc' : 'mjpeg';
+    return session.device.platform === 'ios' ? 'webcodecs' : 'mjpeg';
   }
 
   /**

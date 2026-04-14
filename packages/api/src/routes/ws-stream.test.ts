@@ -10,9 +10,12 @@ import type { Session } from '@web-mobile-simulator/shared';
 vi.mock('../services/index.js', () => ({
   screenCaptureService: {
     getEmitter: vi.fn(),
+    startCapture: vi.fn(),
+    stopCapture: vi.fn(),
   },
   sessionManagerService: {
     getSession: vi.fn(),
+    getIosDeviceName: vi.fn(),
   },
   iosSimulatorService: {
     sendTap: vi.fn(),
@@ -91,8 +94,8 @@ function createMockSocket(readyState = 1): MockWebSocket {
 }
 
 /** Build a mock Fastify-like request with the given sessionId. */
-function createMockRequest(sessionId: string) {
-  return { params: { sessionId } };
+function createMockRequest(sessionId: string, query: Record<string, string> = {}) {
+  return { params: { sessionId }, query };
 }
 
 // ---------------------------------------------------------------------------

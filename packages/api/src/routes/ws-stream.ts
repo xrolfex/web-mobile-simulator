@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import type { WebSocket } from 'ws';
 import { screenCaptureService, sessionManagerService, iosSimulatorService, androidEmulatorService } from '../services/index.js';
+import type { NaluFrame } from '../services/screen-capture.js';
 
 // ---------------------------------------------------------------------------
 // Module-level helpers (mirrors ws-events.ts style)
@@ -23,10 +24,12 @@ function warn(message: string): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Screenshot-based MJPEG streaming WebSocket route plugin.
+ * Screenshot-based MJPEG streaming and H.264 NALU streaming WebSocket route plugin.
  *
  * Registers `GET /ws/stream/:sessionId` as a WebSocket endpoint.
- * When a browser connects:
+ * Supports two streaming modes selected via the `?format` query parameter:
+ *
+ * **MJPEG mode** (default, no query param or `?format=mjpeg`):
  * 1. The session is verified to exist and be in `'active'` status.
  * 2. The frame emitter for the session is retrieved from
  *    {@link screenCaptureService}.
@@ -35,8 +38,18 @@ function warn(message: string): void {
  * 4. On WebSocket close or error, subscriptions are cleaned up.
  * 5. On capture error the WebSocket is closed with code 1011.
  *
+ * **H.264 mode** (`?format=h264`):
+ * 1. The session is verified to exist and be in `'active'` status.
+ * 2. Any existing JPEG capture is stopped and a new H.264 capture is started
+ *    via {@link screenCaptureService.startCapture}.
+ * 3. Each `'nalu'` event is forwarded to the browser as a binary WebSocket
+ *    message with a 9-byte header: `[1B flags (bit 0 = isKeyframe)][8B BE timestamp_us][NALU data]`.
+ * 4. On WebSocket close or error, subscriptions are cleaned up and
+ *    {@link screenCaptureService.stopCapture} is called.
+ * 5. On capture error the WebSocket is closed with code 1011.
+ *
  * Input messages from the browser are JSON-encoded events for touch and key
- * input forwarding to the device.
+ * input forwarding to the device (identical in both modes).
  */
 const wsStreamRoutes: FastifyPluginAsync = async (fastify) => {
   // @fastify/websocket v11 + Fastify 5: handler receives (socket, request)
@@ -46,8 +59,10 @@ const wsStreamRoutes: FastifyPluginAsync = async (fastify) => {
     { websocket: true },
     (socket: WebSocket, request) => {
       const { sessionId } = request.params as { sessionId: string };
+      const query = request.query as Record<string, string>;
+      const isH264 = query['format'] === 'h264';
 
-      log(`Stream WebSocket connection for session ${sessionId}`);
+      log(`Stream WebSocket connection for session ${sessionId} (${isH264 ? 'H.264' : 'MJPEG'})`);
 
       // 1. Verify the session exists and is active.
       const session = sessionManagerService.getSession(sessionId);
@@ -57,52 +72,132 @@ const wsStreamRoutes: FastifyPluginAsync = async (fastify) => {
         return;
       }
 
-      // 2. Get the frame emitter for this session.
-      const emitter = screenCaptureService.getEmitter(sessionId);
-      if (!emitter) {
-        warn(`No active screen capture for session ${sessionId} — closing`);
-        socket.close(1008, 'No active capture for this session');
-        return;
+      if (isH264) {
+        // -----------------------------------------------------------------------
+        // H.264 mode: stop any existing JPEG capture, start H.264, subscribe to
+        // 'nalu' events and forward them as framed binary WebSocket messages.
+        // -----------------------------------------------------------------------
+
+        const udid = session.device?.platformDeviceId;
+        const iosDeviceName = sessionManagerService.getIosDeviceName(sessionId);
+
+        if (!udid || !iosDeviceName) {
+          warn(`Missing device info for H.264 capture on session ${sessionId} — closing`);
+          socket.close(1008, 'Missing device info for H.264 capture');
+          return;
+        }
+
+        // Stop any existing JPEG capture, then start H.264.
+        screenCaptureService.stopCapture(sessionId);
+        const emitter = screenCaptureService.startCapture(
+          sessionId,
+          'ios',
+          udid,
+          undefined,
+          iosDeviceName,
+          'h264',
+        );
+
+        // Subscribe to NALU events and forward as framed binary messages.
+        // Binary message layout:
+        //   [1 byte: flags (bit 0 = isKeyframe)]
+        //   [8 bytes BE: timestamp in microseconds (BigInt)]
+        //   [remaining: raw Annex B NALU data]
+        const onNalu = (frame: NaluFrame): void => {
+          if (socket.readyState === socket.OPEN) {
+            const flags = Buffer.alloc(1);
+            flags[0] = frame.isKeyframe ? 1 : 0;
+
+            const timestamp = Buffer.alloc(8);
+            timestamp.writeBigUInt64BE(frame.timestampUs);
+
+            const message = Buffer.concat([flags, timestamp, frame.naluData]);
+            socket.send(message);
+          }
+        };
+
+        const onCaptureError = (err: Error): void => {
+          warn(`H.264 capture error for session ${sessionId}: ${err.message}`);
+          if (socket.readyState === socket.OPEN) {
+            socket.close(1011, `Capture error: ${err.message}`);
+          }
+        };
+
+        emitter.on('nalu', onNalu);
+        emitter.on('error', onCaptureError);
+
+        // Clean up subscriptions, listeners, and capture on disconnect.
+        const cleanup = (): void => {
+          emitter.off('nalu', onNalu);
+          emitter.off('error', onCaptureError);
+          screenCaptureService.stopCapture(sessionId);
+          log(`H.264 stream WebSocket cleaned up for session ${sessionId}`);
+        };
+
+        socket.on('close', () => {
+          log(`H.264 stream WebSocket closed for session ${sessionId}`);
+          cleanup();
+        });
+
+        socket.on('error', (err: Error) => {
+          warn(`H.264 stream WebSocket error for session ${sessionId}: ${err.message}`);
+          cleanup();
+        });
+      } else {
+        // -----------------------------------------------------------------------
+        // MJPEG mode: existing behaviour — unchanged.
+        // -----------------------------------------------------------------------
+
+        // 2. Get the frame emitter for this session.
+        const emitter = screenCaptureService.getEmitter(sessionId);
+        if (!emitter) {
+          warn(`No active screen capture for session ${sessionId} — closing`);
+          socket.close(1008, 'No active capture for this session');
+          return;
+        }
+
+        // 3. Subscribe to frame events and forward as binary WebSocket messages.
+        const onFrame = (frame: Buffer): void => {
+          if (socket.readyState === socket.OPEN) {
+            socket.send(frame);
+          }
+        };
+
+        const onCaptureError = (err: Error): void => {
+          warn(`Capture error for session ${sessionId}: ${err.message}`);
+          if (socket.readyState === socket.OPEN) {
+            socket.close(1011, `Capture error: ${err.message}`);
+          }
+        };
+
+        emitter.on('frame', onFrame);
+        emitter.on('error', onCaptureError);
+
+        // 4. Clean up subscriptions on disconnect.
+        const cleanup = (): void => {
+          emitter.off('frame', onFrame);
+          emitter.off('error', onCaptureError);
+          log(`Stream WebSocket cleaned up for session ${sessionId}`);
+        };
+
+        socket.on('close', () => {
+          log(`Stream WebSocket closed for session ${sessionId}`);
+          cleanup();
+        });
+
+        socket.on('error', (err: Error) => {
+          warn(`Stream WebSocket error for session ${sessionId}: ${err.message}`);
+          cleanup();
+        });
       }
 
-      // 3. Subscribe to frame events and forward as binary WebSocket messages.
-      const onFrame = (frame: Buffer): void => {
-        if (socket.readyState === socket.OPEN) {
-          socket.send(frame);
-        }
-      };
-
-      const onCaptureError = (err: Error): void => {
-        warn(`Capture error for session ${sessionId}: ${err.message}`);
-        if (socket.readyState === socket.OPEN) {
-          socket.close(1011, `Capture error: ${err.message}`);
-        }
-      };
-
-      emitter.on('frame', onFrame);
-      emitter.on('error', onCaptureError);
-
-      // 4. Clean up subscriptions on disconnect.
-      const cleanup = (): void => {
-        emitter.off('frame', onFrame);
-        emitter.off('error', onCaptureError);
-        log(`Stream WebSocket cleaned up for session ${sessionId}`);
-      };
-
-      socket.on('close', () => {
-        log(`Stream WebSocket closed for session ${sessionId}`);
-        cleanup();
-      });
-
-      socket.on('error', (err: Error) => {
-        warn(`Stream WebSocket error for session ${sessionId}: ${err.message}`);
-        cleanup();
-      });
-
+      // -------------------------------------------------------------------------
       // 5. Handle input messages from the browser (touch/key forwarding).
+      // Identical in both MJPEG and H.264 modes.
       // Messages are JSON-encoded:
       //   { type: 'touch', action: 'tap', x: 0.5, y: 0.25, deviceX: 540, deviceY: 960 }
       //   { type: 'touch', action: 'swipe', startX: 0.1, startY: 0.5, endX: 0.9, endY: 0.5, deviceStartX: 108, deviceStartY: 960, deviceEndX: 972, deviceEndY: 960 }
+      // -------------------------------------------------------------------------
       socket.on('message', (data: Buffer) => {
         try {
           const msg = JSON.parse(data.toString()) as Record<string, unknown>;

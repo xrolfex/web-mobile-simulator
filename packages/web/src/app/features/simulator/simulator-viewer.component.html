@@ -25,9 +25,9 @@
       @if (connectionState() === 'connected') {
         <span
           class="stream-mode-badge"
-          [title]="streamMode() === 'webrtc' ? 'WebRTC (H.264)' : 'MJPEG'"
+          [title]="streamMode() === 'webcodecs' ? 'H.264 (WebCodecs)' : 'MJPEG'"
         >
-          {{ streamMode() === 'webrtc' ? 'WebRTC' : 'MJPEG' }}
+          {{ streamMode() === 'webcodecs' ? 'H.264' : 'MJPEG' }}
         </span>
       }
     </div>
@@ -62,11 +62,10 @@
   <!-- ── Canvas Container ────────────────────────────────────────────── -->
   <div class="canvas-container" aria-label="Simulator display">
 
-    <!-- MJPEG canvas — hidden in WebRTC mode -->
+    <!-- Shared canvas — used for both MJPEG and WebCodecs modes -->
     <canvas
       #displayCanvas
       class="display-canvas"
-      [class.display-canvas--hidden]="streamMode() === 'webrtc'"
       tabindex="0"
       (pointerdown)="onCanvasPointerDown($event)"
       (pointerup)="onCanvasPointerUp($event)"
@@ -75,33 +74,10 @@
       aria-label="Simulator screen — click, drag, or type to interact"
     ></canvas>
 
-    <!-- WebRTC video — hidden when not in WebRTC mode or stream not yet attached -->
-    <video
-      #displayVideo
-      class="display-video"
-      [class.display-video--hidden]="streamMode() !== 'webrtc' || !remoteStream()"
-      autoplay
-      playsinline
-      muted
-      tabindex="0"
-      (pointerdown)="onCanvasPointerDown($event)"
-      (pointerup)="onCanvasPointerUp($event)"
-      (pointermove)="onCanvasPointerMove($event)"
-      (keydown)="onCanvasKeyDown($event)"
-      aria-label="Simulator screen — click, drag, or type to interact"
-    ></video>
-
     @if (connectionState() === 'connecting') {
       <div class="overlay overlay--connecting" role="status" aria-live="polite">
         <div class="spinner" aria-hidden="true"></div>
         <p class="overlay__message">Connecting to simulator…</p>
-      </div>
-    }
-
-    @if (connectionState() === 'connected' && streamMode() === 'webrtc' && !remoteStream()) {
-      <div class="overlay overlay--connecting" role="status" aria-live="polite">
-        <div class="spinner" aria-hidden="true"></div>
-        <p class="overlay__message">Waiting for video stream…</p>
       </div>
     }
 
