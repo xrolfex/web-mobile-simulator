@@ -100,7 +100,7 @@ const CAPTURE_SWIFT_TMP_PATH = join(tmpdir(), 'wms-ios-capture-stream.swift');
 const MAX_IOS_CAPTURE_RESTARTS = 5;
 
 /** Version tag for the compiled iOS capture binary. Increment to force recompilation. */
-const CAPTURE_BINARY_VERSION = '2';
+const CAPTURE_BINARY_VERSION = '3';
 
 /** Sidecar file that stores the version of the currently-cached binary. */
 const CAPTURE_BINARY_VERSION_PATH = join(tmpdir(), 'wms-ios-capture-stream.ver');
@@ -111,13 +111,15 @@ const CAPTURE_BINARY_VERSION_PATH = join(tmpdir(), 'wms-ios-capture-stream.ver')
 
 /**
  * Swift source for the persistent iOS screen capture process.
- * Uses ScreenCaptureKit SCScreenshotManager (macOS 14+) to capture the
+ * Uses ScreenCaptureKit SCStream (macOS 14+) to capture the
  * Simulator window by device name, writing 4-byte big-endian length-prefixed
  * JPEG frames to stdout.
  */
 const IOS_CAPTURE_SWIFT_SOURCE = `
 import ScreenCaptureKit
 import CoreGraphics
+import CoreMedia
+import CoreImage
 import Foundation
 import AppKit
 import UniformTypeIdentifiers
@@ -159,70 +161,108 @@ func writeFrame(_ jpegData: Data) {
 }
 
 @available(macOS 14.0, *)
-func runCaptureLoop() async {
-    let frameInterval: TimeInterval = 1.0 / Double(targetFps)
-    var consecutiveFailures = 0
-    let maxFailures = 30
+class FrameHandler: NSObject, SCStreamOutput, SCStreamDelegate {
+    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+    private let capturedDeviceName: String
 
-    while true {
-        let loopStart = Date()
+    init(deviceName: String) {
+        self.capturedDeviceName = deviceName
+    }
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .screen else { return }
+
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+            fputs("[\\(capturedDeviceName)] Failed to get pixel buffer from sample buffer\\n", stderr)
+            return
+        }
+
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else {
+            fputs("[\\(capturedDeviceName)] Failed to create CGImage from CIImage\\n", stderr)
+            return
+        }
+
+        let mutableData = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            mutableData, UTType.jpeg.identifier as CFString, 1, nil
+        ) else {
+            fputs("[\\(capturedDeviceName)] Failed to create CGImageDestination\\n", stderr)
+            return
+        }
+        let options: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: 0.85]
+        CGImageDestinationAddImage(destination, cgImage, options as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else {
+            fputs("[\\(capturedDeviceName)] Failed to finalize JPEG destination\\n", stderr)
+            return
+        }
+
+        writeFrame(mutableData as Data)
+    }
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        fputs("[\\(capturedDeviceName)] SCStream stopped with error: \\(error)\\n", stderr)
+        exit(1)
+    }
+}
+
+@available(macOS 14.0, *)
+func startCapture() async {
+    let maxRetries = 30
+    var retryCount = 0
+    var window: SCWindow? = nil
+
+    // Discover the Simulator window once at startup, retrying until found.
+    while retryCount < maxRetries {
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             let simulatorWindows = content.windows.filter {
                 $0.owningApplication?.bundleIdentifier == "com.apple.iphonesimulator"
             }
-            guard let window = (
-                simulatorWindows.first(where: { ($0.title ?? "").contains(deviceName) })
-                ?? simulatorWindows.first
-            ) else {
-                consecutiveFailures += 1
-                fputs("[\\(deviceName)] No Simulator window found (\\(consecutiveFailures)/\\(maxFailures))\\n", stderr)
-                if consecutiveFailures >= maxFailures { exit(1) }
-                try await Task.sleep(nanoseconds: 500_000_000)
-                continue
+            if let found = simulatorWindows.first(where: { ($0.title ?? "").contains(deviceName) })
+                ?? simulatorWindows.first {
+                window = found
+                break
             }
-            consecutiveFailures = 0
-
-            let filter = SCContentFilter(desktopIndependentWindow: window)
-            let config = SCStreamConfiguration()
-            config.showsCursor = false
-            let scale = NSScreen.main?.backingScaleFactor ?? 2.0
-            config.width  = max(1, Int(window.frame.width  * scale))
-            config.height = max(1, Int(window.frame.height * scale))
-
-            let cgImage = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
-
-            let mutableData = NSMutableData()
-            guard let destination = CGImageDestinationCreateWithData(
-                mutableData, UTType.jpeg.identifier as CFString, 1, nil
-            ) else { continue }
-            let options: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: 0.85]
-            CGImageDestinationAddImage(destination, cgImage, options as CFDictionary)
-            guard CGImageDestinationFinalize(destination) else { continue }
-
-            writeFrame(mutableData as Data)
-
         } catch {
-            consecutiveFailures += 1
-            fputs("[\\(deviceName)] Capture error: \\(error) (\\(consecutiveFailures)/\\(maxFailures))\\n", stderr)
-            if consecutiveFailures >= maxFailures {
-                fputs("[\\(deviceName)] Too many consecutive failures — exiting\\n", stderr)
-                exit(1)
-            }
-            try? await Task.sleep(nanoseconds: 500_000_000)
-            continue
+            fputs("[\\(deviceName)] Error querying shareable content: \\(error)\\n", stderr)
         }
+        retryCount += 1
+        fputs("[\\(deviceName)] No Simulator window found (\\(retryCount)/\\(maxRetries))\\n", stderr)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+    }
 
-        let elapsed = Date().timeIntervalSince(loopStart)
-        let remaining = frameInterval - elapsed
-        if remaining > 0.001 {
-            try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
-        }
+    guard let capturedWindow = window else {
+        fputs("[\\(deviceName)] Simulator window not found after \\(maxRetries) retries — exiting\\n", stderr)
+        exit(1)
+    }
+
+    let filter = SCContentFilter(desktopIndependentWindow: capturedWindow)
+    let streamConfig = SCStreamConfiguration()
+    streamConfig.showsCursor = false
+    let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+    streamConfig.width  = max(1, Int(capturedWindow.frame.width  * scale))
+    streamConfig.height = max(1, Int(capturedWindow.frame.height * scale))
+    streamConfig.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(targetFps))
+    streamConfig.pixelFormat = kCVPixelFormatType_32BGRA
+    streamConfig.queueDepth = 3
+
+    let handler = FrameHandler(deviceName: deviceName)
+    let stream = SCStream(filter: filter, configuration: streamConfig, delegate: handler)
+    let queue = DispatchQueue(label: "com.wms.capture.output", qos: .userInteractive)
+
+    do {
+        try stream.addStreamOutput(handler, type: .screen, sampleHandlerQueue: queue)
+        try await stream.startCapture()
+        fputs("[\\(deviceName)] SCStream capture started\\n", stderr)
+    } catch {
+        fputs("[\\(deviceName)] Failed to start SCStream: \\(error)\\n", stderr)
+        exit(1)
     }
 }
 
 if #available(macOS 14.0, *) {
-    Task { await runCaptureLoop() }
+    Task { await startCapture() }
     RunLoop.main.run()
 } else {
     fputs("ERROR: iOS persistent capture requires macOS 14.0 or later\\n", stderr)
@@ -338,7 +378,7 @@ export class ScreenCaptureService {
     log(`Starting ${platform} capture for session ${sessionId} (device=${deviceId}, fps=${targetFps})`);
 
     if (platform === 'ios') {
-      // Start a persistent SCScreenshotManager-based capture process.
+      // Start a persistent SCStream-based capture process.
       // Falls back to the xcrun polling loop if compilation fails.
       void this.ensureCaptureBinaryCompiled()
         .then(() => {
