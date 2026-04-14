@@ -66,6 +66,17 @@ const wsWebRTCRoutes: FastifyPluginAsync = async (fastify) => {
       // 2. Create a WebRTC peer connection for this session.
       const pc = webRTCStreamService.createSession(sessionId);
 
+      // ── Diagnostic: log ALL connection state transitions ────────────
+      pc.connectionStateChange.subscribe((state: string) => {
+        log(`[DIAG] connectionState for ${sessionId}: ${state}`);
+      });
+      pc.iceConnectionStateChange.subscribe((state: string) => {
+        log(`[DIAG] iceConnectionState for ${sessionId}: ${state}`);
+      });
+      pc.signalingStateChange.subscribe((state: string) => {
+        log(`[DIAG] signalingState for ${sessionId}: ${state}`);
+      });
+
       // 3. Wire up ICE candidates to be sent to the browser.
       pc.onIceCandidate.subscribe((candidate) => {
         if (candidate && socket.readyState === socket.OPEN) {

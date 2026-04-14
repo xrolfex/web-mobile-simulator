@@ -118,7 +118,7 @@ const CAPTURE_SWIFT_TMP_PATH = join(tmpdir(), 'wms-ios-capture-stream.swift');
 const MAX_IOS_CAPTURE_RESTARTS = 5;
 
 /** Version tag for the compiled iOS capture binary. Increment to force recompilation. */
-const CAPTURE_BINARY_VERSION = '11';
+const CAPTURE_BINARY_VERSION = '13';
 
 /** Sidecar file that stores the version of the currently-cached binary. */
 const CAPTURE_BINARY_VERSION_PATH = join(tmpdir(), 'wms-ios-capture-stream.ver');
@@ -333,6 +333,10 @@ class H264Encoder {
         if shouldForceKeyframe { forceNextKeyframe = false }
         keyframeLock.unlock()
 
+        if shouldForceKeyframe {
+            fputs("[\\(encoderDeviceName)] encodePixelBuffer: forcing keyframe\\n", stderr)
+        }
+
         var frameProperties: CFDictionary? = nil
         if shouldForceKeyframe {
             frameProperties = [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary
@@ -462,6 +466,7 @@ class FrameHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     private var lastFrameTime: Date = Date()
     private var idleRefreshTimer: DispatchSourceTimer? = nil
     private var idleRefreshLogged: Bool = false
+    private var idleKeyframeNeeded: Bool = true
 
     init(deviceName: String, format: String, width: Int, height: Int, fps: Int) {
         self.capturedDeviceName = deviceName
@@ -500,7 +505,11 @@ class FrameHandler: NSObject, SCStreamOutput, SCStreamDelegate {
                     self.idleRefreshLogged = true
                     fputs("[\\(self.capturedDeviceName)] Content idle — refreshing frame for WebRTC\\n", stderr)
                 }
-                let freshPTS = CMTime(value: Int64(Date().timeIntervalSince1970 * 1_000_000), timescale: 1_000_000)
+                if self.idleKeyframeNeeded {
+                    self.idleKeyframeNeeded = false
+                    encoder.requestKeyframe()
+                }
+                let freshPTS = CMClockGetTime(CMClockGetHostTimeClock())
                 encoder.encodePixelBuffer(pixelBuffer, presentationTime: freshPTS)
             }
             idleTimer.resume()
@@ -521,6 +530,8 @@ class FrameHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         self.lastFrameTime = Date()
         // Reset idle log flag so the next idle period logs once.
         self.idleRefreshLogged = false
+        // Signal that the next idle period must begin with a keyframe.
+        self.idleKeyframeNeeded = true
 
         guard type == .screen else { return }
 
@@ -644,6 +655,7 @@ if #available(macOS 14.0, *) {
     DispatchQueue.global(qos: .utility).async {
         while let line = readLine() {
             if line == "K" {
+                fputs("[\\(deviceName)] Stdin: received keyframe request\\n", stderr)
                 globalFrameHandler?.requestKeyframe()
             }
         }
