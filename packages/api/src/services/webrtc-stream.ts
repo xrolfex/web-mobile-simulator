@@ -59,6 +59,8 @@ interface WebRTCSession {
   rtpTimestamp: number;
   /** Whether initial SPS/PPS have been sent (currently informational). */
   parameterSetsSent: boolean;
+  /** Tracks the last NALU timestamp fed to the session for gap detection. */
+  lastFedTimestampUs?: bigint;
 }
 
 // ---------------------------------------------------------------------------
@@ -354,6 +356,18 @@ export class WebRTCStreamService {
 
     // Convert presentation timestamp from µs to 90 kHz RTP clock units.
     const rtpTimestamp = Number(((frame.timestampUs * 90n) / 1000n) & 0xFFFFFFFFn);
+
+    // Detect large timestamp gaps (>2 seconds) and proactively request a keyframe
+    // so the browser decoder can recover without waiting for a PLI round-trip.
+    const GAP_THRESHOLD_US = 2_000_000n; // 2 seconds in microseconds
+    if (session.lastFedTimestampUs !== undefined) {
+      const gap = frame.timestampUs - session.lastFedTimestampUs;
+      if (gap > GAP_THRESHOLD_US) {
+        log(`Large timestamp gap for session ${session.sessionId}: ${Number(gap / 1000n)}ms — requesting keyframe`);
+        screenCaptureService.requestKeyframe(session.sessionId);
+      }
+    }
+    session.lastFedTimestampUs = frame.timestampUs;
 
     // Split the Annex B stream into individual NALUs.
     const nalus = splitAnnexB(frame.naluData);

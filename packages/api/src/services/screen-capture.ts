@@ -57,6 +57,10 @@ interface InternalCaptureSession extends CaptureSession {
   captureProcess?: ChildProcess;
   /** iOS only: accumulates partial frame data read from the capture process stdout. */
   frameBuffer: Buffer;
+  /** H.264 frame counter for observability logging. */
+  h264FrameCount?: number;
+  /** Timestamp of the last H.264 observability log. */
+  lastH264LogTime?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -114,7 +118,7 @@ const CAPTURE_SWIFT_TMP_PATH = join(tmpdir(), 'wms-ios-capture-stream.swift');
 const MAX_IOS_CAPTURE_RESTARTS = 5;
 
 /** Version tag for the compiled iOS capture binary. Increment to force recompilation. */
-const CAPTURE_BINARY_VERSION = '10';
+const CAPTURE_BINARY_VERSION = '11';
 
 /** Sidecar file that stores the version of the currently-cached binary. */
 const CAPTURE_BINARY_VERSION_PATH = join(tmpdir(), 'wms-ios-capture-stream.ver');
@@ -227,6 +231,8 @@ class H264Encoder {
     private let encoderDeviceName: String
     private let fps: Int
     var forceNextKeyframe = false
+    private var lastEncodeTime: CMTime? = nil
+    private var keyframeLock = NSLock()
 
     init(width: Int, height: Int, fps: Int, deviceName: String) {
         self.fps = fps
@@ -277,6 +283,8 @@ class H264Encoder {
     }
 
     /// Submit a pixel buffer from SCStream for H.264 encoding.
+    /// Detects gaps longer than 2 seconds and forces an IDR (keyframe) on the
+    /// first frame after the gap so decoders can recover cleanly.
     func encode(sampleBuffer: CMSampleBuffer) {
         guard let session = session else { return }
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
@@ -284,9 +292,23 @@ class H264Encoder {
             return
         }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+
+        // Force IDR after a gap longer than 2 seconds (no frames submitted).
+        if let last = lastEncodeTime, pts.seconds - last.seconds > 2.0 {
+            keyframeLock.lock()
+            forceNextKeyframe = true
+            keyframeLock.unlock()
+            fputs("[\\(encoderDeviceName)] Gap detected (\\(String(format: "%.1f", pts.seconds - last.seconds))s) — forcing IDR\\n", stderr)
+        }
+        lastEncodeTime = pts
+
+        keyframeLock.lock()
+        let shouldForceKeyframe = forceNextKeyframe
+        if shouldForceKeyframe { forceNextKeyframe = false }
+        keyframeLock.unlock()
+
         var frameProperties: CFDictionary? = nil
-        if forceNextKeyframe {
-            forceNextKeyframe = false
+        if shouldForceKeyframe {
             frameProperties = [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary
         }
         VTCompressionSessionEncodeFrame(
@@ -300,9 +322,38 @@ class H264Encoder {
         )
     }
 
+    /// Submit a raw pixel buffer for H.264 encoding with an explicit timestamp.
+    /// Used by the idle-refresh timer when re-encoding cached frames.
+    func encodePixelBuffer(_ pixelBuffer: CVPixelBuffer, presentationTime: CMTime) {
+        guard let session = session else { return }
+        lastEncodeTime = presentationTime
+
+        keyframeLock.lock()
+        let shouldForceKeyframe = forceNextKeyframe
+        if shouldForceKeyframe { forceNextKeyframe = false }
+        keyframeLock.unlock()
+
+        var frameProperties: CFDictionary? = nil
+        if shouldForceKeyframe {
+            frameProperties = [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary
+        }
+        VTCompressionSessionEncodeFrame(
+            session,
+            imageBuffer: pixelBuffer,
+            presentationTimeStamp: presentationTime,
+            duration: CMTime.invalid,
+            frameProperties: frameProperties,
+            sourceFrameRefcon: nil,
+            infoFlagsOut: nil
+        )
+    }
+
     /// Request that the next frame be encoded as a keyframe.
+    /// Thread-safe: may be called from any queue.
     func requestKeyframe() {
+        keyframeLock.lock()
         forceNextKeyframe = true
+        keyframeLock.unlock()
     }
 
     // MARK: - Private callback handler
@@ -407,6 +458,10 @@ class FrameHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     private var h264Encoder: H264Encoder?
     private var receivedFirstFrame: Bool = false
     private var startupWatchdogTimer: DispatchSourceTimer?
+    private var lastPixelBuffer: CVPixelBuffer? = nil
+    private var lastFrameTime: Date = Date()
+    private var idleRefreshTimer: DispatchSourceTimer? = nil
+    private var idleRefreshLogged: Bool = false
 
     init(deviceName: String, format: String, width: Int, height: Int, fps: Int) {
         self.capturedDeviceName = deviceName
@@ -429,6 +484,28 @@ class FrameHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         timer.resume()
         self.startupWatchdogTimer = timer
+
+        // Idle refresh timer (h264 mode only): re-feeds the last captured pixel buffer
+        // to the H.264 encoder every second when SCStream stops delivering frames
+        // (static screen content). This prevents the WebRTC stream from freezing.
+        if format == "h264" {
+            let idleTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+            idleTimer.schedule(deadline: .now() + 2, repeating: 1.0)
+            idleTimer.setEventHandler { [weak self] in
+                guard let self = self else { return }
+                guard self.format == "h264", let encoder = self.h264Encoder else { return }
+                guard Date().timeIntervalSince(self.lastFrameTime) > 1.0,
+                      let pixelBuffer = self.lastPixelBuffer else { return }
+                if !self.idleRefreshLogged {
+                    self.idleRefreshLogged = true
+                    fputs("[\\(self.capturedDeviceName)] Content idle — refreshing frame for WebRTC\\n", stderr)
+                }
+                let freshPTS = CMTime(value: Int64(Date().timeIntervalSince1970 * 1_000_000), timescale: 1_000_000)
+                encoder.encodePixelBuffer(pixelBuffer, presentationTime: freshPTS)
+            }
+            idleTimer.resume()
+            self.idleRefreshTimer = idleTimer
+        }
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
@@ -439,7 +516,25 @@ class FrameHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             self.startupWatchdogTimer = nil
             fputs("[\\(self.capturedDeviceName)] First frame received — startup watchdog cancelled\\n", stderr)
         }
+
+        // Track last real frame arrival time for idle detection.
+        self.lastFrameTime = Date()
+        // Reset idle log flag so the next idle period logs once.
+        self.idleRefreshLogged = false
+
         guard type == .screen else { return }
+
+        // Check frame status — skip idle frames silently (no misleading error logs).
+        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
+           let statusValue = attachments.first?[.status] as? Int,
+           statusValue != SCFrameStatus.complete.rawValue && statusValue != SCFrameStatus.started.rawValue {
+            return  // Idle, blank, suspended, or stopped — no valid pixel data
+        }
+
+        // Store the latest pixel buffer for idle frame refresh (both modes).
+        if let pb = CMSampleBufferGetImageBuffer(sampleBuffer) {
+            self.lastPixelBuffer = pb
+        }
 
         if format == "h264" {
             h264Encoder?.encode(sampleBuffer: sampleBuffer)
@@ -1007,6 +1102,14 @@ export class ScreenCaptureService {
       if (session.active && !session.abortController.signal.aborted) {
         const naluFrame: NaluFrame = { naluData, isKeyframe, timestampUs };
         session.emitter.emit('nalu', naluFrame);
+
+        // Periodic observability logging — log frame stats every 10 seconds.
+        session.h264FrameCount = (session.h264FrameCount ?? 0) + 1;
+        const now = Date.now();
+        if (!session.lastH264LogTime || now - session.lastH264LogTime >= 10_000) {
+          log(`H.264 session ${session.sessionId}: ${session.h264FrameCount} total frames, latest: keyframe=${naluFrame.isKeyframe}, ts=${naluFrame.timestampUs}µs`);
+          session.lastH264LogTime = now;
+        }
       }
     }
   }
