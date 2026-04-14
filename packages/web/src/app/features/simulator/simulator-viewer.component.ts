@@ -10,6 +10,7 @@ import {
   signal,
   inject,
   NgZone,
+  effect,
 } from '@angular/core';
 import { TitleCasePipe } from '@angular/common';
 import { WebRtcService } from '../../core/services/webrtc.service';
@@ -152,6 +153,21 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
     clientX: number;
     clientY: number;
   } | null = null;
+
+  // ── Constructor ───────────────────────────────────────────────────────────
+
+  constructor() {
+    // Reactively mirror the WebRtcService's remoteStream signal.
+    // This handles the race between the 'connected' state and the 'track' event —
+    // regardless of which fires first, the video element gets the stream.
+    effect(() => {
+      const stream = this.webRtcService.remoteStream();
+      if (stream && this.streamMode === 'webrtc') {
+        this.remoteStream.set(stream);
+        this.attachStreamToVideo(stream);
+      }
+    });
+  }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -397,12 +413,14 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
    * Establish the WebRTC connection.
    *
    * Steps:
-   * 1. Opens a dedicated input-only WebSocket to `wsUrl` for forwarding input
-   *    events (binary frames received on this socket are intentionally ignored).
-   * 2. Calls `WebRtcService.connect()` to set up the RTCPeerConnection and
+   * 1. Calls `WebRtcService.connect()` to set up the RTCPeerConnection and
    *    perform SDP negotiation.
-   * 3. On success, attaches the remote `MediaStream` to the `<video>` element
-   *    and sets up `requestVideoFrameCallback`-based FPS counting.
+   * 2. On success, sets the connection state to `'connected'` and focuses the
+   *    video element for keyboard input.
+   * 3. Opens a dedicated input-only WebSocket to `wsUrl` AFTER WebRTC is
+   *    connected, so that the H.264 capture is already running and the
+   *    `/ws/stream/:sessionId` route finds an active emitter (it closes the
+   *    socket with code 1008 if no emitter exists yet).
    */
   private connectWebRTC(): void {
     if (!this.sessionId) {
@@ -411,41 +429,34 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
       return;
     }
 
-    // Open a dedicated input-only WebSocket before starting WebRTC.
-    // We intentionally do NOT set an onmessage handler — binary JPEG frames
-    // will be sent by the server briefly (until the WebRTC signaling WS
-    // takes over screen capture) but we don't need to process them.
-    this.ngZone.runOutsideAngular(() => {
-      try {
-        const inputUrl = this.resolveWsUrl();
-        this.inputWs = new WebSocket(inputUrl);
-        this.inputWs.binaryType = 'arraybuffer';
-        // Handle errors on the input socket so they don't become unhandled rejections.
-        this.inputWs.onerror = () => {
-          console.warn('[SimulatorViewer] Input WebSocket error (WebRTC mode)');
-        };
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : 'Failed to open input WebSocket';
-        console.warn('[SimulatorViewer] Could not open input WebSocket:', message);
-        // Non-fatal — WebRTC video still works; only input will be unavailable.
-      }
-    });
-
     this.ngZone.runOutsideAngular(() => {
       this.webRtcService.connect(this.sessionId)
         .then(() => {
           this.ngZone.run(() => {
             this.setConnectionState('connected');
 
-            // Attach stream to video element
-            const stream = this.webRtcService.remoteStream();
-            if (stream) {
-              this.remoteStream.set(stream);
-              this.attachStreamToVideo(stream);
-            }
-
             // Focus the video element for keyboard input
             this.videoRef?.nativeElement?.focus();
+          });
+
+          // Open the input-only WebSocket AFTER WebRTC is connected.
+          // At this point the H.264 capture is running, so the
+          // /ws/stream/:sessionId route will find an active emitter
+          // instead of closing the socket with 1008.
+          this.ngZone.runOutsideAngular(() => {
+            try {
+              const inputUrl = this.resolveWsUrl();
+              this.inputWs = new WebSocket(inputUrl);
+              this.inputWs.binaryType = 'arraybuffer';
+              // Handle errors on the input socket so they don't become unhandled rejections.
+              this.inputWs.onerror = () => {
+                console.warn('[SimulatorViewer] Input WebSocket error (WebRTC mode)');
+              };
+            } catch (err: unknown) {
+              const message = err instanceof Error ? err.message : 'Failed to open input WebSocket';
+              console.warn('[SimulatorViewer] Could not open input WebSocket:', message);
+              // Non-fatal — WebRTC video still works; only input will be unavailable.
+            }
           });
         })
         .catch((err: unknown) => {
@@ -473,6 +484,11 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
     if (!video) return;
 
     video.srcObject = stream;
+
+    // Force playback — needed when the element was hidden at srcObject assignment time.
+    video.play().catch((err: unknown) => {
+      console.warn('[SimulatorViewer] video.play() failed:', err);
+    });
 
     // Use requestVideoFrameCallback for FPS counting when available.
     // This API is not yet in the TypeScript lib types, so we check at runtime

@@ -102,7 +102,7 @@ const INDIGO_BINARY_PATH = join(WMS_INPUT_TMP_DIR, 'wms-indigo-hid');
 const INDIGO_SWIFT_TMP_PATH = join(WMS_INPUT_TMP_DIR, 'wms-indigo-hid.swift');
 
 /** Version tag — increment to force recompilation of IndigoHID binary. */
-const INDIGO_BINARY_VERSION = '3';
+const INDIGO_BINARY_VERSION = '4';
 
 /** Sidecar file storing the version of the cached IndigoHID binary. */
 const INDIGO_BINARY_VERSION_PATH = join(WMS_INPUT_TMP_DIR, 'wms-indigo-hid.ver');
@@ -1746,9 +1746,6 @@ func runDaemonLoop(hidClient: AnyObject, udid: String) {
     writeJSONResponse(["ready": true, "udid": udid])
     fputs("[daemon] Ready. Waiting for commands on stdin.\\n", stderr)
 
-    signal(SIGTERM) { _ in exit(0) }
-    signal(SIGINT)  { _ in exit(0) }
-
     let stdinHandle = FileHandle.standardInput
     var lineBuffer = Data()
     let newline = UInt8(0x0A) // \\n
@@ -1819,7 +1816,16 @@ if command == "--discover" {
         exit(1)
     }
 
-    runDaemonLoop(hidClient: hidClient, udid: udid)
+    // Dispatch the stdin read/dispatch loop onto a background thread.
+    // The main thread MUST run the RunLoop so that XPC/mach-port
+    // replies from backboardd can be delivered (SimDeviceLegacyHIDClient
+    // uses XPC under the hood).
+    DispatchQueue.global(qos: .userInitiated).async {
+        runDaemonLoop(hidClient: hidClient, udid: udid)
+    }
+
+    // Spin the main RunLoop forever — required for XPC delivery.
+    RunLoop.main.run()
 } else {
     // All other commands require: <udid> <command> [args...]
     guard args.count >= 3 else { printUsage() }
@@ -2119,6 +2125,10 @@ export class IOSSimulatorService {
 
     const child = spawn(binaryPath, [udid], {
       stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        DEVELOPER_DIR: `${config.xcodePath}/Contents/Developer`,
+      },
     });
 
     // Suppress stdin pipe errors — write errors are handled via the write callback.
@@ -2304,6 +2314,9 @@ export class IOSSimulatorService {
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         daemon.pendingRequests.delete(id);
+        // Kill the stuck daemon so the next command auto-restarts a fresh one.
+        this.indigoDaemons.delete(udid);
+        try { daemon.process.kill('SIGTERM'); } catch { /* already dead */ }
         reject(new Error(`IndigoHID command timed out (id=${id}, cmd=${String(command['cmd'])})`));
       }, timeoutMs);
 

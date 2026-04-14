@@ -218,6 +218,10 @@ export class WebRTCStreamService {
       emitter.off('nalu', onNalu);
     };
 
+    // Reset parameter-set tracking so the first keyframe after connection
+    // is properly recognised as carrying the decoder-initialisation data.
+    session.parameterSetsSent = false;
+
     log(`Capture emitter connected to WebRTC session ${sessionId}`);
   }
 
@@ -334,7 +338,9 @@ export class WebRTCStreamService {
     const nalus = splitAnnexB(frame.naluData);
     if (nalus.length === 0) return;
 
-    const ssrc = videoTrack.ssrc ?? 0;
+    const ssrc = 0; // videoTrack.ssrc is always undefined — the real SSRC is managed by
+    // RTCRtpSender which overwrites the header field in sendRtp().
+    // Pass 0 as a placeholder; it will be replaced before transmission.
 
     for (let i = 0; i < nalus.length; i++) {
       const nalu = nalus[i]!;

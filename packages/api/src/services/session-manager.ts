@@ -309,6 +309,19 @@ export class SessionManagerService {
   }
 
   /**
+   * Returns the iOS-specific device name (Simulator window title) for the
+   * given session, or `null` if not found.  This is the
+   * "wms-session-XXXXXXXX" string used to match the Simulator.app window.
+   *
+   * @param id - Session identifier.
+   * @returns The `_iosDeviceName` string, or `null` if the session is not
+   *   found or has no iOS device name assigned yet.
+   */
+  getIosDeviceName(id: string): string | null {
+    return this.sessions.get(id)?._iosDeviceName ?? null;
+  }
+
+  /**
    * List all sessions, optionally filtered to a specific status.
    *
    * Results are read from the database so that terminated and historical
