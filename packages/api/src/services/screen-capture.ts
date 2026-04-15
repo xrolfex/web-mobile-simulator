@@ -61,6 +61,8 @@ interface InternalCaptureSession extends CaptureSession {
   h264FrameCount?: number;
   /** Timestamp of the last H.264 observability log. */
   lastH264LogTime?: number;
+  /** The iOS device UDID (used for captureDeviceId). */
+  captureDeviceId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -740,7 +742,7 @@ export class ScreenCaptureService {
   /** Active capture sessions keyed by session ID. */
   private readonly captures = new Map<string, InternalCaptureSession>();
 
-  /** Shared promise for one-time capture binary compilation. */
+  /** Shared promise for one-time SCK capture binary compilation. */
   private compileBinaryPromise: Promise<void> | null = null;
 
   // -------------------------------------------------------------------------
@@ -800,6 +802,7 @@ export class ScreenCaptureService {
       abortController,
       frameBuffer: Buffer.alloc(0),
       captureFormat,
+      captureDeviceId: deviceId,
     };
 
     this.captures.set(sessionId, session);
@@ -807,19 +810,14 @@ export class ScreenCaptureService {
     log(`Starting ${platform} capture for session ${sessionId} (device=${deviceId}, fps=${targetFps}, format=${captureFormat})`);
 
     if (platform === 'ios') {
-      // Start a persistent SCStream-based capture process.
-      // Falls back to the xcrun polling loop if compilation fails.
       void this.ensureCaptureBinaryCompiled()
         .then(() => {
           if (session.active) {
-            this.startIOSCaptureProcess(session, deviceName ?? deviceId);
+            this.startIOSCaptureProcess(session, deviceName ?? deviceId, deviceId);
           }
         })
         .catch((err: unknown) => {
-          warn(
-            `iOS capture binary unavailable (${(err as Error).message}). ` +
-            'Falling back to xcrun screenshot polling.',
-          );
+          warn(`iOS capture binary unavailable (${(err as Error).message}). Falling back to xcrun polling.`);
           if (session.active) {
             void this.runCaptureLoop(session);
           }
@@ -970,32 +968,36 @@ export class ScreenCaptureService {
   }
 
   /**
-   * Spawn the persistent iOS capture binary for a session and wire up
-   * stdout frame parsing and process lifecycle handling.
+   * Spawn the persistent iOS ScreenCaptureKit capture binary for a session
+   * and wire up stdout frame parsing and process lifecycle handling.
    *
-   * @param session      - The internal capture session (must have platform === 'ios').
-   * @param deviceName   - iOS Simulator device name used to locate the correct window.
+   * Always uses {@link CAPTURE_BINARY_PATH}, passing `--device-name <deviceName>`
+   * with standard environment variables.
+   *
+   * @param session      - The internal capture session (must have `platform === 'ios'`).
+   * @param deviceName   - iOS Simulator device name used for SCK window discovery.
+   * @param deviceId     - iOS device UDID (used for captureDeviceId on the session).
    * @param restartCount - Number of times this process has been restarted (default 0).
    *                       Used to limit total restart attempts to {@link MAX_IOS_CAPTURE_RESTARTS}.
    */
   private startIOSCaptureProcess(
     session: InternalCaptureSession,
     deviceName: string,
+    deviceId: string = session.deviceId,
     restartCount: number = 0,
   ): void {
     const { sessionId, targetFps, captureFormat } = session;
 
-    const spawnArgs = [
-      '--device-name', deviceName,
-      '--fps', String(targetFps),
-    ];
+    session.captureDeviceId = deviceId;
+
+    const spawnArgs = ['--device-name', deviceName, '--fps', String(targetFps)];
 
     if (captureFormat === 'h264') {
       spawnArgs.push('--format', 'h264');
     }
 
     const child = spawn(CAPTURE_BINARY_PATH, spawnArgs, {
-      stdio: ['pipe', 'pipe', 'pipe'],  // stdin is now 'pipe' instead of 'ignore'
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
 
     session.captureProcess = child;
@@ -1024,10 +1026,9 @@ export class ScreenCaptureService {
           `restarting (attempt ${restartCount + 1}/${MAX_IOS_CAPTURE_RESTARTS})…`,
         );
         // Keep the emitter in the captures map so WebSocket clients stay connected.
-        // Restart after a short delay to let Simulator.app fully appear.
         setTimeout(() => {
           if (session.active) {
-            this.startIOSCaptureProcess(session, deviceName, restartCount + 1);
+            this.startIOSCaptureProcess(session, deviceName, deviceId, restartCount + 1);
           }
         }, 1000);
       } else {
@@ -1055,7 +1056,7 @@ export class ScreenCaptureService {
         );
         setTimeout(() => {
           if (session.active) {
-            this.startIOSCaptureProcess(session, deviceName, restartCount + 1);
+            this.startIOSCaptureProcess(session, deviceName, deviceId, restartCount + 1);
           }
         }, 1000);
       } else {
@@ -1065,7 +1066,7 @@ export class ScreenCaptureService {
       }
     });
 
-    log(`iOS capture process started for session ${sessionId} (device="${deviceName}", fps=${targetFps}, format=${captureFormat})`);
+    log(`iOS capture process started for session ${sessionId} (SCK device="${deviceName}", fps=${targetFps}, format=${captureFormat})`);
   }
 
   /**
