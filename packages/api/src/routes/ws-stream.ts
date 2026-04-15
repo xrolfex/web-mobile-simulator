@@ -87,8 +87,8 @@ const wsStreamRoutes: FastifyPluginAsync = async (fastify) => {
           return;
         }
 
-        // Stop any existing JPEG capture, then start H.264.
-        screenCaptureService.stopCapture(sessionId);
+        // Start H.264 capture if not already running (startCapture is idempotent —
+        // returns the existing emitter if capture is already active for this session).
         const emitter = screenCaptureService.startCapture(
           sessionId,
           'ios',

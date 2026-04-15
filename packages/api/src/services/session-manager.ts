@@ -672,7 +672,7 @@ export class SessionManagerService {
 
       // Start screen capture (Simulator.app is already running for this device).
       log(`[${sessionId}] Starting screen capture for warm device ${udid}…`);
-      screenCaptureService.startCapture(sessionId, 'ios', udid, undefined, deviceName);
+      screenCaptureService.startCapture(sessionId, 'ios', udid, undefined, deviceName, 'h264');
       const wsUrl = `/ws/stream/${sessionId}`;
 
       session.status = 'active';
@@ -736,7 +736,7 @@ export class SessionManagerService {
 
     // Step 3 — Start screen capture.
     log(`[${sessionId}] Starting screen capture for iOS Simulator ${udid}…`);
-    screenCaptureService.startCapture(sessionId, 'ios', udid, undefined, deviceName);
+    screenCaptureService.startCapture(sessionId, 'ios', udid, undefined, deviceName, 'h264');
     const wsUrl = `/ws/stream/${sessionId}`;
 
     // Step 4 — Finalise and activate the session.
