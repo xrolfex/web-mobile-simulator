@@ -63,6 +63,12 @@ interface InternalCaptureSession extends CaptureSession {
   lastH264LogTime?: number;
   /** The iOS device UDID (used for captureDeviceId). */
   captureDeviceId?: string;
+  /**
+   * iOS only: `true` when the SimDeviceIO binary is being used for capture,
+   * `false` when the SCK (ScreenCaptureKit) binary is being used.
+   * `undefined` before the binary selection has been resolved.
+   */
+  useSimDeviceIO?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +130,18 @@ const CAPTURE_BINARY_VERSION = '18';
 
 /** Sidecar file that stores the version of the currently-cached binary. */
 const CAPTURE_BINARY_VERSION_PATH = join(tmpdir(), 'wms-ios-capture-stream.ver');
+
+/** Path where the compiled SimDeviceIO capture binary is cached across server restarts. */
+const SIMDEVICE_CAPTURE_BINARY_PATH = join(tmpdir(), 'wms-simdevice-capture');
+
+/** Temp path used to write the SimDeviceIO Swift source before compilation. */
+const SIMDEVICE_CAPTURE_SWIFT_TMP_PATH = join(tmpdir(), 'wms-simdevice-capture.swift');
+
+/** Version tag for the compiled SimDeviceIO capture binary. Increment to force recompilation. */
+const SIMDEVICE_CAPTURE_BINARY_VERSION = '2';
+
+/** Sidecar file that stores the version of the currently-cached SimDeviceIO binary. */
+const SIMDEVICE_CAPTURE_BINARY_VERSION_PATH = join(tmpdir(), 'wms-simdevice-capture.ver');
 
 // ---------------------------------------------------------------------------
 // Embedded Swift source
@@ -691,6 +709,762 @@ if #available(macOS 14.0, *) {
 }
 `;
 
+/**
+ * Swift source for the SimDeviceIO-based iOS Simulator screen capture process.
+ *
+ * Uses CoreSimulator's private `SimDeviceIOClient` API (accessed exclusively
+ * via the ObjC runtime / dlopen to avoid linker restrictions) to register
+ * per-frame and per-surface callbacks directly on the simulator framebuffer.
+ *
+ * Output: H.264 frames written to stdout in the same binary protocol as
+ * {@link IOS_CAPTURE_SWIFT_SOURCE}:
+ *   [4B BE uint32 payload-length][1B flags][8B BE uint64 timestamp_us][Annex-B NALU data]
+ *
+ * CLI arguments:
+ *   --udid <UDID>     Required. Simulator device UDID.
+ *   --fps <N>         Optional. Target FPS (default 30).
+ *   --format <fmt>    Optional. "h264" (default). "jpeg" exits with an error.
+ */
+const SIMDEVICE_IO_CAPTURE_SWIFT_SOURCE = `
+import Foundation
+import CoreGraphics
+import CoreMedia
+import VideoToolbox
+import IOSurface
+
+// ---------------------------------------------------------------------------
+// CLI arguments
+// ---------------------------------------------------------------------------
+
+var udid: String = ""
+var targetFps: Int = 30
+var captureFormat: String = "h264"
+var argIdx = 1
+while argIdx < CommandLine.arguments.count {
+    switch CommandLine.arguments[argIdx] {
+    case "--udid":
+        argIdx += 1
+        if argIdx < CommandLine.arguments.count { udid = CommandLine.arguments[argIdx] }
+    case "--fps":
+        argIdx += 1
+        if argIdx < CommandLine.arguments.count { targetFps = Int(CommandLine.arguments[argIdx]) ?? 30 }
+    case "--format":
+        argIdx += 1
+        if argIdx < CommandLine.arguments.count { captureFormat = CommandLine.arguments[argIdx] }
+    default: break
+    }
+    argIdx += 1
+}
+guard !udid.isEmpty else {
+    fputs("Usage: simdevice-capture --udid <UDID> [--fps <fps>] [--format h264]\\n", stderr)
+    exit(1)
+}
+if captureFormat == "jpeg" {
+    fputs("JPEG format is not supported by simdevice-capture; use h264\\n", stderr)
+    exit(1)
+}
+
+// ---------------------------------------------------------------------------
+// Signal handling
+// ---------------------------------------------------------------------------
+
+signal(SIGTERM) { _ in
+    let unregSel = NSSelectorFromString("unregisterScreenCallbacksWithUUID:")
+    for reg in gRegistrations {
+        guard reg.target.responds(to: unregSel) else { continue }
+        guard let imp = class_getMethodImplementation(type(of: reg.target), unregSel) else { continue }
+        typealias UnregFn = @convention(c) (AnyObject, Selector, AnyObject) -> Void
+        unsafeBitCast(imp, to: UnregFn.self)(reg.target, unregSel, reg.uuid as AnyObject)
+    }
+    exit(0)
+}
+signal(SIGINT) { _ in
+    let unregSel = NSSelectorFromString("unregisterScreenCallbacksWithUUID:")
+    for reg in gRegistrations {
+        guard reg.target.responds(to: unregSel) else { continue }
+        guard let imp = class_getMethodImplementation(type(of: reg.target), unregSel) else { continue }
+        typealias UnregFn = @convention(c) (AnyObject, Selector, AnyObject) -> Void
+        unsafeBitCast(imp, to: UnregFn.self)(reg.target, unregSel, reg.uuid as AnyObject)
+    }
+    exit(0)
+}
+
+// ---------------------------------------------------------------------------
+// Framework loading (dlopen — cannot link CoreSimDeviceIO at compile time)
+// ---------------------------------------------------------------------------
+
+let kCoreSimPath = "/Library/Developer/PrivateFrameworks/CoreSimulator.framework/CoreSimulator"
+let kCoreSimDeviceIOPath = "/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/Frameworks/CoreSimDeviceIO.framework/CoreSimDeviceIO"
+
+guard dlopen(kCoreSimPath, RTLD_NOW | RTLD_GLOBAL) != nil else {
+    fputs("simdevice-capture: Failed to load CoreSimulator\\n", stderr); exit(1)
+}
+guard dlopen(kCoreSimDeviceIOPath, RTLD_NOW | RTLD_GLOBAL) != nil else {
+    fputs("simdevice-capture: Failed to load CoreSimDeviceIO\\n", stderr); exit(1)
+}
+
+// ---------------------------------------------------------------------------
+// Stdout handle
+// ---------------------------------------------------------------------------
+
+let stdoutHandle = FileHandle.standardOutput
+
+// ---------------------------------------------------------------------------
+// H.264 output helpers
+// ---------------------------------------------------------------------------
+
+/// Write an H.264 Annex-B packet to stdout.
+///
+/// Protocol: [4-byte BE uint32 total-payload-length][1-byte flags][8-byte BE uint64 timestamp_us][NALU bytes]
+func writeH264Frame(_ naluData: Data, isKeyframe: Bool, timestampUs: UInt64) {
+    let payloadLength = UInt32(1 + 8 + naluData.count)
+    var beLength = payloadLength.bigEndian
+    var beTimestamp = timestampUs.bigEndian
+    let flags: UInt8 = isKeyframe ? 0x01 : 0x00
+
+    var packet = Data()
+    packet.append(contentsOf: withUnsafeBytes(of: &beLength) { Array($0) })
+    packet.append(flags)
+    packet.append(contentsOf: withUnsafeBytes(of: &beTimestamp) { Array($0) })
+    packet.append(naluData)
+    stdoutHandle.write(packet)
+}
+
+// ---------------------------------------------------------------------------
+// ObjC runtime InvocationHelper
+// ---------------------------------------------------------------------------
+
+class InvocationHelper {
+    static func invoke(_ target: NSObject, selector: Selector, args: [Any] = []) -> Any? {
+        let methodSigSel = NSSelectorFromString("methodSignatureForSelector:")
+        guard let sigIMP = class_getMethodImplementation(type(of: target), methodSigSel) else { return nil }
+        typealias SigFn = @convention(c) (AnyObject, Selector, Selector) -> AnyObject?
+        let sigFn = unsafeBitCast(sigIMP, to: SigFn.self)
+        guard let sig = sigFn(target, methodSigSel, selector) else { return nil }
+
+        let invClass = NSClassFromString("NSInvocation") as! NSObject.Type
+        let invSel = NSSelectorFromString("invocationWithMethodSignature:")
+        guard let invIMP = class_getMethodImplementation(object_getClass(invClass), invSel) else { return nil }
+        typealias InvFn = @convention(c) (AnyObject, Selector, AnyObject) -> AnyObject?
+        let invFn = unsafeBitCast(invIMP, to: InvFn.self)
+        guard let inv = invFn(invClass, invSel, sig) as? NSObject else { return nil }
+
+        let setSel = NSSelectorFromString("setSelector:")
+        if let imp = class_getMethodImplementation(type(of: inv), setSel) {
+            typealias F = @convention(c) (AnyObject, Selector, Selector) -> Void
+            unsafeBitCast(imp, to: F.self)(inv, setSel, selector)
+        }
+
+        let setTarget = NSSelectorFromString("setTarget:")
+        if let imp = class_getMethodImplementation(type(of: inv), setTarget) {
+            typealias F = @convention(c) (AnyObject, Selector, AnyObject) -> Void
+            unsafeBitCast(imp, to: F.self)(inv, setTarget, target)
+        }
+
+        let setArg = NSSelectorFromString("setArgument:atIndex:")
+        if let imp = class_getMethodImplementation(type(of: inv), setArg) {
+            typealias F = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, Int) -> Void
+            let fn = unsafeBitCast(imp, to: F.self)
+            for (i, var arg) in args.enumerated() {
+                withUnsafeMutablePointer(to: &arg) { ptr in
+                    fn(inv, setArg, ptr, i + 2)
+                }
+            }
+        }
+
+        let retainArgs = NSSelectorFromString("retainArguments")
+        if let imp = class_getMethodImplementation(type(of: inv), retainArgs) {
+            typealias F = @convention(c) (AnyObject, Selector) -> Void
+            unsafeBitCast(imp, to: F.self)(inv, retainArgs)
+        }
+
+        let invokeSel = NSSelectorFromString("invoke")
+        if let imp = class_getMethodImplementation(type(of: inv), invokeSel) {
+            typealias F = @convention(c) (AnyObject, Selector) -> Void
+            unsafeBitCast(imp, to: F.self)(inv, invokeSel)
+        }
+
+        let getRetVal = NSSelectorFromString("getReturnValue:")
+        if let imp = class_getMethodImplementation(type(of: inv), getRetVal) {
+            typealias F = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer) -> Void
+            let fn = unsafeBitCast(imp, to: F.self)
+            var result: AnyObject? = nil
+            withUnsafeMutablePointer(to: &result) { ptr in
+                fn(inv, getRetVal, ptr)
+            }
+            return result
+        }
+        return nil
+    }
+
+    static func invokeVoid(_ target: NSObject, selector: Selector, args: [Any] = []) {
+        _ = invoke(target, selector: selector, args: args)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// H.264 encoder (VideoToolbox)
+// ---------------------------------------------------------------------------
+
+class H264Encoder {
+    private var session: VTCompressionSession?
+    private let encoderLabel: String
+    private let fps: Int
+    var forceNextKeyframe = false
+    private var lastEncodeTime: CMTime? = nil
+    private var keyframeLock = NSLock()
+
+    init(width: Int, height: Int, fps: Int, label: String) {
+        self.fps = fps
+        self.encoderLabel = label
+
+        let refcon = Unmanaged.passRetained(self).toOpaque()
+        let callback: VTCompressionOutputCallback = { refcon, _, status, _, sampleBuffer in
+            guard let refcon = refcon else { return }
+            let encoder = Unmanaged<H264Encoder>.fromOpaque(refcon).takeUnretainedValue()
+            encoder.handleEncodedFrame(status: status, sampleBuffer: sampleBuffer)
+        }
+
+        let err = VTCompressionSessionCreate(
+            allocator: kCFAllocatorDefault,
+            width: Int32(width),
+            height: Int32(height),
+            codecType: kCMVideoCodecType_H264,
+            encoderSpecification: nil,
+            imageBufferAttributes: nil,
+            compressedDataAllocator: nil,
+            outputCallback: callback,
+            refcon: refcon,
+            compressionSessionOut: &session
+        )
+        guard err == noErr, let session = session else {
+            fputs("[simdevice-capture] Failed to create VTCompressionSession: \\(err)\\n", stderr)
+            exit(1)
+        }
+
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime,             value: kCFBooleanTrue)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel,          value: kVTProfileLevel_H264_Baseline_AutoLevel)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,   value: 5 as CFTypeRef)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate,     value: fps as CFTypeRef)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate,        value: (width * height * 2) as CFTypeRef)
+        VTCompressionSessionPrepareToEncodeFrames(session)
+    }
+
+    deinit {
+        if let session = session {
+            VTCompressionSessionInvalidate(session)
+        }
+    }
+
+    /// Submit a raw pixel buffer for H.264 encoding with an explicit timestamp.
+    func encodePixelBuffer(_ pixelBuffer: CVPixelBuffer, presentationTime: CMTime) {
+        guard let session = session else { return }
+
+        // Force IDR after a gap longer than 2 seconds.
+        if let last = lastEncodeTime, presentationTime.seconds - last.seconds > 2.0 {
+            keyframeLock.lock()
+            forceNextKeyframe = true
+            keyframeLock.unlock()
+            let gapSecs = String(format: "%.1f", presentationTime.seconds - last.seconds)
+            fputs("[simdevice-capture] Gap detected (\\(gapSecs)s) — forcing IDR\\n", stderr)
+        }
+        lastEncodeTime = presentationTime
+
+        keyframeLock.lock()
+        let shouldForceKeyframe = forceNextKeyframe
+        if shouldForceKeyframe { forceNextKeyframe = false }
+        keyframeLock.unlock()
+
+        var frameProperties: CFDictionary? = nil
+        if shouldForceKeyframe {
+            frameProperties = [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary
+        }
+        VTCompressionSessionEncodeFrame(
+            session,
+            imageBuffer: pixelBuffer,
+            presentationTimeStamp: presentationTime,
+            duration: CMTime.invalid,
+            frameProperties: frameProperties,
+            sourceFrameRefcon: nil,
+            infoFlagsOut: nil
+        )
+    }
+
+    /// Request that the next frame be encoded as a keyframe. Thread-safe.
+    func requestKeyframe() {
+        keyframeLock.lock()
+        forceNextKeyframe = true
+        keyframeLock.unlock()
+    }
+
+    // MARK: - Private
+
+    private func handleEncodedFrame(status: OSStatus, sampleBuffer: CMSampleBuffer?) {
+        guard status == noErr else {
+            fputs("[simdevice-capture] H264Encoder: encode error \\(status)\\n", stderr)
+            return
+        }
+        guard let sampleBuffer = sampleBuffer else { return }
+        guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
+
+        let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
+        var isKeyframe = true
+        if let attachments = attachments, CFArrayGetCount(attachments) > 0,
+           let attachment = CFArrayGetValueAtIndex(attachments, 0) {
+            let dict = Unmanaged<CFDictionary>.fromOpaque(attachment).takeUnretainedValue()
+            if let notSync = CFDictionaryGetValue(dict, Unmanaged.passUnretained(kCMSampleAttachmentKey_NotSync).toOpaque()) {
+                let notSyncBool = Unmanaged<CFBoolean>.fromOpaque(notSync).takeUnretainedValue()
+                isKeyframe = !CFBooleanGetValue(notSyncBool)
+            }
+        }
+
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let timestampUs = UInt64(max(0, Int64(pts.seconds * 1_000_000)))
+
+        var annexBData = Data()
+
+        if isKeyframe, let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) {
+            var paramCount = 0
+            CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                formatDesc, parameterSetIndex: 0, parameterSetPointerOut: nil,
+                parameterSetSizeOut: nil, parameterSetCountOut: &paramCount, nalUnitHeaderLengthOut: nil
+            )
+            for i in 0..<paramCount {
+                var paramPtr: UnsafePointer<UInt8>? = nil
+                var paramSize: Int = 0
+                let pErr = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                    formatDesc, parameterSetIndex: i,
+                    parameterSetPointerOut: &paramPtr,
+                    parameterSetSizeOut: &paramSize,
+                    parameterSetCountOut: nil,
+                    nalUnitHeaderLengthOut: nil
+                )
+                if pErr == noErr, let paramPtr = paramPtr {
+                    annexBData.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
+                    annexBData.append(Data(bytes: paramPtr, count: paramSize))
+                }
+            }
+        }
+
+        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
+        var totalLength = 0
+        var dataPointer: UnsafeMutablePointer<Int8>? = nil
+        let blockErr = CMBlockBufferGetDataPointer(
+            blockBuffer, atOffset: 0,
+            lengthAtOffsetOut: nil,
+            totalLengthOut: &totalLength,
+            dataPointerOut: &dataPointer
+        )
+        guard blockErr == noErr, let dataPointer = dataPointer else { return }
+
+        var offset = 0
+        while offset + 4 <= totalLength {
+            let rawPtr = UnsafeRawPointer(dataPointer) + offset
+            let naluLength = Int(rawPtr.load(fromByteOffset: 0, as: UInt8.self)) << 24
+                           | Int(rawPtr.load(fromByteOffset: 1, as: UInt8.self)) << 16
+                           | Int(rawPtr.load(fromByteOffset: 2, as: UInt8.self)) << 8
+                           | Int(rawPtr.load(fromByteOffset: 3, as: UInt8.self))
+            offset += 4
+            guard offset + naluLength <= totalLength else { break }
+            annexBData.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
+            annexBData.append(Data(bytes: dataPointer.advanced(by: offset), count: naluLength))
+            offset += naluLength
+        }
+
+        if !annexBData.isEmpty {
+            writeH264Frame(annexBData, isKeyframe: isKeyframe, timestampUs: timestampUs)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Global capture state
+// ---------------------------------------------------------------------------
+
+var encoder: H264Encoder? = nil
+var currentSurface: IOSurface? = nil
+var surfaceLock = NSLock()
+var lastFrameTime: Date = Date()
+var lastPixelBuffer: CVPixelBuffer? = nil
+var pixelBufferLock = NSLock()
+var idleRefreshLogged: Bool = false
+var idleKeyframeNeeded: Bool = true
+
+// XPC proxy object retention — these MUST outlive the entire program.
+// Releasing them tears down SimDeviceIO registrations.
+var gServiceContext: NSObject?    = nil
+var gDevSetObj: NSObject?         = nil
+var gDevice: NSObject?            = nil
+var gIOClient: NSObject?          = nil
+var gPorts: [NSObject]            = []
+var gScreenAdapterDesc: NSObject? = nil
+var gScreens: [NSObject]          = []
+var gRegistrations: [(target: NSObject, uuid: NSUUID, label: String)] = []
+
+// ---------------------------------------------------------------------------
+// Frame encode helper
+// ---------------------------------------------------------------------------
+
+func handleFrameReady() {
+    surfaceLock.lock()
+    let surface = currentSurface
+    surfaceLock.unlock()
+
+    guard let surface = surface else {
+        return  // No surface yet — wait for surfacesChanged callback or seeding
+    }
+
+    IOSurfaceLock(surface, .readOnly, nil)
+
+    var pixelBuffer: Unmanaged<CVPixelBuffer>?
+    let attrs = [kCVPixelBufferIOSurfacePropertiesKey: [:] as NSDictionary] as NSDictionary
+    let cvErr = CVPixelBufferCreateWithIOSurface(kCFAllocatorDefault, surface, attrs, &pixelBuffer)
+
+    IOSurfaceUnlock(surface, .readOnly, nil)
+
+    guard cvErr == kCVReturnSuccess, let pb = pixelBuffer?.takeRetainedValue() else {
+        fputs("[simdevice-capture] CVPixelBufferCreateWithIOSurface failed: \\(cvErr)\\n", stderr)
+        return
+    }
+
+    let now = CMClockGetTime(CMClockGetHostTimeClock())
+
+    pixelBufferLock.lock()
+    lastPixelBuffer = pb
+    pixelBufferLock.unlock()
+
+    lastFrameTime = Date()
+    idleRefreshLogged = false
+    idleKeyframeNeeded = true
+
+    encoder?.encodePixelBuffer(pb, presentationTime: now)
+}
+
+// ---------------------------------------------------------------------------
+// Idle refresh timer
+// ---------------------------------------------------------------------------
+
+func startIdleRefreshTimer(fps: Int) {
+    let interval = 1.0 / Double(fps)
+    let threshold = 2.0 / Double(fps)
+    let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+    timer.schedule(deadline: .now() + 2, repeating: interval)
+    timer.setEventHandler {
+        guard Date().timeIntervalSince(lastFrameTime) > threshold else { return }
+        pixelBufferLock.lock()
+        let pb = lastPixelBuffer
+        pixelBufferLock.unlock()
+        guard let pb = pb else { return }
+        guard let enc = encoder else { return }
+        if !idleRefreshLogged {
+            idleRefreshLogged = true
+            fputs("[simdevice-capture] Content idle — refreshing H.264 at \\(fps)fps\\n", stderr)
+        }
+        if idleKeyframeNeeded {
+            idleKeyframeNeeded = false
+            enc.requestKeyframe()
+        }
+        let freshPTS = CMClockGetTime(CMClockGetHostTimeClock())
+        enc.encodePixelBuffer(pb, presentationTime: freshPTS)
+    }
+    timer.resume()
+}
+
+// ---------------------------------------------------------------------------
+// Stdin keyframe reader (POSIX read — avoids macOS 26 FileHandle bug)
+// ---------------------------------------------------------------------------
+
+DispatchQueue.global(qos: .utility).async {
+    var buf = [UInt8](repeating: 0, count: 4096)
+    var lineBuf = ""
+    while true {
+        let n = read(0, &buf, buf.count)
+        if n <= 0 { break }
+        let str = String(bytes: buf[0..<n], encoding: .utf8) ?? ""
+        lineBuf += str
+        while let range = lineBuf.range(of: "\\n") {
+            let line = String(lineBuf[lineBuf.startIndex..<range.lowerBound])
+            lineBuf = String(lineBuf[range.upperBound...])
+            if line == "K" {
+                encoder?.requestKeyframe()
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SimDeviceIO connection
+// ---------------------------------------------------------------------------
+
+func connectAndCapture(udid: String, fps: Int) {
+    // 1. Get SimServiceContext via sharedServiceContextForDeveloperDir:error: (class method).
+    guard let simSvcCtxClass = NSClassFromString("SimServiceContext") as? NSObject.Type else {
+        fputs("[simdevice-capture] NSClassFromString(SimServiceContext) returned nil\\n", stderr); exit(1)
+    }
+    let developerDir = ProcessInfo.processInfo.environment["DEVELOPER_DIR"]
+        ?? "/Applications/Xcode.app/Contents/Developer"
+
+    let sharedCtxSel = NSSelectorFromString("sharedServiceContextForDeveloperDir:error:")
+    guard let sharedCtxMethod = class_getClassMethod(simSvcCtxClass, sharedCtxSel) else {
+        fputs("[simdevice-capture] SimServiceContext.sharedServiceContextForDeveloperDir:error: not found\\n", stderr); exit(1)
+    }
+    typealias SharedCtxFn = @convention(c) (
+        AnyClass, Selector, AnyObject, AutoreleasingUnsafeMutablePointer<NSError?>
+    ) -> AnyObject?
+    let sharedCtxImpl = unsafeBitCast(method_getImplementation(sharedCtxMethod), to: SharedCtxFn.self)
+    var ctxErr: NSError? = nil
+    guard let serviceContext = sharedCtxImpl(
+        simSvcCtxClass, sharedCtxSel, developerDir as NSString, &ctxErr
+    ) as? NSObject else {
+        let errMsg = ctxErr?.localizedDescription ?? "no error"
+        fputs("[simdevice-capture] sharedServiceContextForDeveloperDir returned nil: \\(errMsg)\\n", stderr); exit(1)
+    }
+    gServiceContext = serviceContext
+
+    // 2. Get defaultDeviceSetWithError: via instance-method lookup.
+    let devSetSel = NSSelectorFromString("defaultDeviceSetWithError:")
+    guard let devSetMethod = class_getInstanceMethod(type(of: serviceContext), devSetSel) else {
+        fputs("[simdevice-capture] defaultDeviceSetWithError: not found\\n", stderr); exit(1)
+    }
+    typealias DevSetFn = @convention(c) (
+        AnyObject, Selector, AutoreleasingUnsafeMutablePointer<NSError?>
+    ) -> AnyObject?
+    let devSetImpl = unsafeBitCast(method_getImplementation(devSetMethod), to: DevSetFn.self)
+    var devSetErr: NSError? = nil
+    guard let devSetObj = devSetImpl(serviceContext, devSetSel, &devSetErr) as? NSObject else {
+        let errMsg = devSetErr?.localizedDescription ?? "no error"
+        fputs("[simdevice-capture] defaultDeviceSetWithError returned nil: \\(errMsg)\\n", stderr); exit(1)
+    }
+    gDevSetObj = devSetObj
+
+    // 3. Find the device by UDID.
+    guard let devices = devSetObj.value(forKey: "availableDevices") as? [NSObject] else {
+        fputs("[simdevice-capture] availableDevices returned nil or wrong type\\n", stderr); exit(1)
+    }
+    guard let device = devices.first(where: {
+        ($0.value(forKey: "UDID") as? NSUUID)?.uuidString.uppercased() == udid.uppercased()
+    }) else {
+        fputs("[simdevice-capture] Device with UDID \\(udid) not found in availableDevices\\n", stderr); exit(1)
+    }
+    gDevice = device
+
+    // 4. Get SimDeviceIOClient.
+    guard let ioClient = device.value(forKey: "io") as? NSObject else {
+        fputs("[simdevice-capture] device.value(forKey: io) returned nil\\n", stderr); exit(1)
+    }
+    gIOClient = ioClient
+
+    // Refresh IO ports before reading ioPorts (ensures remote proxies are populated).
+    let updateIOPortsSel = NSSelectorFromString("updateIOPorts")
+    if ioClient.responds(to: updateIOPortsSel) {
+        ioClient.perform(updateIOPortsSel)
+        fputs("[simdevice-capture] Called updateIOPorts\\n", stderr)
+    }
+
+    // 5. Get ioPorts.
+    guard let ports = ioClient.value(forKey: "ioPorts") as? [NSObject] else {
+        fputs("[simdevice-capture] ioClient.value(forKey: ioPorts) returned nil\\n", stderr); exit(1)
+    }
+    gPorts = ports
+    fputs("[simdevice-capture] Found \\(ports.count) ioPorts\\n", stderr)
+
+    // 6. Determine execution queue for serialising XPC descriptor calls.
+    let execQ: DispatchQueue
+    if let q = ioClient.value(forKey: "executionQueue") as? DispatchQueue {
+        execQ = q
+    } else {
+        execQ = DispatchQueue(label: "com.wms.descriptor-fetch")
+        fputs("[simdevice-capture] executionQueue unavailable — using fallback serial queue\\n", stderr)
+    }
+
+    // 7. Scan all ports on the execution queue to find the SimScreenAdapter descriptor.
+    //    KVC value(forKey:) fails on ROCKRemoteProxy objects — use InvocationHelper instead.
+    let enumSel = NSSelectorFromString("enumerateScreensWithCompletionQueue:completionHandler:")
+    var adapterDesc: NSObject? = nil
+    let portScanSema = DispatchSemaphore(value: 0)
+    execQ.async {
+        let descriptorSel   = NSSelectorFromString("descriptor")
+        let altDescriptorSel = NSSelectorFromString("ioPortDescriptor")
+        // Prefer port 3 first (SimScreenAdapter by convention), then scan the rest.
+        let portsToCheck: [Int] = [3, 0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        for idx in portsToCheck {
+            guard idx < ports.count else { continue }
+            let port = ports[idx]
+            let desc = (InvocationHelper.invoke(port, selector: descriptorSel) as? NSObject)
+                    ?? (InvocationHelper.invoke(port, selector: altDescriptorSel) as? NSObject)
+            guard let d = desc else { continue }
+            if d.responds(to: enumSel) {
+                let cls = NSStringFromClass(type(of: d))
+                fputs("[simdevice-capture] Port \\(idx) (\\(cls)) has enumerateScreens — using as screen adapter\\n", stderr)
+                adapterDesc = d
+                break
+            }
+        }
+        portScanSema.signal()
+    }
+    let scanResult = portScanSema.wait(timeout: .now() + 10.0)
+    if scanResult == .timedOut {
+        fputs("[simdevice-capture] FATAL: Port scan timed out\\n", stderr); exit(1)
+    }
+    guard let screenAdapterDesc = adapterDesc else {
+        fputs("[simdevice-capture] FATAL: No port with enumerateScreensWithCompletionQueue: found\\n", stderr); exit(1)
+    }
+    gScreenAdapterDesc = screenAdapterDesc
+
+    // 8. Enumerate screens via the discovered SimScreenAdapter.
+    //    IMPORTANT: direct IMP dispatch is required for block-argument calls on XPC proxies —
+    //    NSInvocation blocks indefinitely waiting for the XPC reply.
+    //    Use a dedicated callback queue (not DispatchQueue.main) and a 8s timeout.
+    guard let enumIMP = class_getMethodImplementation(type(of: screenAdapterDesc), enumSel) else {
+        fputs("[simdevice-capture] enumerateScreensWithCompletionQueue: IMP not found\\n", stderr); exit(1)
+    }
+    typealias EnumFn = @convention(c) (AnyObject, Selector, AnyObject, AnyObject) -> Void
+    let enumFn = unsafeBitCast(enumIMP, to: EnumFn.self)
+
+    var screens: [NSObject] = []
+    let enumSem = DispatchSemaphore(value: 0)
+    let enumCallbackQ = DispatchQueue(label: "com.wms.enum-callback")
+    let enumHandler: @convention(block) (NSArray?) -> Void = { arr in
+        if let arr = arr {
+            screens = arr.compactMap { $0 as? NSObject }
+        }
+        enumSem.signal()
+    }
+    enumFn(screenAdapterDesc, enumSel, enumCallbackQ as AnyObject, enumHandler as AnyObject)
+    _ = enumSem.wait(timeout: .now() + 8.0)
+
+    fputs("[simdevice-capture] Found \\(screens.count) screen(s)\\n", stderr)
+    gScreens = screens
+    if screens.isEmpty {
+        fputs("[simdevice-capture] WARNING: No screens from enumerateScreens — will register on adapter descriptor directly\\n", stderr)
+    }
+
+    // 9. Query resolution from the first screen's properties (or fall back to defaults).
+    //    Screen objects are ROCKRemoteProxy instances — KVC value(forKey:) is not available;
+    //    use InvocationHelper to call the properties getter via the ObjC runtime.
+    var encoderWidth = 1170
+    var encoderHeight = 2532
+    if let firstScreen = screens.first {
+        let propsSel = NSSelectorFromString("properties")
+        if let props = InvocationHelper.invoke(firstScreen, selector: propsSel) as? NSDictionary,
+           let w = props["SimDeviceScreenPixelWidth"] as? Int,
+           let h = props["SimDeviceScreenPixelHeight"] as? Int {
+            encoderWidth = w
+            encoderHeight = h
+        }
+    }
+    fputs("[simdevice-capture] Encoder resolution: \\(encoderWidth)x\\(encoderHeight)\\n", stderr)
+
+    // 10. Create the H.264 encoder.
+    encoder = H264Encoder(width: encoderWidth, height: encoderHeight, fps: fps, label: udid)
+
+    // 11. Register frame callbacks on every enumerated screen AND on the adapter descriptor.
+    //     Some simulator versions fire callbacks at the descriptor level rather than on
+    //     individual screen objects — registering on both ensures we get frames.
+    let regSel = NSSelectorFromString("registerScreenCallbacksWithUUID:callbackQueue:frameCallback:surfacesChangedCallback:propertiesChangedCallback:")
+
+    func registerCallbacks(on target: NSObject, label: String) -> NSUUID? {
+        guard target.responds(to: regSel) else {
+            fputs("[simdevice-capture] \\(label): does not respond to registerScreenCallbacksWithUUID — skipping\\n", stderr)
+            return nil
+        }
+        guard let regIMP = class_getMethodImplementation(type(of: target), regSel) else {
+            fputs("[simdevice-capture] \\(label): class_getMethodImplementation returned nil — skipping\\n", stderr)
+            return nil
+        }
+        typealias RegFn = @convention(c) (AnyObject, Selector, AnyObject, AnyObject, AnyObject, AnyObject, AnyObject) -> Void
+        let regFn = unsafeBitCast(regIMP, to: RegFn.self)
+
+        let cbUUID = NSUUID()
+
+        let frameBlock: @convention(block) () -> Void = {
+            handleFrameReady()
+        }
+
+        let surfaceBlock: @convention(block) (AnyObject?, AnyObject?) -> Void = { _, newObj in
+            guard let newObj = newObj else { return }
+            // The new surface arrives as an IOSurface Swift class instance.
+            // Store the object directly to avoid cross-process IOSurfaceLookup failures.
+            if let surf = newObj as? IOSurface {
+                surfaceLock.lock()
+                currentSurface = surf
+                surfaceLock.unlock()
+            } else {
+                // Fallback: surface was not an IOSurface — log and skip.
+                fputs("[simdevice-capture] WARNING: surfacesChanged newObj is not IOSurface (\\(type(of: newObj))) — skipping\\n", stderr)
+            }
+        }
+
+        let propsBlock: @convention(block) (AnyObject?) -> Void = { _ in }
+
+        regFn(
+            target, regSel,
+            cbUUID as AnyObject,
+            DispatchQueue.main as AnyObject,
+            frameBlock as AnyObject,
+            surfaceBlock as AnyObject,
+            propsBlock as AnyObject
+        )
+        let uuidStr = cbUUID.uuidString
+        fputs("[simdevice-capture] Registered callbacks on \\(label) (UUID=\\(uuidStr))\\n", stderr)
+        return cbUUID
+    }
+
+    for (idx, screen) in screens.enumerated() {
+        if let uuid = registerCallbacks(on: screen, label: "Screen[\\(idx)]") {
+            gRegistrations.append((screen, uuid, "Screen[\\(idx)]"))
+        }
+    }
+    // Belt-and-suspenders: also register on the adapter descriptor directly.
+    if let uuid = registerCallbacks(on: screenAdapterDesc, label: "AdapterDesc") {
+        gRegistrations.append((screenAdapterDesc, uuid, "AdapterDesc"))
+    }
+
+    // 12. Seed the initial IOSurface by fetching framebufferSurface from each screen.
+    //     The surfacesChanged callback only fires when the surface *changes*; if the
+    //     simulator is already rendering on a surface we registered before the first
+    //     change, we need to pre-seed currentSurface so handleFrameReady() works.
+    let fbSel = NSSelectorFromString("framebufferSurface")
+    var seeded = false
+    for screen in screens {
+        guard screen.responds(to: fbSel) else { continue }
+        guard let fbIMP = class_getMethodImplementation(type(of: screen), fbSel) else { continue }
+        typealias FbFn = @convention(c) (AnyObject, Selector) -> AnyObject?
+        let fbFn = unsafeBitCast(fbIMP, to: FbFn.self)
+        guard let fbObj = fbFn(screen, fbSel) else { continue }
+        if let surf = fbObj as? IOSurface {
+            let surfId = IOSurfaceGetID(surf)
+            if surfId != 0 {
+                fputs("[simdevice-capture] Seeded initial surface id=\\(surfId) from framebufferSurface\\n", stderr)
+                surfaceLock.lock()
+                currentSurface = surf
+                surfaceLock.unlock()
+                seeded = true
+                break
+            }
+        }
+    }
+    if !seeded {
+        fputs("[simdevice-capture] WARNING: could not seed initial surface — waiting for surfacesChanged callback\\n", stderr)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Main entry point
+// ---------------------------------------------------------------------------
+
+connectAndCapture(udid: udid, fps: targetFps)
+startIdleRefreshTimer(fps: targetFps)
+fputs("[simdevice-capture] Running — capturing \\(udid) at \\(targetFps) fps\\n", stderr)
+// RunLoop.main.run() with no registered sources starves DispatchQueue.main on macOS 26,
+// preventing XPC frame callbacks from firing. Use a finite-interval loop instead —
+// each iteration drains DispatchQueue.main via CFRunLoopRunInMode.
+while true {
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+}
+`;
+
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
@@ -744,6 +1518,9 @@ export class ScreenCaptureService {
 
   /** Shared promise for one-time SCK capture binary compilation. */
   private compileBinaryPromise: Promise<void> | null = null;
+
+  /** Shared promise for one-time SimDeviceIO capture binary compilation. */
+  private compileSimDeviceBinaryPromise: Promise<void> | null = null;
 
   // -------------------------------------------------------------------------
   // Public API
@@ -810,14 +1587,24 @@ export class ScreenCaptureService {
     log(`Starting ${platform} capture for session ${sessionId} (device=${deviceId}, fps=${targetFps}, format=${captureFormat})`);
 
     if (platform === 'ios') {
-      void this.ensureCaptureBinaryCompiled()
+      void this.ensureSimDeviceCaptureBinaryCompiled()
         .then(() => {
           if (session.active) {
-            this.startIOSCaptureProcess(session, deviceName ?? deviceId, deviceId);
+            session.useSimDeviceIO = true;
+            this.startIOSCaptureProcess(session, deviceName ?? deviceId, true, deviceId);
           }
         })
         .catch((err: unknown) => {
-          warn(`iOS capture binary unavailable (${(err as Error).message}). Falling back to xcrun polling.`);
+          warn(`SimDeviceIO binary unavailable (${(err as Error).message}). Falling back to SCK capture.`);
+          return this.ensureCaptureBinaryCompiled().then(() => {
+            if (session.active) {
+              session.useSimDeviceIO = false;
+              this.startIOSCaptureProcess(session, deviceName ?? deviceId, false, deviceId);
+            }
+          });
+        })
+        .catch((err: unknown) => {
+          warn(`All iOS capture binaries unavailable (${(err as Error).message}). Falling back to xcrun polling.`);
           if (session.active) {
             void this.runCaptureLoop(session);
           }
@@ -968,21 +1755,98 @@ export class ScreenCaptureService {
   }
 
   /**
-   * Spawn the persistent iOS ScreenCaptureKit capture binary for a session
-   * and wire up stdout frame parsing and process lifecycle handling.
+   * Idempotent: compiles the SimDeviceIO Swift capture binary if it does not
+   * already exist at {@link SIMDEVICE_CAPTURE_BINARY_PATH}.  Concurrent calls
+   * share a single compilation Promise so the binary is compiled at most once
+   * per process.
    *
-   * Always uses {@link CAPTURE_BINARY_PATH}, passing `--device-name <deviceName>`
-   * with standard environment variables.
+   * Links `-framework Foundation -framework IOSurface -framework CoreGraphics
+   * -framework CoreMedia -framework VideoToolbox` and the CoreSimulator
+   * umbrella framework (for the private ObjC runtime symbols).
+   * CoreSimDeviceIO is loaded at runtime via `dlopen` — the linker rejects
+   * direct linkage as "not an allowed client".
    *
-   * @param session      - The internal capture session (must have `platform === 'ios'`).
-   * @param deviceName   - iOS Simulator device name used for SCK window discovery.
-   * @param deviceId     - iOS device UDID (used for captureDeviceId on the session).
-   * @param restartCount - Number of times this process has been restarted (default 0).
-   *                       Used to limit total restart attempts to {@link MAX_IOS_CAPTURE_RESTARTS}.
+   * @throws If `swiftc` is unavailable, CoreSimulator is not installed, or
+   *         compilation fails.
+   */
+  private ensureSimDeviceCaptureBinaryCompiled(): Promise<void> {
+    if (!this.compileSimDeviceBinaryPromise) {
+      this.compileSimDeviceBinaryPromise = (async () => {
+        // Check if a previously compiled binary is already present.
+        try {
+          await access(SIMDEVICE_CAPTURE_BINARY_PATH, fsConstants.X_OK);
+          // Binary exists — check whether it matches the current source version.
+          try {
+            const ver = await readFile(SIMDEVICE_CAPTURE_BINARY_VERSION_PATH, 'utf8');
+            if (ver.trim() === SIMDEVICE_CAPTURE_BINARY_VERSION) {
+              log('SimDeviceIO capture binary already compiled — reusing cached binary');
+              return;
+            }
+          } catch {
+            // Version file missing — treat as stale and recompile.
+          }
+          // Version mismatch or missing version file — delete the stale binary.
+          log('SimDeviceIO capture binary is stale (source changed) — recompiling…');
+          await unlink(SIMDEVICE_CAPTURE_BINARY_PATH).catch(() => {});
+        } catch {
+          // Binary missing or not executable — proceed with compilation.
+        }
+
+        log('Compiling SimDeviceIO capture binary (first run — this takes a few seconds)…');
+        await writeFile(SIMDEVICE_CAPTURE_SWIFT_TMP_PATH, SIMDEVICE_IO_CAPTURE_SWIFT_SOURCE, 'utf8');
+
+        const coreSimFrameworkPath =
+          '/Library/Developer/PrivateFrameworks/CoreSimulator.framework/CoreSimulator';
+
+        await execFileAsync('swiftc', [
+          '-O',
+          '-framework', 'Foundation',
+          '-framework', 'IOSurface',
+          '-framework', 'CoreGraphics',
+          '-framework', 'CoreMedia',
+          '-framework', 'VideoToolbox',
+          '-Xlinker', '-rpath',
+          '-Xlinker', '/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/Frameworks',
+          SIMDEVICE_CAPTURE_SWIFT_TMP_PATH,
+          '-o', SIMDEVICE_CAPTURE_BINARY_PATH,
+          coreSimFrameworkPath,
+        ], {
+          timeout: 90_000, // swiftc with optimizations can be slow
+          env: {
+            ...process.env,
+            DEVELOPER_DIR: `${config.xcodePath}/Contents/Developer`,
+          },
+        });
+        await writeFile(SIMDEVICE_CAPTURE_BINARY_VERSION_PATH, SIMDEVICE_CAPTURE_BINARY_VERSION, 'utf8');
+        log('SimDeviceIO capture binary compiled successfully');
+      })().catch((err: unknown) => {
+        // Reset so a subsequent session can retry compilation.
+        this.compileSimDeviceBinaryPromise = null;
+        throw err;
+      });
+    }
+    return this.compileSimDeviceBinaryPromise;
+  }
+
+  /**
+   * Spawn the persistent iOS capture binary for a session and wire up stdout
+   * frame parsing and process lifecycle handling.
+   *
+   * When `useSimDeviceIO` is `true`, uses {@link SIMDEVICE_CAPTURE_BINARY_PATH}
+   * with `--udid <deviceId>` arguments.  When `false`, uses
+   * {@link CAPTURE_BINARY_PATH} with `--device-name <deviceName>` arguments.
+   *
+   * @param session        - The internal capture session (must have `platform === 'ios'`).
+   * @param deviceName     - iOS Simulator device name used for SCK window discovery (SCK path only).
+   * @param useSimDeviceIO - `true` to use the SimDeviceIO binary; `false` for the SCK binary.
+   * @param deviceId       - iOS device UDID (used for captureDeviceId on the session).
+   * @param restartCount   - Number of times this process has been restarted (default 0).
+   *                         Used to limit total restart attempts to {@link MAX_IOS_CAPTURE_RESTARTS}.
    */
   private startIOSCaptureProcess(
     session: InternalCaptureSession,
     deviceName: string,
+    useSimDeviceIO: boolean,
     deviceId: string = session.deviceId,
     restartCount: number = 0,
   ): void {
@@ -990,22 +1854,37 @@ export class ScreenCaptureService {
 
     session.captureDeviceId = deviceId;
 
-    const spawnArgs = ['--device-name', deviceName, '--fps', String(targetFps)];
+    let binaryPath: string;
+    let spawnArgs: string[];
 
-    if (captureFormat === 'h264') {
-      spawnArgs.push('--format', 'h264');
+    if (useSimDeviceIO) {
+      binaryPath = SIMDEVICE_CAPTURE_BINARY_PATH;
+      spawnArgs = ['--udid', deviceId, '--fps', String(targetFps), '--format', 'h264'];
+    } else {
+      binaryPath = CAPTURE_BINARY_PATH;
+      spawnArgs = ['--device-name', deviceName, '--fps', String(targetFps)];
+      if (captureFormat === 'h264') {
+        spawnArgs.push('--format', 'h264');
+      }
     }
 
-    const child = spawn(CAPTURE_BINARY_PATH, spawnArgs, {
+    const spawnEnv = useSimDeviceIO
+      ? { ...process.env, DEVELOPER_DIR: `${config.xcodePath}/Contents/Developer` }
+      : process.env;
+
+    const child = spawn(binaryPath, spawnArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
+      env: spawnEnv,
     });
 
     session.captureProcess = child;
     session.frameBuffer = Buffer.alloc(0);
 
+    const effectiveCaptureFormat = useSimDeviceIO ? 'h264' : captureFormat;
+
     child.stdout!.on('data', (chunk: Buffer) => {
       session.frameBuffer = Buffer.concat([session.frameBuffer, chunk]);
-      if (captureFormat === 'h264') {
+      if (effectiveCaptureFormat === 'h264') {
         this.parseH264Buffer(session);
       } else {
         this.parseFrameBuffer(session);
@@ -1028,7 +1907,7 @@ export class ScreenCaptureService {
         // Keep the emitter in the captures map so WebSocket clients stay connected.
         setTimeout(() => {
           if (session.active) {
-            this.startIOSCaptureProcess(session, deviceName, deviceId, restartCount + 1);
+            this.startIOSCaptureProcess(session, deviceName, useSimDeviceIO, deviceId, restartCount + 1);
           }
         }, 1000);
       } else {
@@ -1056,7 +1935,7 @@ export class ScreenCaptureService {
         );
         setTimeout(() => {
           if (session.active) {
-            this.startIOSCaptureProcess(session, deviceName, deviceId, restartCount + 1);
+            this.startIOSCaptureProcess(session, deviceName, useSimDeviceIO, deviceId, restartCount + 1);
           }
         }, 1000);
       } else {
@@ -1066,7 +1945,8 @@ export class ScreenCaptureService {
       }
     });
 
-    log(`iOS capture process started for session ${sessionId} (SCK device="${deviceName}", fps=${targetFps}, format=${captureFormat})`);
+    const binaryLabel = useSimDeviceIO ? 'SimDeviceIO' : 'SCK';
+    log(`iOS capture process started for session ${sessionId} (${binaryLabel} device="${useSimDeviceIO ? deviceId : deviceName}", fps=${targetFps}, format=${effectiveCaptureFormat})`);
   }
 
   /**
