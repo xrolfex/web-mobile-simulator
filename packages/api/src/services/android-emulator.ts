@@ -331,7 +331,7 @@ export class AndroidEmulatorService {
 
     const hostAbi = this.getHostArchitecture();
 
-    const { stdout } = await exec(SDKMANAGER, ['--list', '--include_obsolete=false']);
+    const { stdout } = await exec(SDKMANAGER, ['--list']);
 
     const parsed = parseSdkmanagerList(stdout);
 

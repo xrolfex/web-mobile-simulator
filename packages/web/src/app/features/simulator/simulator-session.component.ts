@@ -466,11 +466,11 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
 
   /**
    * Determine the stream mode based on the session's platform.
-   * iOS uses WebCodecs (H.264); Android stays on MJPEG.
-   * @param session The loaded session.
+   * Both iOS and Android now use H.264/WebCodecs streaming.
+   * @param _session The loaded session (unused — all platforms use WebCodecs).
    */
-  private determineStreamMode(session: Session): StreamMode {
-    return session.device.platform === 'ios' ? 'webcodecs' : 'mjpeg';
+  private determineStreamMode(_session: Session): StreamMode {
+    return 'webcodecs';
   }
 
   /**

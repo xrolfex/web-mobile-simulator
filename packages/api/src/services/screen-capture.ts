@@ -1,7 +1,10 @@
 import { execFile, spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
+import { createConnection } from 'node:net';
+import type { Socket } from 'node:net';
 import { readFile, unlink, writeFile, access, constants as fsConstants } from 'node:fs/promises';
 import { promisify } from 'node:util';
+import { randomBytes } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -69,6 +72,14 @@ interface InternalCaptureSession extends CaptureSession {
    * `undefined` before the binary selection has been resolved.
    */
   useSimDeviceIO?: boolean;
+  /** Android scrcpy: the TCP socket connected to scrcpy-server. */
+  scrcpySocket?: Socket;
+  /** Android scrcpy: the `adb shell` process running scrcpy-server on-device. */
+  scrcpyServerProcess?: ChildProcess;
+  /** Android scrcpy: the local TCP port allocated by `adb forward tcp:0 …`. */
+  scrcpyForwardPort?: number;
+  /** Android scrcpy: buffered SPS/PPS config data to prepend to the next media packet. */
+  scrcpyConfigBuffer?: Buffer;
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +153,15 @@ const SIMDEVICE_CAPTURE_BINARY_VERSION = '2';
 
 /** Sidecar file that stores the version of the currently-cached SimDeviceIO binary. */
 const SIMDEVICE_CAPTURE_BINARY_VERSION_PATH = join(tmpdir(), 'wms-simdevice-capture.ver');
+
+/** Path to the scrcpy-server jar bundled with scrcpy. */
+const SCRCPY_SERVER_JAR = '/opt/homebrew/share/scrcpy/scrcpy-server';
+
+/** scrcpy-server version string — must match the installed scrcpy version. */
+const SCRCPY_SERVER_VERSION = '3.3.4';
+
+/** Maximum number of times the Android scrcpy capture is restarted before giving up. */
+const MAX_ANDROID_SCRCPY_RESTARTS = 5;
 
 // ---------------------------------------------------------------------------
 // Embedded Swift source
@@ -1488,6 +1508,18 @@ function iosTempFilePath(sessionId: string): string {
   return `/tmp/wms-capture-${sessionId}.jpg`;
 }
 
+/**
+ * Tracks the current scrcpy TCP stream parsing phase for each session.
+ *
+ * Using a WeakMap avoids polluting the {@link InternalCaptureSession} interface
+ * with scrcpy-specific state while still allowing garbage collection when
+ * sessions are removed from `captures`.
+ */
+const scrcpyPhaseMap = new WeakMap<
+  InternalCaptureSession,
+  'handshake_dummy' | 'handshake_name' | 'handshake_codec' | 'handshake_size' | 'streaming_header' | 'streaming_payload'
+>();
+
 // ---------------------------------------------------------------------------
 // Service class
 // ---------------------------------------------------------------------------
@@ -1610,7 +1642,21 @@ export class ScreenCaptureService {
           }
         });
     } else {
-      void this.runCaptureLoop(session);
+      if (captureFormat === 'h264') {
+        // Try scrcpy H.264 streaming first, fall back to PNG polling on failure.
+        void this.startAndroidScrcpyCapture(session).catch((err: unknown) => {
+          warn(
+            `scrcpy capture failed for session ${session.sessionId} ` +
+            `(${(err as Error).message}). Falling back to PNG polling.`,
+          );
+          if (session.active) {
+            session.captureFormat = 'jpeg';
+            void this.runCaptureLoop(session);
+          }
+        });
+      } else {
+        void this.runCaptureLoop(session);
+      }
     }
 
     return emitter;
@@ -1630,6 +1676,21 @@ export class ScreenCaptureService {
     log(`Stopping capture for session ${sessionId}`);
     session.active = false;
     session.abortController.abort();
+
+    // Clean up Android scrcpy resources if this was a scrcpy capture.
+    if (session.scrcpySocket) {
+      try { session.scrcpySocket.destroy(); } catch { /* already closed */ }
+      session.scrcpySocket = undefined;
+    }
+    if (session.scrcpyServerProcess) {
+      try { session.scrcpyServerProcess.kill('SIGTERM'); } catch { /* already dead */ }
+      session.scrcpyServerProcess = undefined;
+    }
+    if (session.scrcpyForwardPort && session.deviceId) {
+      // Remove the ADB forward rule — fire and forget.
+      execFileAsync(ADB, ['-s', session.deviceId, 'forward', '--remove', `tcp:${session.scrcpyForwardPort}`]).catch(() => {});
+      session.scrcpyForwardPort = undefined;
+    }
 
     // Kill the persistent iOS capture process if running.
     const hadCaptureProcess = !!session.captureProcess;
@@ -2027,6 +2088,304 @@ export class ScreenCaptureService {
         }
       }
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Private — Android scrcpy H.264 capture
+  // -------------------------------------------------------------------------
+
+  /**
+   * Start Android H.264 streaming via scrcpy-server.
+   *
+   * This method:
+   * 1. Pushes `scrcpy-server.jar` to the device (idempotent).
+   * 2. Sets up an ADB forward tunnel with a random allocated port.
+   * 3. Spawns the scrcpy-server process via `adb shell`.
+   * 4. Connects a TCP socket to the allocated port.
+   * 5. Performs the scrcpy handshake (dummy byte, device name, codec, resolution).
+   * 6. Parses the 12-byte scrcpy packet headers and emits {@link NaluFrame} events.
+   * 7. Buffers config packets (SPS/PPS) and prepends them to the next media packet.
+   *
+   * Uses {@link session.frameBuffer} to accumulate partial TCP data across
+   * socket `data` events; a state machine tracks the current parsing phase.
+   *
+   * @param session      - The internal capture session (must have `platform === 'android'`).
+   * @param restartCount - Number of times this method has been restarted (default 0).
+   *                       Limits total restart attempts to {@link MAX_ANDROID_SCRCPY_RESTARTS}.
+   */
+  private async startAndroidScrcpyCapture(
+    session: InternalCaptureSession,
+    restartCount: number = 0,
+  ): Promise<void> {
+    const { sessionId, deviceId } = session;
+
+    // Generate a random 8-hex-char stream ID used to namespace the abstract socket.
+    // scid must fit in a Java signed 32-bit integer (max 0x7FFFFFFF).
+    // Mask the MSB to ensure non-negative value.
+    const scidNum = randomBytes(4).readUInt32BE(0) & 0x7FFFFFFF;
+    const scid = scidNum.toString(16).padStart(8, '0');
+
+    log(`[${sessionId}] Starting scrcpy capture for device ${deviceId} (scid=${scid}, attempt=${restartCount + 1})`);
+
+    // Step 1 — Push the scrcpy-server jar to the device (idempotent).
+    log(`[${sessionId}] Pushing scrcpy-server jar to device…`);
+    await execFileAsync(ADB, ['-s', deviceId, 'push', SCRCPY_SERVER_JAR, '/data/local/tmp/scrcpy-server.jar']);
+    log(`[${sessionId}] scrcpy-server jar pushed`);
+
+    // Step 2 — Set up ADB forward tunnel. `tcp:0` lets the OS pick a free port.
+    const { stdout: forwardStdout } = await execFileAsync(
+      ADB,
+      ['-s', deviceId, 'forward', 'tcp:0', `localabstract:scrcpy_${scid}`],
+    );
+    const allocatedPort = parseInt(forwardStdout.trim(), 10);
+    if (!allocatedPort || Number.isNaN(allocatedPort)) {
+      throw new Error(`adb forward returned unexpected port: "${forwardStdout.trim()}"`);
+    }
+    session.scrcpyForwardPort = allocatedPort;
+    log(`[${sessionId}] ADB forward established on port ${allocatedPort}`);
+
+    // Step 3 — Start the scrcpy-server process via adb shell.
+    const serverProc = spawn(ADB, [
+      '-s', deviceId,
+      'shell',
+      `CLASSPATH=/data/local/tmp/scrcpy-server.jar`,
+      'app_process',
+      '/',
+      'com.genymobile.scrcpy.Server',
+      SCRCPY_SERVER_VERSION,
+      `scid=${scid}`,
+      'log_level=info',
+      'audio=false',
+      'max_size=720',
+      'max_fps=30',
+      'tunnel_forward=true',
+      'control=false',
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+    session.scrcpyServerProcess = serverProc;
+
+    serverProc.stderr?.on('data', (data: Buffer) => {
+      warn(`[scrcpy-server][${sessionId}]: ${data.toString().trim()}`);
+    });
+
+    serverProc.stdout?.on('data', (data: Buffer) => {
+      // The server writes startup messages to stdout — log them for diagnostics.
+      const msg = data.toString().trim();
+      if (msg) {
+        log(`[scrcpy-server][${sessionId}]: ${msg}`);
+      }
+    });
+
+    serverProc.on('exit', (code, signal) => {
+      if (!session.active) return; // Normal stop — ignore.
+      warn(
+        `scrcpy-server process for session ${sessionId} exited unexpectedly ` +
+        `(code=${code ?? 'null'}, signal=${signal ?? 'null'})`,
+      );
+      // Socket close handler will take care of the restart logic.
+    });
+
+    // Step 4 — Wait ~1 second for scrcpy-server to start listening on the abstract socket.
+    await sleep(1000);
+
+    if (!session.active) return; // Session was stopped while waiting.
+
+    // Step 5 — Connect via TCP to the forwarded port.
+    await new Promise<void>((resolve, reject) => {
+      const socket = createConnection({ port: allocatedPort, host: '127.0.0.1' });
+      session.scrcpySocket = socket;
+
+      // Reset the frame buffer and initialize parse state for this connection.
+      session.frameBuffer = Buffer.alloc(0);
+      scrcpyPhaseMap.set(session, 'handshake_dummy');
+
+      // Track payload bytes remaining for the streaming_payload phase.
+      let pendingPayloadSize = 0;
+      // pts_flags for the current in-progress packet (parsed from header).
+      let pendingPtsHigh = 0;
+      let pendingPtsLow = 0;
+
+      const onData = (chunk: Buffer): void => {
+        session.frameBuffer = Buffer.concat([session.frameBuffer, chunk]);
+
+        // Process as much data as possible from the accumulated buffer.
+        let keepProcessing = true;
+        while (keepProcessing && session.frameBuffer.length > 0) {
+          const phase = scrcpyPhaseMap.get(session) ?? 'handshake_dummy';
+
+          if (phase === 'handshake_dummy') {
+            // Read 1 dummy byte.
+            if (session.frameBuffer.length < 1) { keepProcessing = false; break; }
+            session.frameBuffer = session.frameBuffer.subarray(1);
+            scrcpyPhaseMap.set(session, 'handshake_name');
+
+          } else if (phase === 'handshake_name') {
+            // Read 64-byte null-padded UTF-8 device name.
+            if (session.frameBuffer.length < 64) { keepProcessing = false; break; }
+            const nameBytes = session.frameBuffer.subarray(0, 64);
+            const nullIdx = nameBytes.indexOf(0);
+            const deviceName = nameBytes.subarray(0, nullIdx === -1 ? 64 : nullIdx).toString('utf8');
+            log(`[${sessionId}] scrcpy device name: "${deviceName}"`);
+            session.frameBuffer = session.frameBuffer.subarray(64);
+            scrcpyPhaseMap.set(session, 'handshake_codec');
+
+          } else if (phase === 'handshake_codec') {
+            // Read 4-byte BE codec_id. Expected: 0x68323634 ('h264').
+            if (session.frameBuffer.length < 4) { keepProcessing = false; break; }
+            const codecId = session.frameBuffer.readUInt32BE(0);
+            const CODEC_H264 = 0x68323634;
+            if (codecId !== CODEC_H264) {
+              warn(`[${sessionId}] Unexpected scrcpy codec_id: 0x${codecId.toString(16)} (expected 0x68323634)`);
+            }
+            session.frameBuffer = session.frameBuffer.subarray(4);
+            scrcpyPhaseMap.set(session, 'handshake_size');
+
+          } else if (phase === 'handshake_size') {
+            // Read 4-byte BE width + 4-byte BE height (8 bytes total).
+            if (session.frameBuffer.length < 8) { keepProcessing = false; break; }
+            const width = session.frameBuffer.readUInt32BE(0);
+            const height = session.frameBuffer.readUInt32BE(4);
+            log(`[${sessionId}] scrcpy initial resolution: ${width}×${height}`);
+            session.frameBuffer = session.frameBuffer.subarray(8);
+            scrcpyPhaseMap.set(session, 'streaming_header');
+            // Handshake complete — resolve the outer promise so startCapture can return.
+            resolve();
+
+          } else if (phase === 'streaming_header') {
+            // Read 12-byte packet header: [8B BE pts_flags][4B BE packet_size].
+            if (session.frameBuffer.length < 12) { keepProcessing = false; break; }
+
+            pendingPtsHigh = session.frameBuffer.readUInt32BE(0);
+            pendingPtsLow = session.frameBuffer.readUInt32BE(4);
+            pendingPayloadSize = session.frameBuffer.readUInt32BE(8);
+            session.frameBuffer = session.frameBuffer.subarray(12);
+            scrcpyPhaseMap.set(session, 'streaming_payload');
+
+          } else if (phase === 'streaming_payload') {
+            // Read pendingPayloadSize bytes of NALU data.
+            if (session.frameBuffer.length < pendingPayloadSize) { keepProcessing = false; break; }
+
+            const rawNalu = Buffer.from(session.frameBuffer.subarray(0, pendingPayloadSize));
+            session.frameBuffer = session.frameBuffer.subarray(pendingPayloadSize);
+            scrcpyPhaseMap.set(session, 'streaming_header');
+
+            // Decode pts_flags:
+            //   Bit 63 (MSB of pts_flags_high uint32): SC_PACKET_FLAG_CONFIG
+            //   Bit 62: SC_PACKET_FLAG_KEY_FRAME
+            //   Bits 0-61: PTS in microseconds
+            const isConfig = (pendingPtsHigh & 0x80000000) !== 0;
+            const isKeyframe = (pendingPtsHigh & 0x40000000) !== 0;
+
+            // Extract PTS: mask out top 2 bits of the high 32 bits.
+            const ptsHigh = pendingPtsHigh & 0x3FFFFFFF;
+            const timestampUs = BigInt(ptsHigh) * BigInt(2 ** 32) + BigInt(pendingPtsLow);
+
+            if (isConfig) {
+              // Buffer SPS/PPS config data — do NOT emit standalone.
+              session.scrcpyConfigBuffer = rawNalu;
+              log(`[${sessionId}] scrcpy: buffered config packet (${rawNalu.length} bytes)`);
+            } else if (session.active && !session.abortController.signal.aborted) {
+              // Media packet: prepend buffered config data if present.
+              let naluData: Buffer;
+              if (session.scrcpyConfigBuffer) {
+                naluData = Buffer.concat([session.scrcpyConfigBuffer, rawNalu]);
+                session.scrcpyConfigBuffer = undefined;
+              } else {
+                naluData = rawNalu;
+              }
+
+              const naluFrame: NaluFrame = {
+                naluData,
+                isKeyframe: isKeyframe || naluData !== rawNalu, // keyframe if IDR or config was prepended
+                timestampUs,
+              };
+              session.emitter.emit('nalu', naluFrame);
+
+              // Periodic observability logging — log frame stats every 10 seconds.
+              session.h264FrameCount = (session.h264FrameCount ?? 0) + 1;
+              const now = Date.now();
+              if (!session.lastH264LogTime || now - session.lastH264LogTime >= 10_000) {
+                log(
+                  `scrcpy H.264 session ${sessionId}: ${session.h264FrameCount} total frames, ` +
+                  `latest: keyframe=${naluFrame.isKeyframe}, ts=${naluFrame.timestampUs}µs`,
+                );
+                session.lastH264LogTime = now;
+              }
+            }
+          } else {
+            // Should never happen — defensive guard.
+            keepProcessing = false;
+          }
+        }
+      };
+
+      socket.on('data', onData);
+
+      socket.on('error', (err: Error) => {
+        warn(`[${sessionId}] scrcpy socket error: ${err.message}`);
+        if (!session.active) return;
+
+        // Reject the handshake promise if we haven't resolved yet.
+        reject(err);
+
+        // Schedule a restart attempt if within limits.
+        if (restartCount < MAX_ANDROID_SCRCPY_RESTARTS) {
+          warn(
+            `[${sessionId}] Restarting scrcpy capture ` +
+            `(attempt ${restartCount + 1}/${MAX_ANDROID_SCRCPY_RESTARTS})…`,
+          );
+          setTimeout(() => {
+            if (session.active) {
+              void this.startAndroidScrcpyCapture(session, restartCount + 1).catch((restartErr: unknown) => {
+                warn(`[${sessionId}] scrcpy restart failed: ${(restartErr as Error).message}`);
+                session.active = false;
+                this.captures.delete(sessionId);
+                session.emitter.emit('error', restartErr instanceof Error ? restartErr : new Error(String(restartErr)));
+              });
+            }
+          }, 1000);
+        } else {
+          warn(`[${sessionId}] scrcpy capture exhausted all ${MAX_ANDROID_SCRCPY_RESTARTS} restart attempts`);
+          session.active = false;
+          this.captures.delete(sessionId);
+          session.emitter.emit('error', err);
+        }
+      });
+
+      socket.on('close', () => {
+        if (!session.active) return; // Normal stop.
+
+        warn(`[${sessionId}] scrcpy socket closed unexpectedly`);
+
+        if (restartCount < MAX_ANDROID_SCRCPY_RESTARTS) {
+          warn(
+            `[${sessionId}] Restarting scrcpy capture after socket close ` +
+            `(attempt ${restartCount + 1}/${MAX_ANDROID_SCRCPY_RESTARTS})…`,
+          );
+          setTimeout(() => {
+            if (session.active) {
+              void this.startAndroidScrcpyCapture(session, restartCount + 1).catch((restartErr: unknown) => {
+                warn(`[${sessionId}] scrcpy restart failed: ${(restartErr as Error).message}`);
+                session.active = false;
+                this.captures.delete(sessionId);
+                session.emitter.emit('error', restartErr instanceof Error ? restartErr : new Error(String(restartErr)));
+              });
+            }
+          }, 1000);
+        } else {
+          warn(`[${sessionId}] scrcpy capture exhausted all ${MAX_ANDROID_SCRCPY_RESTARTS} restart attempts`);
+          session.active = false;
+          this.captures.delete(sessionId);
+          session.emitter.emit('error', new Error(`scrcpy capture failed after ${MAX_ANDROID_SCRCPY_RESTARTS} restart attempts`));
+        }
+      });
+
+      socket.on('connect', () => {
+        log(`[${sessionId}] scrcpy TCP socket connected on port ${allocatedPort}`);
+      });
+    });
+
+    log(`[${sessionId}] scrcpy handshake complete — streaming H.264`);
   }
 
   // -------------------------------------------------------------------------

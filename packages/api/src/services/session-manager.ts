@@ -811,7 +811,7 @@ export class SessionManagerService {
     // The ADB serial is derived from the console port: "emulator-<adbPort>".
     const androidSerial = `emulator-${adbPort}`;
     log(`[${sessionId}] Starting screen capture for Android emulator ${androidSerial}…`);
-    screenCaptureService.startCapture(sessionId, 'android', androidSerial);
+    screenCaptureService.startCapture(sessionId, 'android', androidSerial, undefined, undefined, 'h264');
     const wsUrl = `/ws/stream/${sessionId}`;
 
     // Step 4 — Finalise and activate the session.

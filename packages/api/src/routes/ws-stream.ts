@@ -74,29 +74,42 @@ const wsStreamRoutes: FastifyPluginAsync = async (fastify) => {
 
       if (isH264) {
         // -----------------------------------------------------------------------
-        // H.264 mode: stop any existing JPEG capture, start H.264, subscribe to
-        // 'nalu' events and forward them as framed binary WebSocket messages.
+        // H.264 mode: subscribe to 'nalu' events from an existing capture session
+        // and forward them as framed binary WebSocket messages.
         // -----------------------------------------------------------------------
 
-        const udid = session.device?.platformDeviceId;
-        const iosDeviceName = sessionManagerService.getIosDeviceName(sessionId);
+        const deviceId = session.device?.platformDeviceId;
 
-        if (!udid || !iosDeviceName) {
+        if (!deviceId) {
           warn(`Missing device info for H.264 capture on session ${sessionId} — closing`);
           socket.close(1008, 'Missing device info for H.264 capture');
           return;
         }
 
-        // Start H.264 capture if not already running (startCapture is idempotent —
-        // returns the existing emitter if capture is already active for this session).
-        const emitter = screenCaptureService.startCapture(
-          sessionId,
-          'ios',
-          udid,
-          undefined,
-          iosDeviceName,
-          'h264',
-        );
+        // For iOS, we may need to restart capture in H.264 mode. For Android,
+        // capture is already started in H.264 mode by session-manager.
+        // startCapture is idempotent — returns the existing emitter if already running.
+        if (session.device.platform === 'ios') {
+          const iosDeviceName = sessionManagerService.getIosDeviceName(sessionId);
+          screenCaptureService.startCapture(
+            sessionId,
+            'ios',
+            deviceId,
+            undefined,
+            iosDeviceName ?? deviceId,
+            'h264',
+          );
+        }
+        // For Android: capture is already started by session-manager in 'h264' mode.
+        // startCapture is idempotent so calling it again would be safe, but we
+        // don't need to — the emitter is already active.
+
+        const emitter = screenCaptureService.getEmitter(sessionId);
+        if (!emitter) {
+          warn(`No active capture emitter for H.264 session ${sessionId} — closing`);
+          socket.close(1008, 'No active capture for this session');
+          return;
+        }
 
         // Force the very first frame to be a keyframe so the client can start
         // decoding immediately instead of waiting for the next natural IDR.
@@ -130,11 +143,17 @@ const wsStreamRoutes: FastifyPluginAsync = async (fastify) => {
         emitter.on('nalu', onNalu);
         emitter.on('error', onCaptureError);
 
-        // Clean up subscriptions, listeners, and capture on disconnect.
+        // Clean up subscriptions and capture on disconnect.
+        // For iOS, the H.264 capture lifecycle is tied to the WebSocket connection.
+        // For Android, capture is owned by session-manager — we still stop it here
+        // for symmetry (session-manager will also clean up on session termination).
         const cleanup = (): void => {
           emitter.off('nalu', onNalu);
           emitter.off('error', onCaptureError);
-          screenCaptureService.stopCapture(sessionId);
+          // Only stop capture for iOS — for Android, capture lifecycle is managed by session-manager.
+          if (session.device.platform === 'ios') {
+            screenCaptureService.stopCapture(sessionId);
+          }
           log(`H.264 stream WebSocket cleaned up for session ${sessionId}`);
         };
 
