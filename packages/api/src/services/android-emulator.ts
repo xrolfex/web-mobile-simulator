@@ -55,8 +55,8 @@ function parseAvdmanagerDevices(output: string): Array<{
 }> {
   const results: Array<{ identifier: string; name: string; oem: string }> = [];
 
-  // Split on blank lines to get blocks, each block is one device
-  const blocks = output.split(/\n\s*\n/);
+  // Split on separator lines (3+ dashes) to get blocks, each block is one device
+  const blocks = output.split(/\n-{3,}\n/);
 
   for (const block of blocks) {
     // Match the id line: `id: 0 or "pixel_8"` — extract the quoted identifier
@@ -292,10 +292,7 @@ export class AndroidEmulatorService {
   async listDeviceTypes(): Promise<DeviceType[]> {
     this.assertSdkInstalled();
 
-    const { stdout } = await exec(AVDMANAGER, ['list', 'device', '-c']).catch(async () => {
-      // -c flag gives compact output; fall back to verbose if unsupported
-      return exec(AVDMANAGER, ['list', 'device']);
-    });
+    const { stdout } = await exec(AVDMANAGER, ['list', 'device']);
 
     const raw = parseAvdmanagerDevices(stdout);
 

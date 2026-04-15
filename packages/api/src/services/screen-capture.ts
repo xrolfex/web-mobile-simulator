@@ -80,6 +80,8 @@ interface InternalCaptureSession extends CaptureSession {
   scrcpyForwardPort?: number;
   /** Android scrcpy: buffered SPS/PPS config data to prepend to the next media packet. */
   scrcpyConfigBuffer?: Buffer;
+  /** Cached last keyframe NaluFrame for replay on new WebSocket connections. */
+  lastKeyframe?: NaluFrame;
 }
 
 // ---------------------------------------------------------------------------
@@ -1739,6 +1741,21 @@ export class ScreenCaptureService {
   }
 
   /**
+   * Return the last cached keyframe for a running capture session, or `null`
+   * if no keyframe has been received yet (or no capture is active).
+   *
+   * Used to replay the most recent IDR frame to newly connected WebSocket
+   * clients so the browser's WebCodecs decoder can start immediately without
+   * waiting for the next naturally occurring keyframe.
+   *
+   * @param sessionId - Session whose cached keyframe to retrieve.
+   */
+  getLastKeyframe(sessionId: string): NaluFrame | null {
+    const session = this.captures.get(sessionId);
+    return session?.lastKeyframe ?? null;
+  }
+
+  /**
    * Request that the capture binary for `sessionId` encode the next frame as
    * a keyframe.  Sends "K\n" to the binary's stdin which triggers
    * VideoToolbox's kVTEncodeFrameOptionKey_ForceKeyFrame.
@@ -2077,6 +2094,11 @@ export class ScreenCaptureService {
 
       if (session.active && !session.abortController.signal.aborted) {
         const naluFrame: NaluFrame = { naluData, isKeyframe, timestampUs };
+
+        if (naluFrame.isKeyframe) {
+          session.lastKeyframe = naluFrame;
+        }
+
         session.emitter.emit('nalu', naluFrame);
 
         // Periodic observability logging — log frame stats every 10 seconds.
@@ -2299,6 +2321,11 @@ export class ScreenCaptureService {
                 isKeyframe: isKeyframe || naluData !== rawNalu, // keyframe if IDR or config was prepended
                 timestampUs,
               };
+
+              if (naluFrame.isKeyframe) {
+                session.lastKeyframe = naluFrame;
+              }
+
               session.emitter.emit('nalu', naluFrame);
 
               // Periodic observability logging — log frame stats every 10 seconds.

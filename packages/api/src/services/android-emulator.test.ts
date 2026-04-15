@@ -39,40 +39,41 @@ const mockExec = exec as ReturnType<typeof vi.fn>;
 // Sample CLI output — realistic data from real Android SDK tools
 // ---------------------------------------------------------------------------
 
-// The parseAvdmanagerDevices parser splits on blank lines (\n\s*\n), so device
-// blocks must be separated by blank lines — NOT by "--------" separators.
-const SAMPLE_AVDMANAGER_DEVICE_LIST = `id: 0 or "pixel"
+// The parseAvdmanagerDevices parser splits on lines of dashes (/\n-{3,}\n/),
+// matching real `avdmanager list device` output. A header line precedes the first entry.
+const SAMPLE_AVDMANAGER_DEVICE_LIST = `Available devices definitions:
+id: 0 or "pixel"
     Name: Pixel
     OEM : Google
-
+---------
 id: 1 or "pixel_2"
     Name: Pixel 2
     OEM : Google
-
+---------
 id: 2 or "pixel_5"
     Name: Pixel 5
     OEM : Google
-
+---------
 id: 3 or "nexus_5"
     Name: Nexus 5
     OEM : Google
-
+---------
 id: 4 or "pixel_8"
     Name: Pixel 8
     OEM : Google
-
+---------
 id: 5 or "pixel_tablet"
     Name: Pixel Tablet
     OEM : Google
-
+---------
 id: 6 or "automotive_1024p_landscape"
     Name: Automotive (1024p landscape)
     OEM : Generic
-
+---------
 id: 7 or "tv_1080p"
     Name: Android TV (1080p)
     OEM : Generic
-
+---------
 id: 8 or "wear_round"
     Name: Android Wear Round
     OEM : Generic
@@ -221,22 +222,8 @@ describe('AndroidEmulatorService', () => {
       expect(result).toHaveLength(0);
     });
 
-    it('falls back to verbose listing when compact listing fails', async () => {
-      // First call (compact -c) fails; second call (verbose) succeeds
-      mockExec
-        .mockRejectedValueOnce(new Error('unknown flag: -c'))
-        .mockResolvedValueOnce({ stdout: SAMPLE_AVDMANAGER_DEVICE_LIST, stderr: '' });
-
-      const result = await service.listDeviceTypes();
-
-      expect(result.length).toBeGreaterThan(0);
-      expect(mockExec).toHaveBeenCalledTimes(2);
-    });
-
-    it('propagates errors from exec when both compact and verbose fail', async () => {
-      mockExec
-        .mockRejectedValueOnce(new Error('avdmanager not found'))
-        .mockRejectedValueOnce(new Error('avdmanager not found'));
+    it('propagates errors from exec when avdmanager fails', async () => {
+      mockExec.mockRejectedValueOnce(new Error('avdmanager not found'));
 
       await expect(service.listDeviceTypes()).rejects.toThrow('avdmanager not found');
     });

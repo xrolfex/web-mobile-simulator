@@ -111,10 +111,6 @@ const wsStreamRoutes: FastifyPluginAsync = async (fastify) => {
           return;
         }
 
-        // Force the very first frame to be a keyframe so the client can start
-        // decoding immediately instead of waiting for the next natural IDR.
-        screenCaptureService.requestKeyframe(sessionId);
-
         // Subscribe to NALU events and forward as framed binary messages.
         // Binary message layout:
         //   [1 byte: flags (bit 0 = isKeyframe)]
@@ -142,6 +138,20 @@ const wsStreamRoutes: FastifyPluginAsync = async (fastify) => {
 
         emitter.on('nalu', onNalu);
         emitter.on('error', onCaptureError);
+
+        // For iOS, requestKeyframe() sends "K\n" to the capture binary's stdin
+        // to force the encoder to produce an IDR frame immediately.
+        // For Android/scrcpy, this is a no-op (scrcpy has no stdin control).
+        screenCaptureService.requestKeyframe(sessionId);
+
+        // Replay the last cached keyframe immediately so the browser's
+        // WebCodecs decoder can start without waiting for the next natural IDR.
+        // This is the primary mechanism for Android (where requestKeyframe is a
+        // no-op) and an extra safety net for iOS.
+        const cachedKeyframe = screenCaptureService.getLastKeyframe(sessionId);
+        if (cachedKeyframe) {
+          onNalu(cachedKeyframe);
+        }
 
         // Clean up subscriptions and capture on disconnect.
         // For iOS, the H.264 capture lifecycle is tied to the WebSocket connection.
