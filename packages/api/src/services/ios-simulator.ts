@@ -430,7 +430,7 @@ const INDIGO_HID_SWIFT_SOURCE = `/// wms-indigo-poc.swift
 ///      IndigoHIDMessageForMouseNSEvent (C function in SimulatorKit)
 ///   5. Send the message via SimDeviceLegacyHIDClient.send(message:)
 ///
-/// Author: WMS POC — Eric (via Builder agent), 2026
+/// Author: WMS — Eric (via Builder agent), 2026
 
 import Foundation
 import AppKit
@@ -1790,7 +1790,7 @@ signal(SIGINT)  { _ in exit(0) }
 
 // ── Load frameworks first (required before any ObjC introspection) ────────────
 fputs("──────────────────────────────────────────────────────────\\n", stderr)
-fputs("  WMS IndigoHID POC\\n", stderr)
+fputs("  WMS IndigoHID\\n", stderr)
 fputs("──────────────────────────────────────────────────────────\\n", stderr)
 loadFramework(kCoreSimulatorPath)
 loadFramework(kSimulatorKitPath)

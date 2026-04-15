@@ -4,4 +4,4 @@ export { sessionManagerService } from './session-manager.js';
 export { eventBusService } from './event-bus.js';
 export { appInstallService, AppInstallService } from './app-install.js';
 export { screenCaptureService } from './screen-capture.js';
-export { webRTCStreamService, WebRTCStreamService } from './webrtc-stream.js';
+

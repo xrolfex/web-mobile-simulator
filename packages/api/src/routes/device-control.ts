@@ -139,7 +139,7 @@ async function resolveActiveSession(
  * Device control route plugin.
  *
  * Registers endpoints for hardware-level simulator/emulator interactions that
- * cannot be performed through the VNC stream (iOS and Android supported unless
+  * cannot be performed through the stream (iOS and Android supported unless
  * noted):
  * - POST /api/sessions/:id/control/button     — Press a hardware button
  * - POST /api/sessions/:id/control/rotate     — Set device orientation

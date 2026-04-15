@@ -206,7 +206,7 @@ export class SessionManagerService {
    * into the in-memory map so that crash recovery works across restarts.
    *
    * Sessions that were `'creating'` or `'active'` before the restart have lost
-   * their VNC proxies and device state — these are immediately marked as
+    * their device state — these are immediately marked as
    * `'error'` and persisted so that clients receive accurate status.
    *
    * Errors are logged but never thrown — a DB failure must not prevent the
@@ -358,9 +358,8 @@ export class SessionManagerService {
    *
    * Steps:
    *   1. Mark the session as 'terminating'.
-   *   2. Stop the VNC proxy.
-   *   3. Shut down and delete the platform device.
-   *   4. Mark the session as 'terminated'.
+   *   2. Shut down and delete the platform device.
+   *   3. Mark the session as 'terminated'.
    *
    * @param id - ID of the session to terminate.
    * @throws If the session does not exist.

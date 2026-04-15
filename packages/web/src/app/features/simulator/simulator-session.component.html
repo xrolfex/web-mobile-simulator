@@ -372,7 +372,7 @@
         [sessionId]="session()!.id"
         [streamMode]="streamMode()"
         [platform]="session()!.device.platform"
-        (connectionStateChange)="onVncStateChange($event)"
+        (connectionStateChange)="onConnectionStateChange($event)"
         (disconnectRequest)="onViewerDisconnect()"
         class="viewer-host"
       />

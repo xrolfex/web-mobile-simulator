@@ -97,12 +97,6 @@ export class WebCodecsService {
    */
   private frameCount = 0;
 
-  /** Diagnostic counter for binary messages received (rate-limits DIAG logs). */
-  private diagFrameCounter = 0;
-
-  /** Diagnostic counter for decoded frames output by the VideoDecoder (rate-limits DIAG logs). */
-  private decoderOutputCount = 0;
-
   /** Handle returned by `setInterval` for the per-second FPS counter. */
   private fpsIntervalHandle: ReturnType<typeof setInterval> | null = null;
 
@@ -229,10 +223,6 @@ export class WebCodecsService {
     // ── Frame counter ─────────────────────────────────────────────────────
     this.frameCount = 0;
 
-    // ── Diagnostic counters ───────────────────────────────────────────────
-    this.diagFrameCounter = 0;
-    this.decoderOutputCount = 0;
-
     // ── Signals ───────────────────────────────────────────────────────────
     this.ngZone.run(() => {
       this.connectionState.set('disconnected');
@@ -269,17 +259,10 @@ export class WebCodecsService {
 
     const decoder = new VideoDecoder({
       output: (frame: VideoFrame) => {
-        this.decoderOutputCount++;
-        if (this.decoderOutputCount <= 3 || this.decoderOutputCount % 10 === 0) {
-          console.log(
-            `[WebCodecs DIAG] Decoder output: ${frame.displayWidth}x${frame.displayHeight}, ts=${frame.timestamp}µs`,
-          );
-        }
         this.handleVideoFrame(frame);
       },
       error: (e: DOMException) => {
         console.error('[WebCodecsService] Decoder error:', e);
-        console.error(`[WebCodecs DIAG] Decoder error callback fired — decoder.state=${this.decoder?.state}`);
         this.ngZone.run(() => {
           this.connectionState.set('error');
           this.errorMessage.set(`Decoder error: ${e.message}`);
@@ -329,13 +312,6 @@ export class WebCodecsService {
     const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
     const timestampUs = view.getBigUint64(1); // bytes 1–8, big-endian
     const naluData = data.subarray(9);        // bytes 9+: raw Annex B NALU
-
-    this.diagFrameCounter++;
-    if (this.diagFrameCounter <= 3 || this.diagFrameCounter % 10 === 0) {
-      console.log(
-        `[WebCodecs DIAG] Received frame: keyframe=${isKeyframe}, ts=${timestampUs}µs, size=${naluData.byteLength}B, decoderState=${this.decoder.state}, configured=${this.decoderConfigured}`,
-      );
-    }
 
     if (naluData.byteLength === 0) {
       console.warn('[WebCodecsService] Empty NALU payload — skipping');
@@ -501,20 +477,10 @@ export class WebCodecsService {
 
     ctx.drawImage(frame, 0, 0);
 
-    // Capture dimensions before closing the frame — accessing displayWidth/Height
-    // after close() throws per the WebCodecs spec.
-    const displayWidth = frame.displayWidth;
-    const displayHeight = frame.displayHeight;
-
     // CRITICAL: close the frame immediately to avoid GPU memory leaks.
     frame.close();
 
     this.frameCount++;
-    if (this.frameCount <= 3 || this.frameCount % 10 === 0) {
-      console.log(
-        `[WebCodecs DIAG] Rendered frame #${this.frameCount}: ${displayWidth}x${displayHeight}`,
-      );
-    }
   }
 
   /**

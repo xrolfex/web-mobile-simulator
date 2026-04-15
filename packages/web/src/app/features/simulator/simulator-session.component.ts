@@ -56,8 +56,8 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
   /** Human-readable error message, empty when no error. */
   protected readonly errorMessage = signal<string>('');
 
-  /** VNC connection state forwarded from the viewer child. */
-  protected readonly vncState = signal<ConnectionState>('connecting');
+  /** Connection state forwarded from the viewer child. */
+  protected readonly connectionState = signal<ConnectionState>('connecting');
 
   /** Stream mode for the viewer — WebCodecs for iOS, MJPEG for Android. */
   protected readonly streamMode = signal<StreamMode>('mjpeg');
@@ -170,15 +170,15 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Handle VNC connection state changes emitted by SimulatorViewerComponent.
+   * Handle connection state changes emitted by SimulatorViewerComponent.
    * @param state The new connection state.
    */
-  protected onVncStateChange(state: ConnectionState): void {
-    this.vncState.set(state);
+  protected onConnectionStateChange(state: ConnectionState): void {
+    this.connectionState.set(state);
   }
 
   /**
-   * Handle user-initiated disconnect from the VNC viewer.
+   * Handle user-initiated disconnect from the viewer.
    * Terminates the session and navigates home.
    */
   protected onViewerDisconnect(): void {

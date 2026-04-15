@@ -233,7 +233,7 @@ const sessionRoutes: FastifyPluginAsync = async (fastify) => {
   /**
    * DELETE /api/sessions/:id
    *
-   * Terminates the session with the given ID, stops the VNC proxy, and
+   * Terminates the session with the given ID and
    * shuts down the underlying platform device.
    *
    * Responds with:
