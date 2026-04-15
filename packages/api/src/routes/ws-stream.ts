@@ -98,6 +98,10 @@ const wsStreamRoutes: FastifyPluginAsync = async (fastify) => {
           'h264',
         );
 
+        // Force the very first frame to be a keyframe so the client can start
+        // decoding immediately instead of waiting for the next natural IDR.
+        screenCaptureService.requestKeyframe(sessionId);
+
         // Subscribe to NALU events and forward as framed binary messages.
         // Binary message layout:
         //   [1 byte: flags (bit 0 = isKeyframe)]

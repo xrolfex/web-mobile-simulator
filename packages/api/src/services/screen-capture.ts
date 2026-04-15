@@ -84,7 +84,7 @@ function warn(message: string): void {
 // ---------------------------------------------------------------------------
 
 /** Default frames-per-second target if none is specified. */
-const DEFAULT_TARGET_FPS = 15;
+const DEFAULT_TARGET_FPS = 30;
 
 /** Maximum consecutive capture failures before the loop is stopped. */
 const MAX_CONSECUTIVE_FAILURES = 5;
@@ -118,7 +118,7 @@ const CAPTURE_SWIFT_TMP_PATH = join(tmpdir(), 'wms-ios-capture-stream.swift');
 const MAX_IOS_CAPTURE_RESTARTS = 5;
 
 /** Version tag for the compiled iOS capture binary. Increment to force recompilation. */
-const CAPTURE_BINARY_VERSION = '14';
+const CAPTURE_BINARY_VERSION = '18';
 
 /** Sidecar file that stores the version of the currently-cached binary. */
 const CAPTURE_BINARY_VERSION_PATH = join(tmpdir(), 'wms-ios-capture-stream.ver');
@@ -269,7 +269,7 @@ class H264Encoder {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime,               value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering,   value: kCFBooleanFalse)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel,            value: kVTProfileLevel_H264_Baseline_AutoLevel)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,     value: (fps * 2) as CFTypeRef)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,     value: 5 as CFTypeRef)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate,       value: fps as CFTypeRef)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate,          value: (width * height * 2) as CFTypeRef)
 
@@ -490,20 +490,24 @@ class FrameHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         timer.resume()
         self.startupWatchdogTimer = timer
 
-        // Idle refresh timer (h264 mode only): re-feeds the last captured pixel buffer
-        // to the H.264 encoder every second when SCStream stops delivering frames
-        // (static screen content). This prevents the WebRTC stream from freezing.
-        if format == "h264" {
-            let idleTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
-            idleTimer.schedule(deadline: .now() + 2, repeating: 1.0)
-            idleTimer.setEventHandler { [weak self] in
-                guard let self = self else { return }
-                guard self.format == "h264", let encoder = self.h264Encoder else { return }
-                guard Date().timeIntervalSince(self.lastFrameTime) > 1.0,
-                      let pixelBuffer = self.lastPixelBuffer else { return }
+        // Idle refresh timer (both modes): re-feeds the last captured pixel buffer
+        // when SCStream stops delivering frames (static screen content).
+        // In H.264 mode, fires at the target FPS to maintain consistent frame
+        // delivery for the video decoder. In JPEG mode, fires once per second
+        // since JPEG re-encoding at high FPS would be wasteful.
+        let idleInterval = format == "h264" ? 1.0 / Double(fps) : 1.0
+        let idleThreshold = format == "h264" ? 2.0 / Double(fps) : 1.0
+        let idleTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        idleTimer.schedule(deadline: .now() + 2, repeating: idleInterval)
+        idleTimer.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            guard Date().timeIntervalSince(self.lastFrameTime) > idleThreshold,
+                  let pixelBuffer = self.lastPixelBuffer else { return }
+            if self.format == "h264" {
+                guard let encoder = self.h264Encoder else { return }
                 if !self.idleRefreshLogged {
                     self.idleRefreshLogged = true
-                    fputs("[\\(self.capturedDeviceName)] Content idle — refreshing frame for WebRTC\\n", stderr)
+                    fputs("[\\(self.capturedDeviceName)] Content idle — refreshing H.264 at \\(fps)fps\\n", stderr)
                 }
                 if self.idleKeyframeNeeded {
                     self.idleKeyframeNeeded = false
@@ -511,10 +515,25 @@ class FrameHandler: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
                 let freshPTS = CMClockGetTime(CMClockGetHostTimeClock())
                 encoder.encodePixelBuffer(pixelBuffer, presentationTime: freshPTS)
+            } else {
+                if !self.idleRefreshLogged {
+                    self.idleRefreshLogged = true
+                    fputs("[\\(self.capturedDeviceName)] Content idle — refreshing JPEG frame\\n", stderr)
+                }
+                let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+                guard let cgImage = self.ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
+                let mutableData = NSMutableData()
+                guard let destination = CGImageDestinationCreateWithData(
+                    mutableData, UTType.jpeg.identifier as CFString, 1, nil
+                ) else { return }
+                let options: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: 0.85]
+                CGImageDestinationAddImage(destination, cgImage, options as CFDictionary)
+                guard CGImageDestinationFinalize(destination) else { return }
+                writeFrame(mutableData as Data)
             }
-            idleTimer.resume()
-            self.idleRefreshTimer = idleTimer
         }
+        idleTimer.resume()
+        self.idleRefreshTimer = idleTimer
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {

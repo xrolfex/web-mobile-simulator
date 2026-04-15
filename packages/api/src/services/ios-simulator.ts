@@ -102,7 +102,7 @@ const INDIGO_BINARY_PATH = join(WMS_INPUT_TMP_DIR, 'wms-indigo-hid');
 const INDIGO_SWIFT_TMP_PATH = join(WMS_INPUT_TMP_DIR, 'wms-indigo-hid.swift');
 
 /** Version tag — increment to force recompilation of IndigoHID binary. */
-const INDIGO_BINARY_VERSION = '6';
+const INDIGO_BINARY_VERSION = '7';
 
 /** Sidecar file storing the version of the cached IndigoHID binary. */
 const INDIGO_BINARY_VERSION_PATH = join(WMS_INPUT_TMP_DIR, 'wms-indigo-hid.ver');
@@ -1734,9 +1734,13 @@ func processCommand(_ line: String, hidClient: AnyObject) {
 
 /// Run the stdin read loop (daemon mode).
 ///
-/// Uses \`FileHandle.read(upToCount:)\` which blocks until at least 1 byte
-/// arrives or EOF — unlike \`availableData\` which returns empty Data immediately
-/// on a pipe with no buffered data, causing a premature daemon exit.
+/// Uses POSIX read() directly on fd 0 rather than FileHandle.read(upToCount:).
+///
+/// On macOS 26 Tahoe, Node.js spawn() provides child stdio as UNIX domain
+/// socket pairs (SOCK_STREAM), not OS FIFOs. NSConcreteFileHandle.readDataOfLength:
+/// fails to receive data on socket-type fds when RunLoop.main is also running —
+/// it blocks indefinitely even when data is available. POSIX read() on the same
+/// fd works correctly in all cases (FIFO, socket, tty).
 ///
 /// - Parameters:
 ///   - hidClient: The ready SimDeviceLegacyHIDClient.
@@ -1746,19 +1750,21 @@ func runDaemonLoop(hidClient: AnyObject, udid: String) {
     writeJSONResponse(["ready": true, "udid": udid])
     fputs("[daemon] Ready. Waiting for commands on stdin.\\n", stderr)
 
-    let stdinHandle = FileHandle.standardInput
     var lineBuffer = Data()
     let newline = UInt8(0x0A) // \\n
 
     while true {
-        // read(upToCount:) blocks until at least 1 byte arrives or EOF.
-        // On a pipe, this is the correct blocking behavior we need.
-        guard let chunk = try? stdinHandle.read(upToCount: 4096), !chunk.isEmpty else {
+        // Use POSIX read() on fd 0 directly. FileHandle.read(upToCount:) hangs
+        // indefinitely when stdin is a UNIX socket (as created by Node.js spawn)
+        // on macOS 26 Tahoe — a Foundation regression with socket-type fds.
+        var buf = [UInt8](repeating: 0, count: 4096)
+        let bytesRead = read(0, &buf, 4096)
+        guard bytesRead > 0 else {
             fputs("[daemon] stdin EOF — exiting.\\n", stderr)
             exit(0)
         }
 
-        lineBuffer.append(chunk)
+        lineBuffer.append(contentsOf: buf[0..<bytesRead])
 
         // Process all complete lines in the buffer
         while let newlineIndex = lineBuffer.firstIndex(of: newline) {
@@ -1800,6 +1806,13 @@ if command == "--discover" {
     // ── Daemon mode: just UDID, no subcommand ─────────────────────────────────
     let udid = command
     fputs("[daemon] Starting for UDID: \\(udid)\\n", stderr)
+
+    // Log stdin fd type for diagnostic purposes
+    var stdinStat = stat()
+    fstat(0, &stdinStat)
+    let stdinType = stdinStat.st_mode & S_IFMT
+    let stdinTypeName = stdinType == S_IFSOCK ? "socket" : stdinType == S_IFIFO ? "pipe" : "other(\\(stdinType))"
+    fputs("[daemon] stdin fd type: \\(stdinTypeName)\\n", stderr)
 
     guard let device = findSimDevice(udid: udid) else {
         writeJSONResponse(["ready": false, "error": "Could not locate SimDevice for UDID \\(udid)"])
@@ -1940,6 +1953,26 @@ export class IOSSimulatorService {
   /** In-flight promise for IndigoHID binary compilation (prevents parallel compilations). */
   private ensureIndigoHIDBinaryPromise: Promise<string> | null = null;
 
+  /** Running IndigoHID daemon process, keyed by device UDID. */
+  private indigoDaemons = new Map<string, {
+    process: import('node:child_process').ChildProcess;
+    ready: boolean;
+    lineBuffer: string;
+    pendingRequests: Map<string, {
+      resolve: () => void;
+      reject: (err: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }>;
+    requestCounter: number;
+  }>();
+
+  /**
+   * In-flight startup promises for IndigoHID daemons, keyed by device UDID.
+   * Used to prevent concurrent calls to `ensureIndigoDaemon` from spawning
+   * multiple daemon processes for the same device.
+   */
+  private indigoDaemonStarting = new Map<string, Promise<void>>();
+
   // -------------------------------------------------------------------------
   // Input binary management
   // -------------------------------------------------------------------------
@@ -2039,6 +2072,219 @@ export class IOSSimulatorService {
       });
     }
     return this.ensureIndigoHIDBinaryPromise;
+  }
+
+  /**
+   * Ensure a persistent IndigoHID daemon is running for the given device.
+   * Concurrency-safe: if a startup is already in progress for this UDID, all
+   * concurrent callers await the same promise instead of spawning a second
+   * daemon process. If a daemon is already running and ready, reuses it.
+   */
+  private async ensureIndigoDaemon(udid: string): Promise<void> {
+    const existing = this.indigoDaemons.get(udid);
+
+    // Happy path: daemon is already running and ready — reuse it.
+    if (existing && existing.ready && existing.process.exitCode === null) {
+      return;
+    }
+
+    // A startup is already in progress for this UDID — wait for it rather than
+    // tearing it down and spawning a second process.
+    const pending = this.indigoDaemonStarting.get(udid);
+    if (pending) {
+      await pending;
+      return;
+    }
+
+    // Clean up any stale (exited or not-yet-ready) daemon for this UDID.
+    this.teardownIndigoDaemon(udid);
+
+    // Register the startup promise *before* any await so that concurrent callers
+    // arriving while the binary is being compiled or the process is spawning will
+    // pick up this promise instead of initiating a second startup.
+    const startupPromise = this._startIndigoDaemon(udid);
+    this.indigoDaemonStarting.set(udid, startupPromise);
+
+    try {
+      await startupPromise;
+    } finally {
+      this.indigoDaemonStarting.delete(udid);
+    }
+  }
+
+  /**
+   * Internal helper that performs the actual daemon spawn and waits for the
+   * ready signal. Called exclusively from `ensureIndigoDaemon`.
+   */
+  private async _startIndigoDaemon(udid: string): Promise<void> {
+    const binary = await this.ensureIndigoHIDBinary();
+
+    return new Promise<void>((resolve, reject) => {
+      const proc = spawn(binary, [udid], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          DEVELOPER_DIR: `${config.xcodePath}/Contents/Developer`,
+        },
+      });
+
+      const daemon = {
+        process: proc,
+        ready: false,
+        lineBuffer: '',
+        pendingRequests: new Map<string, {
+          resolve: () => void;
+          reject: (err: Error) => void;
+          timer: ReturnType<typeof setTimeout>;
+        }>(),
+        requestCounter: 0,
+      };
+
+      this.indigoDaemons.set(udid, daemon);
+
+      // Read newline-delimited JSON responses from stdout
+      proc.stdout?.on('data', (chunk: Buffer) => {
+        daemon.lineBuffer += chunk.toString('utf8');
+        let newlineIdx: number;
+        while ((newlineIdx = daemon.lineBuffer.indexOf('\n')) !== -1) {
+          const line = daemon.lineBuffer.slice(0, newlineIdx).trim();
+          daemon.lineBuffer = daemon.lineBuffer.slice(newlineIdx + 1);
+          if (!line) continue;
+
+          try {
+            const msg = JSON.parse(line) as Record<string, unknown>;
+            if (msg['ready'] === true) {
+              daemon.ready = true;
+              log(`IndigoHID daemon ready for device ${udid}`);
+              resolve();
+            } else if (typeof msg['id'] === 'string') {
+              const reqId = msg['id'] as string;
+              const pending = daemon.pendingRequests.get(reqId);
+              if (pending) {
+                daemon.pendingRequests.delete(reqId);
+                clearTimeout(pending.timer);
+                if (msg['ok'] === true) {
+                  pending.resolve();
+                } else {
+                  pending.reject(new Error(String(msg['error'] ?? 'IndigoHID daemon command failed')));
+                }
+              }
+            }
+          } catch {
+            // Ignore malformed JSON lines
+          }
+        }
+      });
+
+      // Forward daemon stderr to our stderr with a prefix
+      proc.stderr?.on('data', (chunk: Buffer) => {
+        const lines = chunk.toString().trim().split('\n');
+        for (const line of lines) {
+          if (line.trim()) {
+            warn(`IndigoHID daemon [${udid.substring(0, 8)}]: ${line}`);
+          }
+        }
+      });
+
+      proc.on('error', (err) => {
+        warn(`IndigoHID daemon process error for ${udid}: ${err.message}`);
+        this.teardownIndigoDaemon(udid);
+        if (!daemon.ready) {
+          reject(err);
+        }
+      });
+
+      proc.on('exit', (code, signal) => {
+        warn(`IndigoHID daemon exited for ${udid} (code=${code}, signal=${signal})`);
+        // Reject all pending requests
+        for (const [, pending] of daemon.pendingRequests) {
+          clearTimeout(pending.timer);
+          pending.reject(new Error(`IndigoHID daemon exited (code=${code})`));
+        }
+        daemon.pendingRequests.clear();
+        this.indigoDaemons.delete(udid);
+        if (!daemon.ready) {
+          reject(new Error(`IndigoHID daemon failed to start (code=${code})`));
+        }
+      });
+
+      // Timeout if ready signal not received within 15s
+      setTimeout(() => {
+        if (!daemon.ready) {
+          warn(`IndigoHID daemon startup timeout for ${udid}`);
+          this.teardownIndigoDaemon(udid);
+          reject(new Error('IndigoHID daemon failed to become ready within 15s'));
+        }
+      }, 15_000);
+    });
+  }
+
+  /**
+   * Send a JSON command to the running IndigoHID daemon for the given device.
+   * Automatically ensures the daemon is running first.
+   * Returns a promise that resolves when the daemon sends `{"ok":true}` for the request.
+   */
+  private async sendDaemonCommand(udid: string, cmd: Record<string, unknown>): Promise<void> {
+    await this.ensureIndigoDaemon(udid);
+
+    const daemon = this.indigoDaemons.get(udid);
+    if (!daemon || !daemon.ready) {
+      throw new Error(`IndigoHID daemon not ready for device ${udid}`);
+    }
+
+    const id = String(++daemon.requestCounter);
+
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        daemon.pendingRequests.delete(id);
+        reject(new Error(`IndigoHID daemon command timed out after 10s: ${JSON.stringify(cmd)}`));
+      }, 10_000);
+
+      daemon.pendingRequests.set(id, { resolve, reject, timer });
+
+      const line = JSON.stringify({ ...cmd, id }) + '\n';
+      if (!daemon.process.stdin) {
+        daemon.pendingRequests.delete(id);
+        clearTimeout(timer);
+        reject(new Error('IndigoHID daemon stdin is not available (process may have exited)'));
+        return;
+      }
+      daemon.process.stdin.write(line, (err) => {
+        if (err) {
+          daemon.pendingRequests.delete(id);
+          clearTimeout(timer);
+          reject(new Error(`Failed to write to IndigoHID daemon stdin: ${err.message}`));
+        }
+      });
+    });
+  }
+
+  /**
+   * Tear down the IndigoHID daemon for the given device UDID.
+   * Kills the process, rejects all pending requests, and removes the entry.
+   * Safe to call multiple times or with a UDID that has no daemon.
+   */
+  teardownIndigoDaemon(udid: string): void {
+    const daemon = this.indigoDaemons.get(udid);
+    if (!daemon) return;
+
+    // Reject all pending requests
+    for (const [, pending] of daemon.pendingRequests) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('IndigoHID daemon was torn down'));
+    }
+    daemon.pendingRequests.clear();
+
+    // Kill the process
+    try {
+      daemon.process.stdin?.end();
+      daemon.process.kill('SIGTERM');
+    } catch {
+      // Ignore errors during cleanup
+    }
+
+    this.indigoDaemons.delete(udid);
+    log(`IndigoHID daemon torn down for device ${udid}`);
   }
 
   // -------------------------------------------------------------------------
@@ -2400,13 +2646,7 @@ export class IOSSimulatorService {
     button: 'home' | 'lock' | 'volumeUp' | 'volumeDown',
   ): Promise<void> {
     log(`Pressing button "${button}" on device ${udid}`);
-
-    const binary = await this.ensureIndigoHIDBinary();
-    await exec(binary, [udid, 'button', button], {
-      ...XCRUN_EXEC_OPTIONS,
-      timeout: 5_000,
-    });
-
+    await this.sendDaemonCommand(udid, { cmd: 'button', name: button });
     log(`Button "${button}" pressed on device ${udid}`);
   }
 
@@ -2655,12 +2895,7 @@ export class IOSSimulatorService {
    */
   async sendText(udid: string, text: string): Promise<void> {
     log(`Sending text to device ${udid}: "${text.substring(0, 50)}${text.length > 50 ? '…' : ''}"`);
-
-    const binary = await this.ensureIndigoHIDBinary();
-    await exec(binary, [udid, 'type', text], {
-      ...XCRUN_EXEC_OPTIONS,
-      timeout: 10_000,
-    });
+    await this.sendDaemonCommand(udid, { cmd: 'type', text });
     log(`Text sent to device ${udid}`);
   }
 
@@ -2678,12 +2913,7 @@ export class IOSSimulatorService {
    */
   async sendTap(udid: string, normX: number, normY: number): Promise<void> {
     log(`Sending tap to device ${udid} at normalised (${normX.toFixed(3)}, ${normY.toFixed(3)})`);
-
-    const binary = await this.ensureIndigoHIDBinary();
-    await exec(binary, [udid, 'tap', String(normX), String(normY)], {
-      ...XCRUN_EXEC_OPTIONS,
-      timeout: 5_000,
-    });
+    await this.sendDaemonCommand(udid, { cmd: 'tap', x: normX, y: normY });
     log(`Tap sent to device ${udid} at (${normX.toFixed(3)}, ${normY.toFixed(3)})`);
   }
 
@@ -2717,17 +2947,12 @@ export class IOSSimulatorService {
     );
 
     const steps = Math.max(5, Math.round(durationMs / 30));
-
-    const swipeTimeoutMs = Math.max(10_000, durationMs + 5_000);
-    const binary = await this.ensureIndigoHIDBinary();
-    await exec(binary, [
-      udid, 'swipe',
-      String(normX1), String(normY1),
-      String(normX2), String(normY2),
-      String(steps), String(durationMs),
-    ], {
-      ...XCRUN_EXEC_OPTIONS,
-      timeout: swipeTimeoutMs,
+    await this.sendDaemonCommand(udid, {
+      cmd: 'swipe',
+      x1: normX1, y1: normY1,
+      x2: normX2, y2: normY2,
+      steps,
+      durationMs,
     });
     log(`Swipe sent to device ${udid} from (${normX1}, ${normY1}) to (${normX2}, ${normY2})`);
   }
@@ -2774,21 +2999,13 @@ export class IOSSimulatorService {
     const indigoKeyName = specialKeyMap[key];
 
     if (indigoKeyName !== undefined) {
-      // Special key — use the IndigoHID 'key' command
-      const binary = await this.ensureIndigoHIDBinary();
-      await exec(binary, [udid, 'key', indigoKeyName], {
-        ...XCRUN_EXEC_OPTIONS,
-        timeout: 5_000,
-      });
+      // Special key — use the IndigoHID 'key' command via daemon
+      await this.sendDaemonCommand(udid, { cmd: 'key', name: indigoKeyName });
     } else if (key.length === 1) {
       // Single printable character (including space) — send the character directly.
       // The Swift HID table maps single characters (e.g. ' ', 'a') by their
       // literal value, so we pass the character as-is.
-      const binary = await this.ensureIndigoHIDBinary();
-      await exec(binary, [udid, 'key', key], {
-        ...XCRUN_EXEC_OPTIONS,
-        timeout: 5_000,
-      });
+      await this.sendDaemonCommand(udid, { cmd: 'key', name: key });
     } else {
       // Multi-character keys not in the map (Shift, Control, Alt, Meta, etc.) — ignore.
       log(`Ignoring unsupported key: "${key}" (code: "${code}")`);

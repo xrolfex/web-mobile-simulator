@@ -379,6 +379,11 @@ export class SessionManagerService {
     this.persistSession(session, 'update');
     this.emitStatusChange(session, previousStatus);
 
+    // Tear down IndigoHID daemon if this was an iOS session.
+    if (session.device.platform === 'ios' && session._iosUdid) {
+      iosSimulatorService.teardownIndigoDaemon(session._iosUdid);
+    }
+
     // Stop screen capture first — safe to call even if no capture was started.
     screenCaptureService.stopCapture(id);
 
@@ -972,12 +977,13 @@ export class SessionManagerService {
     for (const entries of this.iosPool.values()) {
       for (const entry of entries) {
         drainPromises.push(
-          iosSimulatorService
-            .shutdownDevice(entry.udid)
-            .then(() => iosSimulatorService.deleteDevice(entry.udid))
-            .catch((err: unknown) => {
-              warn(`drainPool: failed to clean up ${entry.udid}: ${String(err)}`);
-            }),
+          (async () => {
+            iosSimulatorService.teardownIndigoDaemon(entry.udid);
+            await iosSimulatorService.shutdownDevice(entry.udid);
+            await iosSimulatorService.deleteDevice(entry.udid);
+          })().catch((err: unknown) => {
+            warn(`drainPool: failed to clean up ${entry.udid}: ${String(err)}`);
+          }),
         );
       }
     }
@@ -1001,6 +1007,8 @@ export class SessionManagerService {
   private async teardownDevice(session: InternalSession): Promise<void> {
     if (session.device.platform === 'ios' && session._iosUdid) {
       const udid = session._iosUdid;
+      // Safety net: ensure IndigoHID daemon is torn down before device shutdown.
+      iosSimulatorService.teardownIndigoDaemon(udid);
       log(`[${session.id}] Shutting down iOS Simulator ${udid}…`);
       await iosSimulatorService.shutdownDevice(udid);
       log(`[${session.id}] Deleting iOS Simulator ${udid}…`);
