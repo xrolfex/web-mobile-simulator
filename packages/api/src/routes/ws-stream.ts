@@ -247,12 +247,17 @@ const wsStreamRoutes: FastifyPluginAsync = async (fastify) => {
             }
 
             if (session.device.platform === 'android' && session.device.platformDeviceId) {
-              // For Android: use device pixel coordinates with adb input tap.
-              androidEmulatorService.sendTap(
-                session.device.platformDeviceId,
-                deviceX,
-                deviceY,
-              ).catch((err: unknown) => {
+              // For Android: normalised coords × real device resolution.
+              // scrcpy streams at max_size=720 (downscaled), so deviceX/deviceY from
+              // the frontend are in scrcpy frame space, not real device space.
+              // We query the real resolution and scale normX/normY instead.
+              if (typeof normX !== 'number' || typeof normY !== 'number') return;
+              const platformDeviceId = session.device.platformDeviceId;
+              androidEmulatorService.getScreenResolution(platformDeviceId).then((resolution) => {
+                const realX = normX * resolution.width;
+                const realY = normY * resolution.height;
+                return androidEmulatorService.sendTap(platformDeviceId, realX, realY);
+              }).catch((err: unknown) => {
                 const errMsg = err instanceof Error ? err.message : String(err);
                 warn(`Failed to forward tap for session ${sessionId}: ${errMsg}`);
                 if (socket.readyState === 1 /* WebSocket.OPEN */) {
@@ -293,12 +298,25 @@ const wsStreamRoutes: FastifyPluginAsync = async (fastify) => {
             }
 
             if (session.device.platform === 'android' && session.device.platformDeviceId) {
-              // For Android: use device pixel coordinates.
-              androidEmulatorService.sendSwipe(
-                session.device.platformDeviceId,
-                deviceStartX, deviceStartY,
-                deviceEndX, deviceEndY,
-              ).catch((err: unknown) => {
+              // For Android: normalised coords × real device resolution.
+              // Same rationale as tap: scrcpy downscales to max_size=720 so
+              // deviceStartX/Y etc. are in scrcpy frame space, not real device space.
+              if (
+                typeof normStartX !== 'number' || typeof normStartY !== 'number' ||
+                typeof normEndX !== 'number' || typeof normEndY !== 'number'
+              ) return;
+              const platformDeviceId = session.device.platformDeviceId;
+              androidEmulatorService.getScreenResolution(platformDeviceId).then((resolution) => {
+                const realStartX = normStartX * resolution.width;
+                const realStartY = normStartY * resolution.height;
+                const realEndX = normEndX * resolution.width;
+                const realEndY = normEndY * resolution.height;
+                return androidEmulatorService.sendSwipe(
+                  platformDeviceId,
+                  realStartX, realStartY,
+                  realEndX, realEndY,
+                );
+              }).catch((err: unknown) => {
                 const errMsg = err instanceof Error ? err.message : String(err);
                 warn(`Failed to forward swipe for session ${sessionId}: ${errMsg}`);
                 if (socket.readyState === 1 /* WebSocket.OPEN */) {

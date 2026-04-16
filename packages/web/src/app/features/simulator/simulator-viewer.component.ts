@@ -256,6 +256,7 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
    * leaves the element boundary.
    */
   protected onCanvasPointerDown(event: PointerEvent): void {
+    console.log('[TAP-DEBUG] onCanvasPointerDown fired — clientX:', event.clientX, 'clientY:', event.clientY, 'pointerId:', event.pointerId);
     const el = event.currentTarget as HTMLElement;
     const rect = el.getBoundingClientRect();
 
@@ -278,6 +279,7 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
    * - Otherwise delegates to the tap handler.
    */
   protected onCanvasPointerUp(event: PointerEvent): void {
+    console.log('[TAP-DEBUG] onCanvasPointerUp fired — dragStart exists:', !!this.dragStart, 'clientX:', event.clientX, 'clientY:', event.clientY);
     if (!this.dragStart) return;
 
     const start = this.dragStart;
@@ -286,6 +288,7 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
     const dx = event.clientX - start.clientX;
     const dy = event.clientY - start.clientY;
     const distance = Math.sqrt(dx * dx + dy * dy);
+    console.log('[TAP-DEBUG] onCanvasPointerUp — dx:', dx, 'dy:', dy, 'distance:', distance, 'SWIPE_THRESHOLD_PX:', this.SWIPE_THRESHOLD_PX);
 
     if (distance >= this.SWIPE_THRESHOLD_PX) {
       // Treat as a swipe
@@ -396,6 +399,7 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
    * Returns `null` if no input socket is currently available.
    */
   private getInputWebSocket(): WebSocket | null {
+    console.log('[TAP-DEBUG] getInputWebSocket — inputWs is null:', this.inputWs === null, 'readyState:', this.inputWs?.readyState ?? 'N/A', '(OPEN=1)');
     return this.inputWs;
   }
 
@@ -406,6 +410,7 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
    */
   private sendTap(event: MouseEvent | PointerEvent): void {
     const ws = this.getInputWebSocket();
+    console.log('[TAP-DEBUG] sendTap — ws is null:', ws === null, 'readyState:', ws?.readyState ?? 'N/A', '(OPEN=1)', 'frameWidth:', this.frameWidth(), 'frameHeight:', this.frameHeight());
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
     const el = event.currentTarget as HTMLElement;
@@ -424,16 +429,16 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
         console.warn('[SimulatorViewer] Tap dropped: frame dimensions not yet known');
         return;
       }
-      ws.send(
-        JSON.stringify({
-          type: 'touch',
-          action: 'tap',
-          x,
-          y,
-          deviceX: Math.round(x * this.frameWidth()),
-          deviceY: Math.round(y * this.frameHeight()),
-        }),
-      );
+      const payload = JSON.stringify({
+        type: 'touch',
+        action: 'tap',
+        x,
+        y,
+        deviceX: Math.round(x * this.frameWidth()),
+        deviceY: Math.round(y * this.frameHeight()),
+      });
+      console.log('[TAP-DEBUG] sendTap — sending payload:', payload);
+      ws.send(payload);
     }
   }
 

@@ -8,7 +8,7 @@ tools:
   edit: false
 permission:
   bash:
-    "*": allow
+    "*": deny
     "find *": allow
     "ls *": allow
     "cat *": allow

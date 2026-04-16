@@ -13,15 +13,16 @@
 #   --help    Print this help message and exit
 #
 # What this script does (in order):
-#   Phase 1 — macOS verification
-#   Phase 2 — Homebrew install/verify
-#   Phase 3 — Xcode Command Line Tools install/verify
-#   Phase 4 — iOS Simulator runtimes (download latest if none installed)
-#   Phase 5 — Android SDK command-line tools install/verify
-#   Phase 6 — Android SDK packages (platform-tools, emulator, API 35, system-image)
-#   Phase 7 — Default Android AVD creation
-#   Phase 8 — Shell environment file + project .env
-#   Phase 9 — Final verification summary
+#   Phase 1  — macOS verification
+#   Phase 2  — Homebrew install/verify
+#   Phase 3  — Xcode Command Line Tools install/verify
+#   Phase 4  — iOS Simulator runtimes (download latest if none installed)
+#   Phase 5  — Android SDK command-line tools install/verify
+#   Phase 6  — Android SDK packages (platform-tools, emulator, API 35, system-image)
+#   Phase 7  — scrcpy install/verify (Android H.264 screen streaming)
+#   Phase 8  — Default Android AVD creation
+#   Phase 9  — Shell environment file + project .env
+#   Phase 10 — Final verification summary
 #
 # Safe to run multiple times — idempotent; skips already-installed components.
 # =============================================================================
@@ -448,9 +449,47 @@ fi
 record_pass "Android SDK packages (platform-tools, emulator, android-35, $ANDROID_ABI system image)"
 
 # =============================================================================
-# Phase 7 — Create Default Android AVD
+# Phase 7 — scrcpy (Android Screen Streaming)
 # =============================================================================
-header "Phase 7: Default Android AVD"
+header "Phase 7: scrcpy (Android Screen Streaming)"
+
+step "Checking scrcpy..."
+if brew list scrcpy &>/dev/null; then
+  SCRCPY_VERSION="$(scrcpy --version 2>&1 | head -1)"
+  success "scrcpy already installed: $SCRCPY_VERSION"
+  record_pass "scrcpy ($SCRCPY_VERSION)"
+else
+  warn "scrcpy not found. Installing via Homebrew..."
+  brew install scrcpy
+  if brew list scrcpy &>/dev/null; then
+    SCRCPY_VERSION="$(scrcpy --version 2>&1 | head -1)"
+    success "scrcpy installed: $SCRCPY_VERSION"
+    record_pass "scrcpy ($SCRCPY_VERSION)"
+  else
+    warn "scrcpy installation may have failed — check brew output above"
+    record_warn "scrcpy (install may have failed)"
+  fi
+fi
+
+step "Verifying scrcpy-server jar..."
+# Determine Homebrew prefix (Apple Silicon vs Intel)
+BREW_PREFIX="$(brew --prefix)"
+SCRCPY_SERVER_PATH="$BREW_PREFIX/share/scrcpy/scrcpy-server"
+
+if [[ -f "$SCRCPY_SERVER_PATH" ]]; then
+  success "scrcpy-server jar found at: $SCRCPY_SERVER_PATH"
+  record_pass "scrcpy-server jar ($SCRCPY_SERVER_PATH)"
+else
+  warn "scrcpy-server jar NOT found at expected path: $SCRCPY_SERVER_PATH"
+  warn "Android H.264 streaming will fall back to PNG polling."
+  warn "Try: brew reinstall scrcpy"
+  record_warn "scrcpy-server jar (not found at $SCRCPY_SERVER_PATH)"
+fi
+
+# =============================================================================
+# Phase 8 — Create Default Android AVD
+# =============================================================================
+header "Phase 8: Default Android AVD"
 
 step "Checking existing Android Virtual Devices..."
 
@@ -521,9 +560,9 @@ else
 fi
 
 # =============================================================================
-# Phase 8 — Environment Setup
+# Phase 9 — Environment Setup
 # =============================================================================
-header "Phase 8: Environment Setup"
+header "Phase 9: Environment Setup"
 
 ENV_SNIPPET_FILE="$HOME/.web-mobile-simulator-env"
 
@@ -575,9 +614,9 @@ else
 fi
 
 # =============================================================================
-# Phase 9 — Verification Summary
+# Phase 10 — Verification Summary
 # =============================================================================
-header "Phase 9: Verification"
+header "Phase 10: Verification"
 
 step "Running final checks..."
 
@@ -685,6 +724,13 @@ if has_cmd pnpm; then
   check_item "pnpm" "$(pnpm --version)" "ok"
 else
   check_item "pnpm" "NOT FOUND — npm install -g pnpm" "warn"
+fi
+
+# scrcpy (Android H.264 streaming)
+if has_cmd scrcpy; then
+  check_item "scrcpy" "$(scrcpy --version 2>&1 | head -1)" "ok"
+else
+  check_item "scrcpy" "NOT FOUND — brew install scrcpy" "fail"
 fi
 
 # Architecture / ABI

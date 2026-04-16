@@ -484,34 +484,48 @@ export class WebCodecsService {
   }
 
   /**
+   * Find all NALU start code positions in Annex B data.
+   * Supports both 4-byte (0x00000001) and 3-byte (0x000001) start codes.
+   * Returns array of { offset, headerLen } sorted by offset.
+   *
+   * @param data - Raw Annex B buffer to scan.
+   * @returns Array of start-code positions with their header lengths.
+   */
+  private findStartCodes(data: Uint8Array): Array<{ offset: number; headerLen: number }> {
+    const result: Array<{ offset: number; headerLen: number }> = [];
+    for (let i = 0; i <= data.length - 3; i++) {
+      if (data[i] === 0 && data[i + 1] === 0) {
+        if (i + 3 < data.length && data[i + 2] === 0 && data[i + 3] === 1) {
+          result.push({ offset: i, headerLen: 4 });
+          i += 3; // skip past this start code
+        } else if (data[i + 2] === 1) {
+          result.push({ offset: i, headerLen: 3 });
+          i += 2; // skip past this start code
+        }
+      }
+    }
+    return result;
+  }
+
+  /**
    * Extract the first NALU of a given type from Annex B data.
    * Returns raw NALU bytes (including NALU header byte, excluding start code), or null.
+   * Supports both 4-byte (0x00000001) and 3-byte (0x000001) Annex B start codes.
    *
    * @param annexBData - Raw Annex B NALU data to scan.
    * @param naluType   - The NALU type to search for (e.g. 7 = SPS, 8 = PPS).
    * @returns The NALU bytes including the header byte, or `null` if not found.
    */
   private extractNalu(annexBData: Uint8Array, naluType: number): Uint8Array | null {
-    for (let i = 0; i <= annexBData.length - 5; i++) {
-      if (
-        annexBData[i] === 0 && annexBData[i + 1] === 0 &&
-        annexBData[i + 2] === 0 && annexBData[i + 3] === 1
-      ) {
-        const type = annexBData[i + 4]! & 0x1f;
-        if (type === naluType) {
-          // Find end: next start code or end of buffer
-          let end = annexBData.length;
-          for (let j = i + 4; j <= annexBData.length - 4; j++) {
-            if (
-              annexBData[j] === 0 && annexBData[j + 1] === 0 &&
-              annexBData[j + 2] === 0 && annexBData[j + 3] === 1
-            ) {
-              end = j;
-              break;
-            }
-          }
-          return annexBData.subarray(i + 4, end);
-        }
+    const startCodes = this.findStartCodes(annexBData);
+    for (let i = 0; i < startCodes.length; i++) {
+      const sc = startCodes[i]!;
+      const naluStart = sc.offset + sc.headerLen;
+      if (naluStart >= annexBData.length) continue;
+      const type = annexBData[naluStart]! & 0x1f;
+      if (type === naluType) {
+        const end = i + 1 < startCodes.length ? startCodes[i + 1]!.offset : annexBData.length;
+        return annexBData.subarray(naluStart, end);
       }
     }
     return null;
@@ -570,28 +584,20 @@ export class WebCodecsService {
   /**
    * Convert Annex B formatted data to avcC format (4-byte length-prefixed NALUs).
    * Strips SPS (type 7) and PPS (type 8) since they are in the decoder description.
+   * Supports both 4-byte (0x00000001) and 3-byte (0x000001) Annex B start codes.
    * Returns null if no decodable NALUs are found.
    *
-   * @param annexBData - Raw Annex B NALU data with `0x00000001` start codes.
+   * @param annexBData - Raw Annex B NALU data with 3- or 4-byte start codes.
    * @returns avcC-formatted buffer, or `null` if there are no decodable NALUs.
    */
   private annexBToAvcC(annexBData: Uint8Array): Uint8Array | null {
+    const startCodes = this.findStartCodes(annexBData);
     const nalus: Uint8Array[] = [];
 
-    // Find all NALUs by scanning for 0x00000001 start codes
-    const startOffsets: number[] = [];
-    for (let i = 0; i <= annexBData.length - 4; i++) {
-      if (
-        annexBData[i] === 0 && annexBData[i + 1] === 0 &&
-        annexBData[i + 2] === 0 && annexBData[i + 3] === 1
-      ) {
-        startOffsets.push(i);
-      }
-    }
-
-    for (let idx = 0; idx < startOffsets.length; idx++) {
-      const naluStart = startOffsets[idx]! + 4; // skip start code
-      const naluEnd = idx + 1 < startOffsets.length ? startOffsets[idx + 1]! : annexBData.length;
+    for (let idx = 0; idx < startCodes.length; idx++) {
+      const sc = startCodes[idx]!;
+      const naluStart = sc.offset + sc.headerLen;
+      const naluEnd = idx + 1 < startCodes.length ? startCodes[idx + 1]!.offset : annexBData.length;
       const nalu = annexBData.subarray(naluStart, naluEnd);
       if (nalu.byteLength === 0) continue;
 
@@ -611,7 +617,7 @@ export class WebCodecsService {
     let offset = 0;
 
     for (const nalu of nalus) {
-      view.setUint32(offset, nalu.byteLength, false); // big-endian length
+      view.setUint32(offset, nalu.byteLength, false);
       offset += 4;
       result.set(nalu, offset);
       offset += nalu.byteLength;

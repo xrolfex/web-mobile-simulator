@@ -267,6 +267,9 @@ export class AndroidEmulatorService {
   /** Cache of resolved ADB ports keyed by AVD name. */
   private readonly adbPortCache = new Map<string, number>();
 
+  /** Cache of real screen resolutions keyed by AVD name. */
+  private readonly screenResolutionCache = new Map<string, { width: number; height: number }>();
+
   // ---------------------------------------------------------------------------
   // Public API
   // ---------------------------------------------------------------------------
@@ -449,7 +452,7 @@ export class AndroidEmulatorService {
   }
 
   /**
-   * Boot an Android emulator in a headless background process and wait until
+   * Boot an Android emulator in a background process and wait until
    * the device reaches the "device" state in `adb devices`.
    *
    * The emulator process is stored in {@link runningProcesses} for later
@@ -462,15 +465,16 @@ export class AndroidEmulatorService {
   async bootEmulator(avdName: string): Promise<{ pid: number; adbPort: number }> {
     // Invalidate any stale cached port so the post-boot lookup resolves fresh.
     this.adbPortCache.delete(avdName);
+    // Invalidate stale resolution cache — a fresh boot may use a different skin/resolution.
+    this.screenResolutionCache.delete(avdName);
 
     this.assertSdkInstalled();
 
     const emulatorArgs = [
       '-avd', avdName,
-      '-no-window',
-      '-no-audio',
       '-gpu', 'swiftshader_indirect',
       '-no-boot-anim',
+      '-no-window',
     ];
 
     // Spawn detached so the emulator survives API server restarts
@@ -506,6 +510,8 @@ export class AndroidEmulatorService {
   async shutdownEmulator(avdName: string): Promise<void> {
     // Evict the cached port so a subsequent boot gets a fresh lookup.
     this.adbPortCache.delete(avdName);
+    // Evict cached resolution so it is re-queried after the next boot.
+    this.screenResolutionCache.delete(avdName);
 
     this.assertSdkInstalled();
 
@@ -606,6 +612,55 @@ export class AndroidEmulatorService {
    */
   clearAdbPortCache(): void {
     this.adbPortCache.clear();
+  }
+
+  /**
+   * Query the real physical screen resolution of a running Android emulator.
+   *
+   * Uses `adb -s emulator-<port> shell wm size` which outputs a line like:
+   * `Physical size: 1080x1920`
+   *
+   * The result is cached per AVD name because screen resolution does not change
+   * during a session.
+   *
+   * @param avdName - Name of the running AVD.
+   * @returns The physical screen dimensions `{ width, height }` in pixels.
+   * @throws If the emulator is not running, the command fails, or the output
+   *         cannot be parsed.
+   */
+  async getScreenResolution(avdName: string): Promise<{ width: number; height: number }> {
+    // Fast path: return cached resolution if available.
+    const cached = this.screenResolutionCache.get(avdName);
+    if (cached !== undefined) {
+      return cached;
+    }
+
+    this.assertSdkInstalled();
+
+    const adbPort = await this.getAdbPort(avdName);
+    if (adbPort === null) {
+      throw new Error(`Cannot get screen resolution: emulator "${avdName}" is not running.`);
+    }
+
+    const serial = `emulator-${adbPort}`;
+    const { stdout } = await exec(ADB, ['-s', serial, 'shell', 'wm', 'size']);
+
+    // Output format: "Physical size: 1080x1920\n" (possibly followed by
+    // "Override size: ..." if the developer has set a custom resolution).
+    const match = stdout.match(/Physical size:\s*(\d+)x(\d+)/i);
+    if (!match) {
+      throw new Error(
+        `Unexpected output from "wm size" for emulator "${avdName}": ${stdout.trim()}`,
+      );
+    }
+
+    const resolution = {
+      width: parseInt(match[1], 10),
+      height: parseInt(match[2], 10),
+    };
+
+    this.screenResolutionCache.set(avdName, resolution);
+    return resolution;
   }
 
   /**

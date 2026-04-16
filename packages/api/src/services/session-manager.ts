@@ -764,12 +764,50 @@ export class SessionManagerService {
     // AVD names must not contain spaces; use a short safe identifier.
     const avdName = `${WMS_ANDROID_AVD_NAME_PREFIX}${shortId(sessionId)}`;
 
-    // The runtimeId for Android is the system image package path, e.g.:
-    //   system-images;android-34;google_apis;arm64-v8a
-    // The deviceTypeId is the avdmanager hardware profile identifier, e.g.:
-    //   pixel_8  (the `modelIdentifier` field on DeviceType)
-    const systemImage = request.runtimeId;
-    const deviceId = request.deviceTypeId;
+    // Resolve WMS internal IDs to the raw platform identifiers that avdmanager
+    // expects. The frontend sends WMS IDs (e.g. "android-device-pixel_7" and
+    // "android-runtime-system-images-android-35-google_apis-arm64-v8a").
+    // avdmanager needs the stripped forms:
+    //   -d pixel_7
+    //   -k system-images;android-35;google_apis;arm64-v8a
+    //
+    // Raw platform values (containing semicolons / no prefix) are also accepted
+    // so that direct API calls with native identifiers continue to work.
+
+    // --- Device type ID ---
+    // Strip "android-device-" prefix if present; otherwise use as-is.
+    const ANDROID_DEVICE_PREFIX = 'android-device-';
+    const deviceId = request.deviceTypeId.startsWith(ANDROID_DEVICE_PREFIX)
+      ? request.deviceTypeId.slice(ANDROID_DEVICE_PREFIX.length)
+      : request.deviceTypeId;
+
+    // --- Runtime / system image ID ---
+    // If the value already contains semicolons it is a raw package path —
+    // use it directly.  If it starts with "android-runtime-" we cannot
+    // reliably reverse the dash-substitution (path segments like "arm64-v8a"
+    // also contain dashes), so we look up the matching Runtime from the
+    // installed image list and extract its `identifier` (the raw path).
+    const ANDROID_RUNTIME_PREFIX = 'android-runtime-';
+    let systemImage: string;
+    if (request.runtimeId.includes(';')) {
+      // Already a raw semicolon-separated package path.
+      systemImage = request.runtimeId;
+    } else if (request.runtimeId.startsWith(ANDROID_RUNTIME_PREFIX)) {
+      // WMS prefixed ID — resolve via the system image catalogue.
+      const availableRuntimes = await androidEmulatorService.listSystemImages();
+      const matched = availableRuntimes.find((r) => r.id === request.runtimeId);
+      if (!matched) {
+        throw new Error(
+          `Android runtime "${request.runtimeId}" was not found in the list of ` +
+          `available system images. Ensure the image is installed via sdkmanager.`,
+        );
+      }
+      // `identifier` holds the raw semicolon-separated package path.
+      systemImage = matched.identifier;
+    } else {
+      // Unknown format — pass through and let avdmanager report any error.
+      systemImage = request.runtimeId;
+    }
 
     // Step 1 — Create the AVD.
     log(`[${sessionId}] Creating Android AVD "${avdName}"…`);

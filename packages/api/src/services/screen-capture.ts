@@ -2309,16 +2309,18 @@ export class ScreenCaptureService {
             } else if (session.active && !session.abortController.signal.aborted) {
               // Media packet: prepend buffered config data if present.
               let naluData: Buffer;
-              if (session.scrcpyConfigBuffer) {
+              if (isKeyframe && session.scrcpyConfigBuffer) {
+                // Prepend SPS/PPS to every IDR frame so lastKeyframe always carries
+                // the decoder configuration record. Do NOT clear scrcpyConfigBuffer —
+                // scrcpy sends CONFIG only once, so we keep it for all future keyframes.
                 naluData = Buffer.concat([session.scrcpyConfigBuffer, rawNalu]);
-                session.scrcpyConfigBuffer = undefined;
               } else {
                 naluData = rawNalu;
               }
 
               const naluFrame: NaluFrame = {
                 naluData,
-                isKeyframe: isKeyframe || naluData !== rawNalu, // keyframe if IDR or config was prepended
+                isKeyframe, // keyframe if IDR frame (SPS/PPS is prepended to every IDR)
                 timestampUs,
               };
 
