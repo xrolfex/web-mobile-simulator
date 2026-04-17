@@ -116,7 +116,7 @@ const INDIGO_BINARY_PATH = join(WMS_INPUT_TMP_DIR, 'wms-indigo-hid');
 const INDIGO_SWIFT_TMP_PATH = join(WMS_INPUT_TMP_DIR, 'wms-indigo-hid.swift');
 
 /** Version tag — increment to force recompilation of IndigoHID binary. */
-const INDIGO_BINARY_VERSION = '7';
+const INDIGO_BINARY_VERSION = '8';
 
 /** Sidecar file storing the version of the cached IndigoHID binary. */
 const INDIGO_BINARY_VERSION_PATH = join(WMS_INPUT_TMP_DIR, 'wms-indigo-hid.ver');
@@ -1491,6 +1491,78 @@ func injectSwipe(
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// MARK: - Single-phase touch injection (real-time drag support)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Inject a single IndigoHID digitizer touch event with the given phase.
+///
+/// This is the primitive used by the real-time drag protocol. The caller sends
+/// one Began (phase=1) event at drag-start, Changed (phase=2) events during the
+/// drag (as fast as the client can stream them), and one Ended (phase=4) at
+/// drag-end.
+///
+/// - Parameters:
+///   - hidClient: The ready SimDeviceLegacyHIDClient.
+///   - x:         Normalised X coordinate (0.0–1.0).
+///   - y:         Normalised Y coordinate (0.0–1.0).
+///   - phase:     IOHIDPhase: 1 = Began, 2 = Changed, 4 = Ended.
+/// - Returns: nil on success, or an error message string on failure.
+func injectSingleTouchEvent(hidClient: AnyObject, x: Double, y: Double, phase: UInt32) -> String? {
+    guard let simKitHandle = dlopen(kSimulatorKitPath, RTLD_NOLOAD) else {
+        fputs("❌ SimulatorKit not loaded\\n", stderr)
+        return "SimulatorKit not loaded"
+    }
+    defer { dlclose(simKitHandle) }
+
+    guard let rawPtr = dlsym(simKitHandle, "IndigoHIDMessageForMouseNSEvent") else {
+        fputs("❌ dlsym(IndigoHIDMessageForMouseNSEvent) failed\\n", stderr)
+        return "dlsym(IndigoHIDMessageForMouseNSEvent) failed"
+    }
+    let indigoFn = unsafeBitCast(rawPtr, to: IndigoHIDMessageForMouseNSEventFn.self)
+
+    let clientClass: AnyClass = type(of: hidClient)
+    let sendSelName = "sendWithMessage:freeWhenDone:completionQueue:completion:"
+    let sendSel = NSSelectorFromString(sendSelName)
+    guard hidClient.responds(to: sendSel),
+          let sendMethod = class_getInstanceMethod(clientClass, sendSel) else {
+        return "HIDClient does not respond to send selector"
+    }
+    typealias SendFn = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, Bool, AnyObject?, AnyObject?) -> Void
+    let sendFn = unsafeBitCast(method_getImplementation(sendMethod), to: SendFn.self)
+
+    // Began (phase=1) and Changed (phase=2): finger is held down → eventType=Down.
+    // Ended (phase=4): finger lifted → eventType=Up.
+    let eventType: UInt = (phase == 4) ? kButtonEventTypeUp : kButtonEventTypeDown
+
+    var coords = TouchCoords(x: x, y: y)
+    guard let msg = withUnsafeMutablePointer(to: &coords, { ptr in
+        indigoFn(ptr, nil, kIndigoHIDTargetDigitizer, eventType, 1.0, 1.0, 0)
+    }) else {
+        fputs("⚠️  IndigoHIDMessageForMouseNSEvent returned nil (phase=\\(phase))\\n", stderr)
+        return "IndigoHIDMessageForMouseNSEvent returned nil"
+    }
+    // Patch the phase field at the known byte offset (same fix as injectTap/injectSwipe).
+    msg.storeBytes(of: phase, toByteOffset: 0x74, as: UInt32.self)
+    sendFn(hidClient, sendSel, msg, false, nil, nil)
+    return nil
+}
+
+/// Inject a touch-down (Began, phase=1) event — call once at drag start.
+func injectTouchBegin(hidClient: AnyObject, normX: Double, normY: Double) -> String? {
+    return injectSingleTouchEvent(hidClient: hidClient, x: normX, y: normY, phase: 1)
+}
+
+/// Inject a touch-move (Changed, phase=2) event — call repeatedly during drag.
+func injectTouchMove(hidClient: AnyObject, normX: Double, normY: Double) -> String? {
+    return injectSingleTouchEvent(hidClient: hidClient, x: normX, y: normY, phase: 2)
+}
+
+/// Inject a touch-up (Ended, phase=4) event — call once at drag end.
+func injectTouchEnd(hidClient: AnyObject, normX: Double, normY: Double) -> String? {
+    return injectSingleTouchEvent(hidClient: hidClient, x: normX, y: normY, phase: 4)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // MARK: - Button injection
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -1732,6 +1804,33 @@ func processCommand(_ line: String, hidClient: AnyObject) {
             break
         }
         if let err = injectButton(hidClient: hidClient, buttonName: name) {
+            errorMsg = err
+        }
+
+    case "touchbegin":
+        guard let x = dict["x"] as? Double, let y = dict["y"] as? Double else {
+            errorMsg = "touchbegin requires numeric x and y"
+            break
+        }
+        if let err = injectTouchBegin(hidClient: hidClient, normX: x, normY: y) {
+            errorMsg = err
+        }
+
+    case "touchmove":
+        guard let x = dict["x"] as? Double, let y = dict["y"] as? Double else {
+            errorMsg = "touchmove requires numeric x and y"
+            break
+        }
+        if let err = injectTouchMove(hidClient: hidClient, normX: x, normY: y) {
+            errorMsg = err
+        }
+
+    case "touchend":
+        guard let x = dict["x"] as? Double, let y = dict["y"] as? Double else {
+            errorMsg = "touchend requires numeric x and y"
+            break
+        }
+        if let err = injectTouchEnd(hidClient: hidClient, normX: x, normY: y) {
             errorMsg = err
         }
 
@@ -3039,6 +3138,55 @@ export class IOSSimulatorService {
       durationMs,
     });
     log(`Swipe sent to device ${udid} from (${normX1}, ${normY1}) to (${normX2}, ${normY2})`);
+  }
+
+  /**
+   * Inject a touch-down (phase Began) event to start a real-time drag gesture.
+   * Must be followed by one or more calls to {@link sendTouchMoveFire} and
+   * then exactly one call to {@link sendTouchEnd} to close the gesture.
+   *
+   * @param udid  - The device UDID.
+   * @param normX - Normalised X coordinate (0.0–1.0).
+   * @param normY - Normalised Y coordinate (0.0–1.0).
+   */
+  async sendTouchBegin(udid: string, normX: number, normY: number): Promise<void> {
+    log(`Sending touch-begin to device ${udid} at (${normX.toFixed(3)}, ${normY.toFixed(3)})`);
+    await this.sendDaemonCommand(udid, { cmd: 'touchbegin', x: normX, y: normY });
+  }
+
+  /**
+   * Inject a touch-move (phase Changed) event for a real-time drag gesture.
+   * Fire-and-forget: does NOT await the daemon acknowledgement, preventing
+   * event-queue buildup at high pointer-move rates (~30 fps).
+   *
+   * Must be called between {@link sendTouchBegin} and {@link sendTouchEnd}.
+   *
+   * @param udid  - The device UDID.
+   * @param normX - Normalised X coordinate (0.0–1.0).
+   * @param normY - Normalised Y coordinate (0.0–1.0).
+   */
+  sendTouchMoveFire(udid: string, normX: number, normY: number): void {
+    const daemon = this.indigoDaemons.get(udid);
+    if (!daemon || !daemon.ready || daemon.process.exitCode !== null) return;
+    if (!daemon.process.stdin) return;
+    // Send without an id field — the daemon replies {"id":"","ok":true} which is
+    // silently dropped by the stdout handler (no matching pendingRequests entry).
+    const line = JSON.stringify({ cmd: 'touchmove', x: normX, y: normY }) + '\n';
+    daemon.process.stdin.write(line);
+  }
+
+  /**
+   * Inject a touch-up (phase Ended) event to finish a real-time drag gesture.
+   * Must be called after {@link sendTouchBegin} (and any number of
+   * {@link sendTouchMoveFire} calls).
+   *
+   * @param udid  - The device UDID.
+   * @param normX - Normalised X coordinate (0.0–1.0).
+   * @param normY - Normalised Y coordinate (0.0–1.0).
+   */
+  async sendTouchEnd(udid: string, normX: number, normY: number): Promise<void> {
+    log(`Sending touch-end to device ${udid} at (${normX.toFixed(3)}, ${normY.toFixed(3)})`);
+    await this.sendDaemonCommand(udid, { cmd: 'touchend', x: normX, y: normY });
   }
 
   /**

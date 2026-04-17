@@ -59,6 +59,10 @@ const wsStreamRoutes: FastifyPluginAsync = async (fastify) => {
     { websocket: true },
     (socket: WebSocket, request) => {
       const { sessionId } = request.params as { sessionId: string };
+      // Drag-start coordinates for Android fallback: real-time drag is not
+      // possible with adb shell input, so on drag-end we fire an atomic swipe
+      // using the stored start position.
+      let dragStartCoords: { x: number; y: number } | null = null;
       const query = request.query as Record<string, string>;
       const isH264 = query['format'] === 'h264';
 
@@ -229,7 +233,10 @@ const wsStreamRoutes: FastifyPluginAsync = async (fastify) => {
       // Identical in both MJPEG and H.264 modes.
       // Messages are JSON-encoded:
       //   { type: 'touch', action: 'tap', x: 0.5, y: 0.25, deviceX: 540, deviceY: 960 }
-      //   { type: 'touch', action: 'swipe', startX: 0.1, startY: 0.5, endX: 0.9, endY: 0.5, deviceStartX: 108, deviceStartY: 960, deviceEndX: 972, deviceEndY: 960 }
+      //   { type: 'touch', action: 'swipe', startX: 0.1, startY: 0.5, endX: 0.9, endY: 0.5, ... }
+      //   { type: 'touch', action: 'drag-start', x: 0.5, y: 0.25 }  — iOS real-time drag begin
+      //   { type: 'touch', action: 'drag-move',  x: 0.5, y: 0.30 }  — iOS real-time drag move (throttled ~30 fps)
+      //   { type: 'touch', action: 'drag-end',   x: 0.5, y: 0.35 }  — iOS real-time drag end (Android: atomic swipe fallback)
       // -------------------------------------------------------------------------
       socket.on('message', (data: Buffer) => {
         try {
@@ -371,6 +378,81 @@ const wsStreamRoutes: FastifyPluginAsync = async (fastify) => {
                   socket.send(JSON.stringify({ type: 'error', message: `Key event failed: ${errMsg}` }));
                 }
               });
+            }
+
+          } else if (msg.type === 'touch' && msg.action === 'drag-start') {
+            // Real-time drag: touch-down (Began) phase.
+            // iOS: inject via IndigoHID immediately.
+            // Android: store start coords for atomic swipe fallback on drag-end.
+            const normX = msg.x as number;
+            const normY = msg.y as number;
+            if (typeof normX !== 'number' || typeof normY !== 'number') return;
+
+            if (session.device.platform === 'ios' && session.device.platformDeviceId) {
+              iosSimulatorService.sendTouchBegin(
+                session.device.platformDeviceId,
+                normX,
+                normY,
+              ).catch((err: unknown) => {
+                const errMsg = err instanceof Error ? err.message : String(err);
+                warn(`Failed to forward drag-start for session ${sessionId}: ${errMsg}`);
+              });
+            } else if (session.device.platform === 'android') {
+              // Store start coords — used in drag-end to dispatch atomic swipe.
+              dragStartCoords = { x: normX, y: normY };
+            }
+
+          } else if (msg.type === 'touch' && msg.action === 'drag-move') {
+            // Real-time drag: touch-move (Changed) phase.
+            // iOS: fire-and-forget — no await to avoid queueing latency.
+            // Android: no-op (adb shell input cannot stream touch-move events).
+            const normX = msg.x as number;
+            const normY = msg.y as number;
+            if (typeof normX !== 'number' || typeof normY !== 'number') return;
+
+            if (session.device.platform === 'ios' && session.device.platformDeviceId) {
+              iosSimulatorService.sendTouchMoveFire(
+                session.device.platformDeviceId,
+                normX,
+                normY,
+              );
+            }
+
+          } else if (msg.type === 'touch' && msg.action === 'drag-end') {
+            // Real-time drag: touch-up (Ended) phase.
+            // iOS: inject via IndigoHID to close the gesture.
+            // Android: fire an atomic swipe from the stored drag-start coords.
+            const normX = msg.x as number;
+            const normY = msg.y as number;
+            if (typeof normX !== 'number' || typeof normY !== 'number') return;
+
+            if (session.device.platform === 'ios' && session.device.platformDeviceId) {
+              iosSimulatorService.sendTouchEnd(
+                session.device.platformDeviceId,
+                normX,
+                normY,
+              ).catch((err: unknown) => {
+                const errMsg = err instanceof Error ? err.message : String(err);
+                warn(`Failed to forward drag-end for session ${sessionId}: ${errMsg}`);
+              });
+            } else if (session.device.platform === 'android' && session.device.platformDeviceId) {
+              const start = dragStartCoords;
+              dragStartCoords = null;
+              if (start) {
+                const platformDeviceId = session.device.platformDeviceId;
+                androidEmulatorService.getScreenResolution(platformDeviceId).then((resolution) => {
+                  return androidEmulatorService.sendSwipe(
+                    platformDeviceId,
+                    start.x * resolution.width,
+                    start.y * resolution.height,
+                    normX * resolution.width,
+                    normY * resolution.height,
+                  );
+                }).catch((err: unknown) => {
+                  const errMsg = err instanceof Error ? err.message : String(err);
+                  warn(`Failed to forward drag-end swipe for session ${sessionId}: ${errMsg}`);
+                });
+              }
             }
           }
         } catch {

@@ -146,6 +146,23 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
    */
   private readonly SWIPE_THRESHOLD_PX = 10;
 
+  /**
+   * Minimum interval between real-time drag-move WebSocket messages (~30 fps).
+   * Throttling prevents flooding the server when the browser fires pointermove
+   * at the display refresh rate (60–120 Hz).
+   */
+  private readonly DRAG_MOVE_THROTTLE_MS = 33;
+
+  /** Timestamp (ms) of the last drag-move message sent — used for throttling. */
+  private lastDragMoveSentAt = 0;
+
+  /**
+   * Whether a real-time iOS drag gesture is currently in progress.
+   * Set to `true` on pointer-down (iOS only) when `drag-start` is sent.
+   * Cleared on pointer-up or pointer-cancel.
+   */
+  private isDragging = false;
+
   /** Recorded position at the start of a pointer-down event. */
   private dragStart: {
     x: number;
@@ -275,7 +292,6 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
    * leaves the element boundary.
    */
   protected onCanvasPointerDown(event: PointerEvent): void {
-    console.log('[TAP-DEBUG] onCanvasPointerDown fired — clientX:', event.clientX, 'clientY:', event.clientY, 'pointerId:', event.pointerId);
     const el = event.currentTarget as HTMLElement;
     const rect = el.getBoundingClientRect();
 
@@ -289,25 +305,54 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
 
     // Capture pointer so pointermove/pointerup fire even if pointer leaves element.
     el.setPointerCapture(event.pointerId);
+
+    // iOS: start a real-time drag gesture by sending the touch-down (Began) event
+    // immediately. Subsequent pointermove events will stream drag-move messages,
+    // and pointerup will close the gesture with drag-end.
+    if (this.platform === 'ios') {
+      const ws = this.getInputWebSocket();
+      if (ws && ws.readyState === WebSocket.OPEN && this.frameWidth() > 0 && this.frameHeight() > 0) {
+        this.isDragging = true;
+        this.lastDragMoveSentAt = 0;
+        ws.send(JSON.stringify({ type: 'touch', action: 'drag-start', x, y }));
+      }
+    }
   }
 
   /**
    * Handle pointer-up on the display element.
    *
-   * - If total displacement ≥ {@link SWIPE_THRESHOLD_PX}, sends a `swipe` message.
-   * - Otherwise delegates to the tap handler.
+   * **iOS real-time drag path**: if a drag gesture was started on pointer-down,
+   * sends a `drag-end` message (touch-up / Ended phase) and returns. The server
+   * side closes the IndigoHID gesture.
+   *
+   * **Non-iOS / fallback path**: if total displacement ≥ {@link SWIPE_THRESHOLD_PX},
+   * sends an atomic `swipe` message; otherwise delegates to the tap handler.
    */
   protected onCanvasPointerUp(event: PointerEvent): void {
-    console.log('[TAP-DEBUG] onCanvasPointerUp fired — dragStart exists:', !!this.dragStart, 'clientX:', event.clientX, 'clientY:', event.clientY);
     if (!this.dragStart) return;
 
     const start = this.dragStart;
     this.dragStart = null;
 
+    // iOS real-time drag: close the gesture with a drag-end (Ended phase).
+    if (this.isDragging) {
+      this.isDragging = false;
+      const ws = this.getInputWebSocket();
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        const el = event.currentTarget as HTMLElement;
+        const rect = el.getBoundingClientRect();
+        const x = (event.clientX - rect.left) / rect.width;
+        const y = (event.clientY - rect.top) / rect.height;
+        ws.send(JSON.stringify({ type: 'touch', action: 'drag-end', x, y }));
+      }
+      return;
+    }
+
+    // Non-iOS (Android) or iOS drag not started: existing tap/swipe logic.
     const dx = event.clientX - start.clientX;
     const dy = event.clientY - start.clientY;
     const distance = Math.sqrt(dx * dx + dy * dy);
-    console.log('[TAP-DEBUG] onCanvasPointerUp — dx:', dx, 'dy:', dy, 'distance:', distance, 'SWIPE_THRESHOLD_PX:', this.SWIPE_THRESHOLD_PX);
 
     if (distance >= this.SWIPE_THRESHOLD_PX) {
       // Treat as a swipe
@@ -351,13 +396,56 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
 
   /**
    * Handle pointer-move on the display element.
-   * Prevents default browser behaviour (text selection, scroll, zoom)
-   * during a drag gesture.
+   *
+   * Always prevents default browser behaviour during a drag (text selection,
+   * scroll, zoom). For iOS, also streams throttled `drag-move` messages over
+   * WebSocket to enable real-time finger-tracking in the simulator.
    */
   protected onCanvasPointerMove(event: PointerEvent): void {
     if (this.dragStart) {
       event.preventDefault();
     }
+
+    // iOS real-time drag: stream touch-move (Changed) events, throttled to ~30 fps.
+    if (this.isDragging) {
+      const now = Date.now();
+      if (now - this.lastDragMoveSentAt >= this.DRAG_MOVE_THROTTLE_MS) {
+        const ws = this.getInputWebSocket();
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          const el = event.currentTarget as HTMLElement;
+          const rect = el.getBoundingClientRect();
+          const x = (event.clientX - rect.left) / rect.width;
+          const y = (event.clientY - rect.top) / rect.height;
+          ws.send(JSON.stringify({ type: 'touch', action: 'drag-move', x, y }));
+          this.lastDragMoveSentAt = now;
+        }
+      }
+    }
+  }
+
+  /**
+   * Handle pointer-cancel on the display element.
+   *
+   * The browser fires `pointercancel` when the OS interrupts the gesture
+   * (e.g. notification centre pulled down, app switch, incoming call).
+   * If a real-time iOS drag was in progress, close it with a `drag-end` at
+   * the last known position so the simulator does not think the finger is
+   * still held down.
+   */
+  protected onCanvasPointerCancel(event: PointerEvent): void {
+    if (this.isDragging) {
+      this.isDragging = false;
+      const ws = this.getInputWebSocket();
+      if (ws && ws.readyState === WebSocket.OPEN && this.dragStart) {
+        ws.send(JSON.stringify({
+          type: 'touch',
+          action: 'drag-end',
+          x: this.dragStart.x,
+          y: this.dragStart.y,
+        }));
+      }
+    }
+    this.dragStart = null;
   }
 
   /**
@@ -418,7 +506,6 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
    * Returns `null` if no input socket is currently available.
    */
   private getInputWebSocket(): WebSocket | null {
-    console.log('[TAP-DEBUG] getInputWebSocket — inputWs is null:', this.inputWs === null, 'readyState:', this.inputWs?.readyState ?? 'N/A', '(OPEN=1)');
     return this.inputWs;
   }
 
@@ -429,7 +516,6 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
    */
   private sendTap(event: MouseEvent | PointerEvent): void {
     const ws = this.getInputWebSocket();
-    console.log('[TAP-DEBUG] sendTap — ws is null:', ws === null, 'readyState:', ws?.readyState ?? 'N/A', '(OPEN=1)', 'frameWidth:', this.frameWidth(), 'frameHeight:', this.frameHeight());
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
     const el = event.currentTarget as HTMLElement;
@@ -456,7 +542,6 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
         deviceX: Math.round(x * this.frameWidth()),
         deviceY: Math.round(y * this.frameHeight()),
       });
-      console.log('[TAP-DEBUG] sendTap — sending payload:', payload);
       ws.send(payload);
     }
   }
