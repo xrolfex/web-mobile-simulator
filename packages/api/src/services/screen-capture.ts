@@ -80,6 +80,12 @@ interface InternalCaptureSession extends CaptureSession {
   scrcpyForwardPort?: number;
   /** Android scrcpy: buffered SPS/PPS config data to prepend to the next media packet. */
   scrcpyConfigBuffer?: Buffer;
+  /** Android scrcpy: the TCP control socket (second connection) for injecting touch events. */
+  scrcpyControlSocket?: Socket;
+  /** Android scrcpy: stream width in pixels at the scrcpy resolution (from handshake). */
+  scrcpyStreamWidth?: number;
+  /** Android scrcpy: stream height in pixels at the scrcpy resolution (from handshake). */
+  scrcpyStreamHeight?: number;
   /** Cached last keyframe NaluFrame for replay on new WebSocket connections. */
   lastKeyframe?: NaluFrame;
 }
@@ -1684,6 +1690,10 @@ export class ScreenCaptureService {
       try { session.scrcpySocket.destroy(); } catch { /* already closed */ }
       session.scrcpySocket = undefined;
     }
+    if (session.scrcpyControlSocket) {
+      try { session.scrcpyControlSocket.destroy(); } catch { /* already closed */ }
+      session.scrcpyControlSocket = undefined;
+    }
     if (session.scrcpyServerProcess) {
       try { session.scrcpyServerProcess.kill('SIGTERM'); } catch { /* already dead */ }
       session.scrcpyServerProcess = undefined;
@@ -1772,6 +1782,62 @@ export class ScreenCaptureService {
       session.captureProcess.stdin.write('K\n');
     } catch {
       // Process may have exited — ignore silently.
+    }
+  }
+
+  /**
+   * Inject a touch event into an Android emulator via the scrcpy control socket.
+   *
+   * Builds and writes a 32-byte `TYPE_INJECT_TOUCH_EVENT` message (scrcpy control
+   * protocol v3.x). Coordinates are in the scrcpy stream space (max_size=720), not
+   * the real device resolution.
+   *
+   * No-op if no capture session exists for `sessionId`, or if the control socket
+   * has not been established yet (e.g. `control=true` not supported, or socket error).
+   *
+   * @param sessionId - The capture session ID for the Android device.
+   * @param action    - Touch action: `0` = DOWN, `1` = UP, `2` = MOVE.
+   * @param normX     - Normalised X coordinate (0–1, relative to stream width).
+   * @param normY     - Normalised Y coordinate (0–1, relative to stream height).
+   */
+  sendScrcpyTouchEvent(sessionId: string, action: 0 | 1 | 2, normX: number, normY: number): void {
+    const session = this.captures.get(sessionId);
+    if (!session?.scrcpyControlSocket) return;
+
+    const streamWidth = session.scrcpyStreamWidth ?? 720;
+    const streamHeight = session.scrcpyStreamHeight ?? 1280;
+
+    const x = Math.round(Math.max(0, Math.min(normX, 1)) * streamWidth);
+    const y = Math.round(Math.max(0, Math.min(normY, 1)) * streamHeight);
+
+    // Build 32-byte TYPE_INJECT_TOUCH_EVENT message.
+    // Reference: scrcpy control protocol v3.x
+    //   [0]     message type = 0x02
+    //   [1]     action (0=DOWN, 1=UP, 2=MOVE)
+    //   [2-9]   pointerId int64 BE (0 = single touch)
+    //   [10-13] x int32 BE (stream-space pixels)
+    //   [14-17] y int32 BE (stream-space pixels)
+    //   [18-19] screenWidth uint16 BE
+    //   [20-21] screenHeight uint16 BE
+    //   [22-23] pressure uint16 BE (0xFFFF = full pressure for DOWN/MOVE, 0x0000 for UP)
+    //   [24-27] actionButton uint32 BE (0 for touch events)
+    //   [28-31] buttons uint32 BE (0 for touch events)
+    const msg = Buffer.alloc(32);
+    msg[0] = 0x02;             // TYPE_INJECT_TOUCH_EVENT
+    msg[1] = action;
+    msg.writeBigInt64BE(0n, 2);
+    msg.writeInt32BE(x, 10);
+    msg.writeInt32BE(y, 14);
+    msg.writeUInt16BE(streamWidth, 18);
+    msg.writeUInt16BE(streamHeight, 20);
+    msg.writeUInt16BE(action === 1 ? 0x0000 : 0xffff, 22);
+    msg.writeUInt32BE(0, 24);
+    msg.writeUInt32BE(0, 28);
+
+    try {
+      session.scrcpyControlSocket.write(msg);
+    } catch {
+      // Socket may have been closed — ignore silently.
     }
   }
 
@@ -2181,7 +2247,7 @@ export class ScreenCaptureService {
       'max_size=720',
       'max_fps=30',
       'tunnel_forward=true',
-      'control=false',
+      'control=true',
     ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
     session.scrcpyServerProcess = serverProc;
@@ -2212,10 +2278,34 @@ export class ScreenCaptureService {
 
     if (!session.active) return; // Session was stopped while waiting.
 
-    // Step 5 — Connect via TCP to the forwarded port.
+    // Step 5 — Connect video socket AND control socket to the forwarded port.
+    // With control=true, scrcpy-server accepts TWO connections in order (video first,
+    // then control) before sending the video handshake.  Both connections must be
+    // initiated synchronously before blocking on handshake data — otherwise the server
+    // blocks on its second accept() while we block waiting for data → deadlock.
     await new Promise<void>((resolve, reject) => {
       const socket = createConnection({ port: allocatedPort, host: '127.0.0.1' });
       session.scrcpySocket = socket;
+
+      // Immediately initiate the control socket (second connection = control channel).
+      // createConnection() is non-blocking; the OS queues it right after the video socket.
+      const ctrlSocket = createConnection({ port: allocatedPort, host: '127.0.0.1' });
+      session.scrcpyControlSocket = ctrlSocket;
+      ctrlSocket.on('data', () => { /* discard incoming control messages */ });
+      ctrlSocket.on('error', (err: Error) => {
+        warn(`[${sessionId}] scrcpy control socket error: ${err.message}`);
+        if (session.scrcpyControlSocket === ctrlSocket) {
+          session.scrcpyControlSocket = undefined;
+        }
+      });
+      ctrlSocket.on('close', () => {
+        if (session.scrcpyControlSocket === ctrlSocket) {
+          session.scrcpyControlSocket = undefined;
+        }
+      });
+      ctrlSocket.on('connect', () => {
+        log(`[${sessionId}] scrcpy control socket connected on port ${allocatedPort}`);
+      });
 
       // Reset the frame buffer and initialize parse state for this connection.
       session.frameBuffer = Buffer.alloc(0);
@@ -2268,6 +2358,8 @@ export class ScreenCaptureService {
             const width = session.frameBuffer.readUInt32BE(0);
             const height = session.frameBuffer.readUInt32BE(4);
             log(`[${sessionId}] scrcpy initial resolution: ${width}×${height}`);
+            session.scrcpyStreamWidth = width;
+            session.scrcpyStreamHeight = height;
             session.frameBuffer = session.frameBuffer.subarray(8);
             scrcpyPhaseMap.set(session, 'streaming_header');
             // Handshake complete — resolve the outer promise so startCapture can return.
