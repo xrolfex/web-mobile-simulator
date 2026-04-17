@@ -194,3 +194,89 @@ export interface WebSocketMessage<T = unknown> {
   payload: T;
   timestamp: string;
 }
+
+// === Distributed Master/Worker Types ===
+
+/**
+ * Identifies the operating mode of an API server instance.
+ *
+ * - `'standalone'` — default; single-machine mode (current behaviour).
+ * - `'master'`     — orchestration node; routes requests to workers, no local simulators.
+ * - `'worker'`     — simulation node; runs simulators/emulators, registers with master.
+ */
+export type NodeMode = 'standalone' | 'master' | 'worker';
+
+/**
+ * Snapshot of a worker node's session capacity at a point in time.
+ */
+export interface WorkerCapacity {
+  /** Maximum number of concurrent iOS simulator sessions this worker allows. */
+  maxIosSessions: number;
+  /** Maximum number of concurrent Android emulator sessions this worker allows. */
+  maxAndroidSessions: number;
+  /** Current number of active (creating + active) iOS sessions. */
+  currentIosSessions: number;
+  /** Current number of active (creating + active) Android sessions. */
+  currentAndroidSessions: number;
+}
+
+/**
+ * A registered worker node as tracked by the master.
+ */
+export interface WorkerNode {
+  /** UUID assigned by the master at registration time. */
+  id: string;
+  /**
+   * Base URL of the worker's Fastify API server, reachable from the master.
+   * e.g. `"http://192.168.1.10:3000"`
+   */
+  url: string;
+  /** Current capacity snapshot (updated on each heartbeat). */
+  capacity: WorkerCapacity;
+  /** ISO-8601 timestamp of the last successfully received heartbeat. */
+  lastHeartbeatAt: string;
+  /** `true` when the worker is reachable and within the heartbeat window. */
+  isHealthy: boolean;
+  /** ISO-8601 timestamp of when this worker first registered. */
+  registeredAt: string;
+}
+
+/**
+ * Request body sent by a worker to the master's `POST /internal/workers/register` endpoint.
+ */
+export interface WorkerRegistrationRequest {
+  /**
+   * Base URL the master should use to reach this worker.
+   * e.g. `"http://10.0.1.5:3000"`
+   */
+  url: string;
+  /** Maximum concurrent iOS sessions this worker can handle. */
+  maxIosSessions: number;
+  /** Maximum concurrent Android sessions this worker can handle. */
+  maxAndroidSessions: number;
+  /**
+   * Shared secret that authenticates the worker.
+   * Must match the master's `WORKER_SECRET` environment variable.
+   */
+  secret: string;
+}
+
+/**
+ * Response body returned by the master after a successful worker registration.
+ */
+export interface WorkerRegistrationResponse {
+  /** Stable UUID assigned to this worker by the master. */
+  workerId: string;
+  /** Interval in milliseconds at which the worker should send heartbeats. */
+  heartbeatIntervalMs: number;
+}
+
+/**
+ * Request body sent by a worker to `POST /internal/workers/:id/heartbeat`.
+ */
+export interface WorkerHeartbeatRequest {
+  /** Current number of active (creating + active) iOS sessions on this worker. */
+  currentIosSessions: number;
+  /** Current number of active (creating + active) Android sessions on this worker. */
+  currentAndroidSessions: number;
+}

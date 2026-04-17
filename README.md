@@ -4,7 +4,7 @@
 
 ![Build](https://img.shields.io/badge/build-passing-brightgreen) ![License](https://img.shields.io/badge/license-MIT-blue)
 
-Web Mobile Simulator is a self-hosted platform that runs iOS Simulators and Android Emulators natively on a Mac host and streams their displays to any browser over WebSocket. It is designed as an open-source alternative to cloud device-streaming services, deployable on physical Mac hardware or AWS EC2 Mac instances.
+Web Mobile Simulator is a self-hosted platform that runs iOS Simulators and Android Emulators natively on a Mac host and streams their displays to any browser over WebSocket. It is designed as an open-source alternative to cloud device-streaming services, deployable on physical Mac hardware or AWS EC2 Mac instances — and scalable across multiple Mac nodes via its distributed master/worker architecture.
 
 ---
 
@@ -15,33 +15,28 @@ Web Mobile Simulator is a self-hosted platform that runs iOS Simulators and Andr
 3. [Quick Start](#quick-start)
 4. [Project Structure](#project-structure)
 5. [Development](#development)
-6. [Architecture](#architecture)
-7. [API Endpoints](#api-endpoints)
-8. [Technology Stack](#technology-stack)
-9. [Contributing](#contributing)
-10. [License](#license)
+6. [Deployment Modes](#deployment-modes)
+7. [Architecture](#architecture)
+8. [API Endpoints](#api-endpoints)
+9. [Technology Stack](#technology-stack)
+10. [Contributing](#contributing)
+11. [License](#license)
 
 ---
 
 ## Features
 
-### Current (MVP)
-
 - ✅ Monorepo architecture with pnpm workspaces
 - ✅ Angular 21 SPA frontend with dark theme (standalone components, Signals, OnPush)
-- ✅ Fastify 5 API backend with health check endpoint
+- ✅ Fastify 5 API backend
 - ✅ Docker + nginx containerisation (reverse proxy, static file serving, WebSocket proxy)
 - ✅ Shared TypeScript types and constants across frontend and backend
-
-### Roadmap
-
-- 🔲 iOS Simulator streaming via VNC + websockify + noVNC
-- 🔲 Android Emulator streaming via scrcpy
-- 🔲 OS runtime management — browse, download, and install iOS/Android runtimes
-- 🔲 Session lifecycle management (create, stream, terminate)
-- 🔲 Multi-session support with dynamic port allocation (VNC range: 6900–6999)
-- 🔲 Touch and keyboard input forwarding
-- 🔲 SQLite session persistence via Drizzle ORM
+- ✅ iOS Simulator streaming via VNC + websockify + noVNC
+- ✅ Android Emulator streaming via scrcpy
+- ✅ OS runtime management — browse, download, and install iOS/Android runtimes
+- ✅ Session lifecycle management with SQLite persistence via Drizzle ORM
+- ✅ Multi-session support with dynamic port allocation (VNC range: 6900–6999)
+- ✅ **Distributed master/worker mode** — scale across multiple Mac nodes with `NODE_MODE=standalone|master|worker`
 
 ---
 
@@ -56,7 +51,9 @@ Web Mobile Simulator is a self-hosted platform that runs iOS Simulators and Andr
 | **pnpm**                                  | ≥ 9.0.0 | Workspace manager; install via `npm i -g pnpm`                            |
 | **Docker Desktop for Mac**                | Latest  | Required for containerised deployment                                     |
 
-> **Note:** iOS Simulators cannot run in Docker or Linux — they require direct access to macOS and the Xcode toolchain. All simulator/emulator processes run on the host. In production, the API, web, and nginx are all containerised; in development, only the Angular dev server and nginx run in Docker while the API runs directly on the host.
+> **Note:** iOS Simulators cannot run in Docker or Linux — they require direct access to macOS and the Xcode toolchain. All simulator/emulator processes run on the host.
+
+> **Master nodes** do not require Xcode or Android SDK — they can run anywhere, including Docker. Only **worker nodes** (and **standalone** mode) require macOS, Xcode, and Android SDK.
 
 ---
 
@@ -92,42 +89,54 @@ web-mobile-simulator/
 ├── packages/
 │   ├── api/                  # Fastify 5 REST + WebSocket API
 │   │   └── src/
-│   │       ├── server.ts     # Entry point — builds and starts Fastify
-│   │       ├── config.ts     # Environment-driven config (port, paths, DB, VNC range)
+│   │       ├── server.ts     # Entry point — mode-based startup/shutdown
+│   │       ├── config.ts     # Environment-driven config (port, paths, DB, VNC, distributed)
+│   │       ├── db/
+│   │       │   ├── schema.ts                    # Drizzle schema (sessions, session_worker_map)
+│   │       │   ├── migrate.ts                   # DDL runner at startup
+│   │       │   └── session-worker-map-repository.ts  # Master routing table CRUD
+│   │       ├── services/
+│   │       │   ├── worker-registry.ts           # Master-side worker registry
+│   │       │   ├── worker-registration.ts       # Worker-side registration + heartbeat
+│   │       │   └── session-router.ts            # Session routing + HTTP/WS proxy
 │   │       └── routes/
-│   │           ├── health.ts     # GET /api/health  ✅ implemented
-│   │           ├── sessions.ts   # Session CRUD     🔲 stub
-│   │           ├── devices.ts    # Device types      🔲 stub
-│   │           ├── runtimes.ts   # Runtime mgmt      🔲 stub
-│   │           └── index.ts      # Route registration
+│   │           ├── health.ts          # GET /api/health
+│   │           ├── sessions.ts        # Session CRUD (standalone / worker)
+│   │           ├── devices.ts         # Device inventory
+│   │           ├── runtimes.ts        # Runtime management
+│   │           ├── master-sessions.ts # POST/DELETE sessions (master mode)
+│   │           ├── master-proxy.ts    # HTTP + WS proxy to workers (master mode)
+│   │           ├── internal.ts        # /internal/workers/* registration + heartbeat
+│   │           └── index.ts           # Mode-based route registration
 │   │
 │   ├── web/                  # Angular 21 SPA
 │   │   └── src/              # Standalone components, Signals, OnPush
 │   │
 │   └── shared/               # Shared TypeScript types and constants
 │       └── src/
-│           ├── types.ts      # Platform, Session, Device, Runtime interfaces
+│           ├── types.ts      # Platform, Session, Device, Runtime, Worker interfaces
 │           ├── constants.ts  # API routes, WS routes, port ranges, timeouts
 │           └── index.ts      # Barrel export
 │
 ├── docs/
 │   └── architecture/
-│       └── ARCHITECTURE.md   # Full architecture diagrams and ADRs
+│       └── ARCHITECTURE.md   # Full architecture diagrams, ADRs (incl. ADR-008)
 │
 ├── scripts/
-│   ├── dev.sh                # Start hybrid dev environment (API on host + Docker)
-│   ├── setup-host.sh         # Install host dependencies (Homebrew, Android SDK, etc.)
-│   ├── start.sh              # Start production containers
-│   ├── stop.sh               # Stop production containers
-│   ├── health-check.sh       # Smoke-test all services
-│   ├── install-ios-runtime.sh   # Download and install an iOS runtime
-│   └── install-android-image.sh # Download and install an Android system image
-├── nginx.conf                   # nginx production config (static serving, gzip, SPA fallback)
-├── nginx.dev.conf               # nginx dev reverse proxy config (API + WS proxy + HMR)
-├── .env.example              # Environment variable template
-├── pnpm-workspace.yaml       # Workspace package globs
-├── tsconfig.base.json        # Shared TypeScript base config
-└── package.json              # Root scripts: dev, build, lint, test
+│   ├── dev.sh
+│   ├── setup-host.sh
+│   ├── start.sh
+│   ├── stop.sh
+│   ├── health-check.sh
+│   ├── install-ios-runtime.sh
+│   └── install-android-image.sh
+├── nginx.conf
+├── nginx.dev.conf
+├── docker-compose.yml
+├── .env.example
+├── pnpm-workspace.yaml
+├── tsconfig.base.json
+└── package.json
 ```
 
 ---
@@ -195,41 +204,97 @@ pnpm lint
 
 ### Environment variables
 
-Copy `.env.example` to `.env` and update paths for your machine:
+Copy `.env.example` to `.env` and update paths for your machine.
+
+#### Standalone / Worker
 
 ```bash
 # Server
 API_PORT=3000
 API_HOST=0.0.0.0
 
-# iOS Simulator
+# iOS Simulator (not needed on master)
 XCODE_PATH=/Applications/Xcode.app
 
-# Android SDK
+# Android SDK (not needed on master)
 ANDROID_SDK_ROOT=/Users/$USER/Library/Android/sdk
 
 # Database
 DATABASE_URL=file:./data/simulator.db
 
-# VNC proxy port range (one port per active iOS session)
-VNC_PROXY_PORT_RANGE_START=6900
-VNC_PROXY_PORT_RANGE_END=6999
+# Session Concurrency
+MAX_CONCURRENT_SESSIONS=6
+MAX_SESSIONS_PER_PLATFORM=0
+SESSION_MEMORY_EVICTION_MS=900000
+IOS_WARM_POOL_SIZE=0
 ```
 
-### Production (all services in Docker)
+#### Distributed mode
 
-In production, all three services are containerised together via `docker-compose.yml`:
+```bash
+# Deployment mode: standalone | master | worker (default: standalone)
+NODE_MODE=standalone
+
+# Worker → Master: base URL of the master node (required when NODE_MODE=worker)
+MASTER_URL=
+
+# Shared secret for master ↔ worker authentication (set on both master and workers)
+WORKER_SECRET=
+
+# Worker → Master: publicly reachable URL of this worker (required when NODE_MODE=worker)
+WORKER_PUBLIC_URL=
+
+# Worker capacity limits
+WORKER_MAX_IOS_SESSIONS=3
+WORKER_MAX_ANDROID_SESSIONS=2
+
+# Worker heartbeat interval (ms)
+WORKER_HEARTBEAT_INTERVAL_MS=30000
+```
+
+### Production
+
+#### Scenario A — Single-machine (standalone)
+
+`NODE_MODE=standalone` is the default. `docker-compose.yml` starts `nginx`, `master` (acts as both API + proxy), and a demo `worker` container:
 
 ```bash
 docker compose up --build
 ```
 
-This starts the `api`, `web`, and `nginx` containers. nginx serves the Angular
-static build and proxies all `/api/*` and `/ws/*` traffic to the Fastify container
-on port 3000.
+nginx serves the Angular static build and proxies all `/api/*` and `/ws/*` traffic to the Fastify container on port 3000.
 
-> **Note:** In production, all services (API, web, nginx) run in Docker containers.
-> The host-only dev setup is only for development where macOS tools are needed.
+> **Note:** The `docker-compose.yml` services are `nginx`, `master`, and `worker` (not `api`). The `master` service runs with `NODE_MODE=master`. The `worker` service in Docker is a **demo stub only** — it has no iOS/Android toolchain. Real workers must run on macOS hosts.
+
+#### Scenario B — Multi-machine (distributed)
+
+On the **master** machine (can be Linux/Docker):
+
+```bash
+NODE_MODE=master WORKER_SECRET=<secret> docker compose up --build
+```
+
+On each **macOS worker** machine:
+
+```bash
+NODE_MODE=worker \
+  MASTER_URL=http://<master-ip>:3000 \
+  WORKER_PUBLIC_URL=http://<this-host>:3000 \
+  WORKER_SECRET=<secret> \
+  pnpm --filter @web-mobile-simulator/api start
+```
+
+Workers self-register with the master on startup and send periodic heartbeats. The master uses least-loaded worker selection when routing new session requests.
+
+---
+
+## Deployment Modes
+
+| Mode       | `NODE_MODE`             | Requires macOS / Xcode?                    | Role                                                                          |
+| ---------- | ----------------------- | ------------------------------------------ | ----------------------------------------------------------------------------- |
+| Standalone | `standalone` (default)  | ✅ Yes                                     | Single machine — runs simulators locally, no distribution                     |
+| Master     | `master`                | ❌ No (runs anywhere, including Docker)    | Orchestration only — routes requests to workers, no simulators                |
+| Worker     | `worker`                | ✅ Yes (macOS + Xcode + Android SDK)       | Simulation node — registers with master, runs simulators                      |
 
 ---
 
@@ -239,7 +304,7 @@ The platform is split into four distinct layers:
 
 1. **Browser** — Angular 21 SPA renders the device picker, runtime manager, and embeds noVNC (iOS) or scrcpy-web (Android) for live streaming.
 2. **Reverse Proxy (nginx)** — Serves the Angular static build, routes `/api/*` to Fastify, and proxies WebSocket streams from host-side websockify/scrcpy processes.
-3. **API (Fastify / Node.js)** — Manages session lifecycle, spawns and monitors simulator/emulator processes, allocates VNC proxy ports, and persists state to SQLite via Drizzle ORM.
+3. **API (Fastify / Node.js)** — Manages session lifecycle, spawns and monitors simulator/emulator processes, allocates VNC proxy ports, and persists state to SQLite via Drizzle ORM. In master mode, routes requests to registered workers via HTTP + WebSocket proxy.
 4. **Host macOS** — Runs iOS Simulators (via `xcrun simctl`) and Android Emulators (via `emulator` CLI), plus websockify (VNC→WS bridge) and scrcpy instances — one per active session.
 
 For full data-flow diagrams, container architecture, and architectural decision records (ADRs), see:
@@ -255,17 +320,24 @@ For full data-flow diagrams, container architecture, and architectural decision 
 | Method   | Path                      | Status         | Description                               |
 | -------- | ------------------------- | -------------- | ----------------------------------------- |
 | `GET`    | `/api/health`             | ✅ Implemented | Server status, uptime, version            |
-| `POST`   | `/api/sessions`           | 🔲 Stub        | Create a new simulator session            |
-| `GET`    | `/api/sessions`           | 🔲 Stub        | List all active sessions                  |
-| `GET`    | `/api/sessions/:id`       | 🔲 Stub        | Get session details                       |
-| `DELETE` | `/api/sessions/:id`       | 🔲 Stub        | Terminate a session                       |
-| `GET`    | `/api/devices`            | 🔲 Stub        | List all device types (iOS + Android)     |
-| `GET`    | `/api/devices/:platform`  | 🔲 Stub        | List device types for `ios` or `android`  |
-| `GET`    | `/api/runtimes`           | 🔲 Stub        | List all runtimes (installed + available) |
-| `GET`    | `/api/runtimes/:platform` | 🔲 Stub        | List runtimes for `ios` or `android`      |
-| `POST`   | `/api/runtimes/download`  | 🔲 Stub        | Initiate a background runtime download    |
+| `POST`   | `/api/sessions`           | ✅ Implemented | Create a new simulator session            |
+| `GET`    | `/api/sessions`           | ✅ Implemented | List all active sessions                  |
+| `GET`    | `/api/sessions/:id`       | ✅ Implemented | Get session details                       |
+| `DELETE` | `/api/sessions/:id`       | ✅ Implemented | Terminate a session                       |
+| `GET`    | `/api/devices`            | ✅ Implemented | List all device types (iOS + Android)     |
+| `GET`    | `/api/devices/:platform`  | ✅ Implemented | List device types for `ios` or `android`  |
+| `GET`    | `/api/runtimes`           | ✅ Implemented | List all runtimes (installed + available) |
+| `GET`    | `/api/runtimes/:platform` | ✅ Implemented | List runtimes for `ios` or `android`      |
+| `POST`   | `/api/runtimes/download`  | ✅ Implemented | Initiate a background runtime download    |
 
-Stub endpoints return `501 NOT_IMPLEMENTED` with an `ApiResponse<never>` error body.
+### Internal API (master/worker only)
+
+| Method   | Path                               | Description                              |
+| -------- | ---------------------------------- | ---------------------------------------- |
+| `POST`   | `/internal/workers/register`       | Worker registers with master             |
+| `POST`   | `/internal/workers/:id/heartbeat`  | Worker sends heartbeat to master         |
+| `DELETE` | `/internal/workers/:id`            | Worker deregisters from master           |
+| `GET`    | `/internal/workers`                | List all registered workers              |
 
 ### WebSocket
 
@@ -313,7 +385,7 @@ interface ApiResponse<T> {
 
 ## Contributing
 
-Contributions are welcome. The project is in early/greenfield state — the best place to start is the [Architecture document](docs/architecture/ARCHITECTURE.md) to understand the design before picking up an issue.
+Contributions are welcome. The best place to start is the [Architecture document](docs/architecture/ARCHITECTURE.md) to understand the design before picking up an issue.
 
 1. Fork the repository and create a feature branch.
 2. Follow the existing TypeScript conventions and shared types in `packages/shared`.

@@ -49,3 +49,18 @@ export const ALLOWED_APP_EXTENSIONS: Record<'ios' | 'android', string[]> = {
  * Env: `IOS_WARM_POOL_SIZE`.
  */
 export const DEFAULT_IOS_WARM_POOL_SIZE = 0;
+
+// === Distributed Master/Worker Constants ===
+
+/**
+ * Default interval (ms) at which a worker sends a heartbeat to the master.
+ * Env: `WORKER_HEARTBEAT_INTERVAL_MS` (worker-side).
+ */
+export const DEFAULT_WORKER_HEARTBEAT_INTERVAL_MS = 30_000; // 30 seconds
+
+/**
+ * Time (ms) after the last heartbeat before the master marks a worker as
+ * unhealthy.  Set to 3× the heartbeat interval to allow for two missed beats
+ * before declaring a worker offline.
+ */
+export const WORKER_OFFLINE_THRESHOLD_MS = 90_000; // 90 seconds

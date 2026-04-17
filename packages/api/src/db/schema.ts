@@ -70,3 +70,26 @@ export const appLibrary = sqliteTable('app_library', {
   /** ISO-8601 last-updated timestamp. */
   updatedAt: text('updated_at').notNull(),
 });
+
+/**
+ * The `session_worker_map` table records which worker node owns each session.
+ * Used by the master node to route session-specific requests to the correct worker.
+ * Only populated in `master` mode — ignored in `standalone` and `worker` modes.
+ */
+export const sessionWorkerMap = sqliteTable('session_worker_map', {
+  /** Session UUID — matches the `id` in the `sessions` table on the owning worker. */
+  sessionId: text('session_id').primaryKey(),
+
+  /** UUID of the worker that owns this session — matches `WorkerNode.id`. */
+  workerId: text('worker_id').notNull(),
+
+  /**
+   * Base URL of the worker at the time the session was assigned.
+   * Stored here so the master can proxy requests even if the worker re-registers
+   * with a different URL (edge case: should not normally change).
+   */
+  workerUrl: text('worker_url').notNull(),
+
+  /** ISO-8601 timestamp of when this mapping was created. */
+  createdAt: text('created_at').notNull(),
+});

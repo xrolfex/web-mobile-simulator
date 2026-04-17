@@ -6,6 +6,8 @@ import {
   DEFAULT_MAX_CONCURRENT_SESSIONS,
   DEFAULT_MAX_SESSIONS_PER_PLATFORM,
   DEFAULT_SESSION_MEMORY_EVICTION_MS,
+  DEFAULT_WORKER_HEARTBEAT_INTERVAL_MS,
+  type NodeMode,
 } from '@web-mobile-simulator/shared';
 
 dotenv.config();
@@ -58,6 +60,74 @@ export const config = {
    */
   iosWarmPoolSize: parseInt(
     process.env.IOS_WARM_POOL_SIZE || String(DEFAULT_IOS_WARM_POOL_SIZE),
+    10,
+  ),
+
+  // --- Distributed mode ---
+
+  /**
+   * Operating mode for this API server instance.
+   *
+   * - `'standalone'` (default) — single-machine; runs simulators locally.
+   * - `'master'`               — orchestration node; routes requests to workers.
+   * - `'worker'`               — simulation node; registers with master, runs simulators.
+   *
+   * Env: `NODE_MODE`.
+   */
+  nodeMode: (process.env.NODE_MODE || 'standalone') as NodeMode,
+
+  /**
+   * Base URL of the master node, used by workers to register and send
+   * heartbeats.  Required when `nodeMode === 'worker'`.
+   * e.g. `"http://10.0.1.1:3000"`
+   * Env: `MASTER_URL`.
+   */
+  masterUrl: process.env.MASTER_URL || '',
+
+  /**
+   * Shared secret used to authenticate worker-to-master communication.
+   * Must be set identically on both master and all worker nodes.
+   * Env: `WORKER_SECRET`.
+   */
+  workerSecret: process.env.WORKER_SECRET || '',
+
+  /**
+   * Publicly reachable base URL of this worker node, advertised to the master
+   * at registration time so the master can proxy requests back to this worker.
+   * Required when `nodeMode === 'worker'`.
+   * e.g. `"http://192.168.1.10:3000"`
+   * Env: `WORKER_PUBLIC_URL`.
+   */
+  workerPublicUrl: process.env.WORKER_PUBLIC_URL || '',
+
+  /**
+   * Maximum number of concurrent iOS simulator sessions this worker accepts.
+   * Only used when `nodeMode === 'worker'`.
+   * Env: `WORKER_MAX_IOS_SESSIONS`.
+   */
+  workerMaxIosSessions: parseInt(
+    process.env.WORKER_MAX_IOS_SESSIONS || '3',
+    10,
+  ),
+
+  /**
+   * Maximum number of concurrent Android emulator sessions this worker accepts.
+   * Only used when `nodeMode === 'worker'`.
+   * Env: `WORKER_MAX_ANDROID_SESSIONS`.
+   */
+  workerMaxAndroidSessions: parseInt(
+    process.env.WORKER_MAX_ANDROID_SESSIONS || '2',
+    10,
+  ),
+
+  /**
+   * Interval in milliseconds at which this worker sends heartbeats to the master.
+   * Only used when `nodeMode === 'worker'`.
+   * Env: `WORKER_HEARTBEAT_INTERVAL_MS`.
+   */
+  workerHeartbeatIntervalMs: parseInt(
+    process.env.WORKER_HEARTBEAT_INTERVAL_MS ||
+      String(DEFAULT_WORKER_HEARTBEAT_INTERVAL_MS),
     10,
   ),
 } as const;

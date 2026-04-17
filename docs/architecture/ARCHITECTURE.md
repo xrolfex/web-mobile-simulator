@@ -1,7 +1,7 @@
 # web-mobile-simulator — Architecture Documentation
 
-> **Status**: Greenfield / Pre-implementation  
-> **Date**: 2026-04-12  
+> **Status**: Active — Standalone and Distributed modes implemented  
+> **Date**: 2026-04-17  
 > **Stack**: Angular 21 · Fastify · noVNC · websockify · scrcpy · SQLite (Drizzle ORM) · Docker · nginx · pnpm workspaces
 
 ---
@@ -14,6 +14,7 @@
 4. [Data Flow: OS Version Management](#4-data-flow-os-version-management)
 5. [Container Architecture](#5-container-architecture)
 6. [Key Architectural Decisions](#6-key-architectural-decisions)
+7. [Distributed Master/Worker Architecture](#7-distributed-masterworker-architecture)
 
 ---
 
@@ -336,11 +337,16 @@ flowchart TB
 
 ### Docker Compose Service Summary
 
-| Service | Image Base | Mounts | Network Mode | Notes |
+| Service | Image Base | `NODE_MODE` | Port | Notes |
 |---|---|---|---|---|
-| `nginx` | `nginx:alpine` | Angular `/dist` (build artifact); `nginx.conf` | Bridge + host port range | Angular static files are `COPY`'d into the image at build time |
-| `api` | `node:22-alpine` | `db-data` volume; optional host socket | Bridge (internal) | Communicates with host macOS via TCP (host networking) to reach simulators |
-| *(Angular)* | — | — | — | No separate container; built as static files during `nginx` image build |
+| `nginx` | `nginx:alpine` | — | `80` | Serves Angular static build; proxies `/api/*` and `/ws/*` to `master:3000` |
+| `master` | `node:alpine` | `master` | `3000` | Orchestration node; no simulator toolchain needed; mounts `master-data` volume |
+| `worker` | `node:alpine` | `worker` | `3001` (host debug) | **Demo only** — no iOS/Android toolchain in Docker; real workers run on macOS hosts; mounts `worker-data` volume |
+
+> **Real worker deployment:** Worker nodes must run on macOS hosts with Xcode and Android SDK installed. Start a worker with:
+> ```bash
+> NODE_MODE=worker MASTER_URL=http://<master>:3000 WORKER_PUBLIC_URL=http://<this-host>:3000 WORKER_SECRET=<secret> pnpm --filter @web-mobile-simulator/api start
+> ```
 
 ---
 
@@ -413,4 +419,110 @@ flowchart TB
 
 ---
 
-*Last updated: 2026-04-12 | Architecture Agent*
+### ADR-008: Distributed Master/Worker Architecture
+
+**Status**: Accepted  
+**Context**: A single Mac node limits the number of concurrent simulator/emulator sessions due to CPU and memory constraints. Multiple Mac nodes are needed to scale horizontally, but the frontend must remain unaware of the individual worker topology.  
+**Decision**: Introduce a `master` mode that acts as a single-entry orchestration node: it receives all frontend traffic, maintains a worker registry, selects workers using a least-loaded strategy, and proxies requests transparently. Worker nodes run the full existing API unchanged; they register with master at startup and send periodic heartbeats. Session→worker assignments are persisted in a new `session_worker_map` SQLite table on master so routing survives master restarts.  
+**Alternatives Considered**: DNS-based load balancing (no session affinity — stream proxying would fail). A dedicated service registry (e.g. Consul) — adds operational complexity for an MVP. Stateless proxying with shared DB — requires workers to share a database, which conflicts with the local-SQLite constraint.  
+**Consequences**: Master is a new single point of failure. Workers can operate in degraded (unregistered) mode if master is unavailable. HTTP proxying is buffered (MVP tradeoff). App library routes are deferred in distributed mode.
+
+---
+
+## 7. Distributed Master/Worker Architecture
+
+### 7.1 Topology Overview
+
+In **standalone mode** (the default, `NODE_MODE=standalone`), the system is unchanged from the single-node design described in Sections 1–5: one Fastify process handles all routes and manages simulators directly on the local macOS host.
+
+In **distributed mode**, a `master` orchestration node is introduced as the single entry point for all browser traffic. The master has no simulator toolchain of its own; instead, it maintains a registry of one or more **worker** nodes, each running on a separate macOS host with the full simulator/emulator stack. Workers register with the master at startup and send periodic heartbeats. The master routes session creation to the least-loaded eligible worker, persists the `sessionId → worker` mapping in SQLite, and transparently proxies all subsequent HTTP and WebSocket traffic to the owning worker. From the browser's perspective the topology is invisible — all requests go to the same origin.
+
+### 7.2 Topology Diagram
+
+```mermaid
+flowchart TD
+    subgraph Browser["🌐 Browser Client"]
+        Angular["Angular SPA"]
+    end
+
+    subgraph DockerHost["🐳 Docker / Any Host"]
+        Nginx["nginx\n• Serves Angular static build\n• /api/* → master:3000\n• /ws/*  → master:3000"]
+        Master["Master Node\n(Fastify · NODE_MODE=master)\n• WorkerRegistryService\n• SessionRouterService\n• /internal/workers/*\n• HTTP + WS proxy to workers"]
+        MasterDB[("SQLite\nsession_worker_map\nrouting table")]
+        Master --> MasterDB
+    end
+
+    subgraph Worker1["🖥️ Worker Node 1 — macOS"]
+        W1API["Worker API\n(Fastify · NODE_MODE=worker)\n• Full session routes\n• WorkerRegistrationService"]
+        W1Sim["iOS Simulator\nAndroid Emulator"]
+        W1DB[("SQLite\nsession state")]
+        W1API --> W1Sim
+        W1API --> W1DB
+    end
+
+    subgraph Worker2["🖥️ Worker Node 2 — macOS"]
+        W2API["Worker API\n(Fastify · NODE_MODE=worker)"]
+        W2Sim["iOS Simulator\nAndroid Emulator"]
+        W2DB[("SQLite\nsession state")]
+        W2API --> W2Sim
+        W2API --> W2DB
+    end
+
+    Browser -- "HTTPS + WSS" --> Nginx
+    Nginx -- "HTTP + WS :3000" --> Master
+    Master -- "POST /internal/workers/register\nPOST /internal/workers/:id/heartbeat" --> W1API
+    Master -- "POST /internal/workers/register\nPOST /internal/workers/:id/heartbeat" --> W2API
+    W1API -- "registers + heartbeats" --> Master
+    W2API -- "registers + heartbeats" --> Master
+    Master -- "proxy session requests" --> W1API
+    Master -- "proxy session requests" --> W2API
+    Master -- "WS /ws/events aggregation" --> W1API
+    Master -- "WS /ws/events aggregation" --> W2API
+```
+
+### 7.3 Master/Worker Routing Table
+
+| Concern | Route | Handler | Notes |
+|---|---|---|---|
+| Worker registration | `POST /internal/workers/register` | Master | Assigns UUID, starts event aggregation |
+| Worker heartbeat | `POST /internal/workers/:id/heartbeat` | Master | Updates capacity counts |
+| Worker deregistration | `DELETE /internal/workers/:id` | Master | Idempotent |
+| Create session | `POST /api/sessions` | Master → Worker | Master picks least-loaded worker |
+| Delete session | `DELETE /api/sessions/:id` | Master → Worker | Looks up worker via routing table |
+| List sessions | `GET /api/sessions` | Master → All workers | Fan-out, merge arrays |
+| Session control/stream | `* /api/sessions/:id/*` | Master → Worker | Proxy via session routing table |
+| WebSocket stream | `GET /ws/stream/:sessionId` | Master → Worker | Bidirectional ws tunnel |
+| Events stream | `GET /ws/events` | Master (local bus) | Master re-emits events from all workers |
+| Devices/Runtimes | `GET /api/devices`, `/api/runtimes` | Master → First healthy worker | Proxied |
+
+### 7.4 Worker Lifecycle
+
+**Startup registration:** After its HTTP server is listening, a worker calls `POST /internal/workers/register` on the master (authenticated via `Authorization: Bearer <WORKER_SECRET>`). The master assigns a UUID, records the worker's public URL and initial capacity, and opens a WebSocket connection to the worker's `/ws/events` endpoint for event-stream aggregation. If the master is unreachable at startup, the worker retries up to 10 times with exponential backoff (initial delay 1 s, capped at 30 s).
+
+**Heartbeat loop:** Registered workers send `POST /internal/workers/:id/heartbeat` on a regular interval, including current capacity information sourced from `sessionManagerService.getCapacityInfo()`. The master updates the worker's recorded session counts and last-seen timestamp on each heartbeat.
+
+**Health checking on master:** The master runs a background health-check interval (every 30 s). Any worker whose last heartbeat was received more than `WORKER_OFFLINE_THRESHOLD_MS` (90 s) ago is marked offline and excluded from worker selection. If the master's WebSocket connection to a worker's event stream drops, it attempts up to 5 reconnects before giving up.
+
+**Graceful deregistration:** On shutdown, a worker sends `DELETE /internal/workers/:id` to the master. This is idempotent — the master removes the worker from the registry regardless of current health state.
+
+### 7.5 Worker Selection Strategy
+
+When a new session is requested (`POST /api/sessions`), the master selects the target worker using a **least-loaded** strategy:
+
+1. Filter the registry to workers whose status is `online`.
+2. Further filter to workers that have remaining capacity for the requested platform (iOS or Android) — i.e. their current session count for that platform is below their reported maximum.
+3. Among the remaining eligible workers, select the one with the **fewest total active sessions** (iOS + Android combined).
+4. Forward the `POST /api/sessions` request to the selected worker, record the returned `sessionId → { workerId, workerUrl }` mapping in the master's `session_worker_map` SQLite table, and return the worker's response to the browser.
+
+If no eligible worker is available, the master returns an appropriate error to the client.
+
+### 7.6 Known Limitations / MVP Tradeoffs
+
+- **Buffered HTTP proxying** — HTTP responses are fully buffered in master memory using `response.arrayBuffer()` before being forwarded to the client. Large responses (e.g. binary downloads) will consume master RAM proportional to response size. Streaming proxy via `undici` is deferred.
+- **App library routes not proxied** — App library management routes are not forwarded in distributed mode. This feature is deferred to a future iteration.
+- **Worker containers in Docker Compose are demo only** — The `worker` service in `docker-compose.yml` runs in a standard Linux container with no iOS/Android toolchain. It exists to validate the registration and heartbeat plumbing. Real workers must run on macOS hosts with Xcode and Android SDK installed.
+- **No TLS between master and workers** — Internal master↔worker communication is plain HTTP/WS. This is acceptable when master and workers are on a private network, but should be addressed before any internet-exposed deployment.
+
+---
+
+*Last updated: 2026-04-17 | Architecture Agent*

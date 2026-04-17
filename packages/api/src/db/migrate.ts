@@ -56,5 +56,22 @@ export function initializeDatabase(): void {
     CREATE INDEX IF NOT EXISTS idx_app_library_user_id ON app_library(user_id)
   `);
 
+  // Create the session_worker_map table if it doesn't already exist.
+  // Only used by master nodes to persist session→worker routing.
+  db.run(sql`
+    CREATE TABLE IF NOT EXISTS session_worker_map (
+      session_id TEXT PRIMARY KEY,
+      worker_id TEXT NOT NULL,
+      worker_url TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )
+  `);
+
+  // Index so the master can quickly look up all sessions for a given worker
+  // (e.g. when a worker goes offline and all its sessions need to be errored).
+  db.run(sql`
+    CREATE INDEX IF NOT EXISTS idx_swm_worker_id ON session_worker_map(worker_id)
+  `);
+
   console.log(`${LOG_PREFIX} Initialized successfully`);
 }

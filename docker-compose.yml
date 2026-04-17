@@ -1,3 +1,19 @@
+# Architecture overview:
+#
+#   master  — orchestration node; handles all API requests from the frontend and
+#             routes simulator jobs to registered workers. Does NOT run simulators
+#             itself.
+#
+#   worker  — demo/stub container included for convenience. Real workers must run
+#             on macOS hosts that have Xcode and the Android SDK installed; they
+#             register themselves with the master over HTTP.
+#
+#   nginx   — reverse-proxies all frontend traffic (HTTP + WebSocket) to master.
+#
+# WORKER_SECRET must be identical on every node (master and all workers).
+# Set it as an environment variable before starting the stack, e.g.:
+#   export WORKER_SECRET=my-strong-secret && docker compose up
+
 services:
   nginx:
     build:
@@ -6,24 +22,45 @@ services:
     ports:
       - "80:80"
     depends_on:
-      - api
+      - master
     restart: unless-stopped
 
-  api:
+  master:
     build:
       context: .
       dockerfile: Dockerfile.api
     ports:
       - "3000:3000"
     environment:
+      - NODE_MODE=master
       - API_PORT=3000
       - API_HOST=0.0.0.0
       - DATABASE_URL=file:/app/data/simulator.db
-      - XCODE_PATH=/Applications/Xcode.app
-      - ANDROID_SDK_ROOT=/Users/shared/Library/Android/sdk
+      - WORKER_SECRET=${WORKER_SECRET:-change-me-in-production}
     volumes:
-      - api-data:/app/data
+      - master-data:/app/data
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    ports:
+      - "3001:3000"
+    environment:
+      - NODE_MODE=worker
+      - API_PORT=3000
+      - API_HOST=0.0.0.0
+      - DATABASE_URL=file:/app/data/simulator.db
+      - MASTER_URL=http://master:3000
+      - WORKER_PUBLIC_URL=http://worker:3000
+      - WORKER_SECRET=${WORKER_SECRET:-change-me-in-production}
+    volumes:
+      - worker-data:/app/data
+    depends_on:
+      - master
     restart: unless-stopped
 
 volumes:
-  api-data:
+  master-data:
+  worker-data:
