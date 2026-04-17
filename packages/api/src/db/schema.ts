@@ -39,3 +39,34 @@ export const sessions = sqliteTable('sessions', {
   /** ISO-8601 last-updated timestamp. */
   updatedAt: text('updated_at').notNull(),
 });
+
+/**
+ * The `app_library` table stores persistent app binaries (.ipa / .apk) that
+ * users upload to their personal library.  Apps can be installed into any
+ * active session without re-uploading.
+ */
+export const appLibrary = sqliteTable('app_library', {
+  /** App entry UUID — primary key. */
+  id: text('id').primaryKey(),
+
+  /** Simple user identifier supplied via the `x-user-id` request header. */
+  userId: text('user_id').notNull(),
+
+  /** Original filename as uploaded by the user (e.g. `"MyApp.ipa"`). */
+  fileName: text('file_name').notNull(),
+
+  /** Target platform: `'ios'` or `'android'`. */
+  platform: text('platform').notNull(),
+
+  /** File size in bytes. */
+  fileSize: integer('file_size').notNull(),
+
+  /** Relative path on disk where the file is stored (relative to project root). */
+  storagePath: text('storage_path').notNull(),
+
+  /** ISO-8601 creation timestamp. */
+  createdAt: text('created_at').notNull(),
+
+  /** ISO-8601 last-updated timestamp. */
+  updatedAt: text('updated_at').notNull(),
+});

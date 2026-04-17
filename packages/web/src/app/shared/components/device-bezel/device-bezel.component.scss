@@ -1,0 +1,291 @@
+// ── Device Bezel Component ────────────────────────────────────────────────────
+//
+// Pure-CSS device frames for iPhone 15 Pro (iOS) and Pixel 8 (Android).
+// No image assets required.
+//
+// Architecture
+// ─────────────
+// .device-bezel            — outer shell (the physical body of the phone)
+//   .device-bezel__btn     — hardware buttons (iOS only, absolutely positioned)
+//   .device-bezel__screen  — inset screen area (clips content, holds notch/camera)
+//     .device-bezel__dynamic-island  — iOS Dynamic Island pill
+//     .device-bezel__camera-hole     — Android punch-hole camera
+//     .device-bezel__content         — ng-content projection slot
+//     .device-bezel__home-indicator  — iOS home indicator bar
+//
+// Sizing strategy
+// ───────────────
+// The bezel uses padding to create the physical border around the screen.
+// The screen area grows to fit whatever content is projected into it.
+// This means the bezel scales with the canvas — no fixed heights needed.
+
+// ── Shared tokens ─────────────────────────────────────────────────────────────
+
+// iPhone 15 Pro — Natural Titanium palette
+$ios-body-bg:        #2a2a2e;
+$ios-body-bg-light:  #3a3a3e;
+$ios-body-border:    #1a1a1e;
+$ios-button-color:   #222226;
+$ios-button-border:  #111114;
+$ios-screen-bg:      #000;
+$ios-island-color:   #0a0a0a;
+$ios-home-bar:       rgba(255, 255, 255, 0.35);
+
+// Pixel 8 — Obsidian (matte black) palette
+$android-body-bg:       #1a1a1a;
+$android-body-bg-light: #252525;
+$android-body-border:   #0d0d0d;
+$android-screen-bg:     #000;
+$android-camera-color:  #0a0a0a;
+
+// ── Host ──────────────────────────────────────────────────────────────────────
+
+:host {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+// ── Base bezel shell ──────────────────────────────────────────────────────────
+
+.device-bezel {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+
+  // Prevent the bezel from ever overflowing its parent
+  max-width: 100%;
+  max-height: 100%;
+
+  // ── iOS — iPhone 15 Pro ───────────────────────────────────────────────────
+
+  &--ios {
+    // Titanium-finish body
+    background: linear-gradient(
+      160deg,
+      $ios-body-bg-light 0%,
+      $ios-body-bg       40%,
+      darken($ios-body-bg, 4%) 100%
+    );
+    border-radius: 55px;
+    border: 1.5px solid $ios-body-border;
+
+    // Subtle metallic sheen on the outer edge
+    box-shadow:
+      // Outer highlight (top-left)
+      inset 0 1px 0 rgba(255, 255, 255, 0.12),
+      // Outer shadow (bottom-right)
+      inset 0 -1px 0 rgba(0, 0, 0, 0.4),
+      // Depth shadow
+      0 24px 64px rgba(0, 0, 0, 0.7),
+      0 8px 24px  rgba(0, 0, 0, 0.5);
+
+    // Bezel thickness: top/bottom slightly thicker than sides
+    padding: 12px 8px;
+
+    .device-bezel__screen {
+      border-radius: 47px;
+    }
+  }
+
+  // ── Android — Pixel 8 ────────────────────────────────────────────────────
+
+  &--android {
+    background: linear-gradient(
+      160deg,
+      $android-body-bg-light 0%,
+      $android-body-bg       50%,
+      darken($android-body-bg, 3%) 100%
+    );
+    border-radius: 40px;
+    border: 1.5px solid $android-body-border;
+
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.06),
+      inset 0 -1px 0 rgba(0, 0, 0, 0.5),
+      0 24px 64px rgba(0, 0, 0, 0.75),
+      0 8px 24px  rgba(0, 0, 0, 0.5);
+
+    // Pixel 8: slightly thicker top bezel for camera, thin sides/bottom
+    padding: 14px 6px 8px;
+
+    .device-bezel__screen {
+      border-radius: 34px;
+    }
+  }
+}
+
+// ── Screen area ───────────────────────────────────────────────────────────────
+
+.device-bezel__screen {
+  position: relative;
+  overflow: hidden;
+  background: $ios-screen-bg; // both platforms use black screen bg
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+
+  // Inset shadow to simulate screen depth
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.8);
+
+  // Ensure the screen never shrinks below a minimum usable size
+  min-width: 60px;
+  min-height: 80px;
+}
+
+// ── Content projection slot ───────────────────────────────────────────────────
+
+.device-bezel__content {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  position: relative;
+
+  // Allow projected canvas/content to fill the screen area
+  min-width: 0;
+  min-height: 0;
+
+  // Pass through pointer events to the projected content
+  pointer-events: auto;
+}
+
+// ── iOS Dynamic Island ────────────────────────────────────────────────────────
+
+.device-bezel__dynamic-island {
+  // Pill-shaped cutout at the top center of the screen
+  position: relative;
+  flex-shrink: 0;
+  align-self: center;
+  margin-top: 10px;
+  margin-bottom: 6px;
+
+  width: 30%;
+  max-width: 120px;
+  min-width: 80px;
+  height: 34px;
+
+  background: $ios-island-color;
+  border-radius: 20px;
+
+  // Subtle inner glow to simulate the sensor array depth
+  box-shadow:
+    inset 0 1px 3px rgba(0, 0, 0, 0.9),
+    0 0 0 1px rgba(0, 0, 0, 0.6);
+
+  // Pointer events: none — it's purely decorative
+  pointer-events: none;
+}
+
+// ── Android punch-hole camera ─────────────────────────────────────────────────
+
+.device-bezel__camera-hole {
+  position: relative;
+  flex-shrink: 0;
+  align-self: center;
+  margin-top: 10px;
+  margin-bottom: 6px;
+
+  width: 12px;
+  height: 12px;
+
+  background: $android-camera-color;
+  border-radius: 50%;
+
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.9),
+    0 0 0 1.5px rgba(255, 255, 255, 0.04),
+    0 0 0 1px rgba(0, 0, 0, 0.8);
+
+  pointer-events: none;
+}
+
+// ── iOS Home Indicator ────────────────────────────────────────────────────────
+
+.device-bezel__home-indicator {
+  position: relative;
+  flex-shrink: 0;
+  align-self: center;
+  margin-bottom: 8px;
+  margin-top: 6px;
+
+  width: 34%;
+  max-width: 130px;
+  min-width: 80px;
+  height: 5px;
+
+  background: $ios-home-bar;
+  border-radius: 3px;
+
+  pointer-events: none;
+}
+
+// ── iOS Hardware Buttons ──────────────────────────────────────────────────────
+//
+// Buttons are absolutely positioned relative to .device-bezel (position:relative).
+// They sit outside the screen area, flush against the device body edges.
+
+.device-bezel__btn {
+  position: absolute;
+  background: linear-gradient(
+    to right,
+    $ios-button-border,
+    $ios-button-color,
+    $ios-button-border
+  );
+  border-radius: 3px;
+  pointer-events: none;
+
+  // Subtle raised appearance
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.4),
+    -1px 0 2px rgba(0, 0, 0, 0.5);
+
+  // ── Left-side buttons (volume up, volume down, silent switch) ─────────
+
+  &--silent {
+    // Mute/silent toggle — short, near the top-left
+    left: -4px;
+    top: 18%;
+    width: 4px;
+    height: 32px;
+  }
+
+  &--vol-up {
+    left: -4px;
+    top: 28%;
+    width: 4px;
+    height: 56px;
+  }
+
+  &--vol-down {
+    left: -4px;
+    top: calc(28% + 56px + 12px);
+    width: 4px;
+    height: 56px;
+  }
+
+  // ── Right-side button (power / side button) ───────────────────────────
+
+  &--power {
+    right: -4px;
+    top: 28%;
+    width: 4px;
+    height: 72px;
+
+    // Power button gradient runs top-to-bottom
+    background: linear-gradient(
+      to bottom,
+      $ios-button-border,
+      $ios-button-color,
+      $ios-button-border
+    );
+
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.08),
+      inset 0 -1px 0 rgba(0, 0, 0, 0.4),
+      1px 0 2px rgba(0, 0, 0, 0.5);
+  }
+}

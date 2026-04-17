@@ -37,5 +37,24 @@ export function initializeDatabase(): void {
     CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)
   `);
 
+  // Create the app_library table if it doesn't already exist.
+  db.run(sql`
+    CREATE TABLE IF NOT EXISTS app_library (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      platform TEXT NOT NULL,
+      file_size INTEGER NOT NULL,
+      storage_path TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+
+  // Index on user_id so listing a user's apps is efficient.
+  db.run(sql`
+    CREATE INDEX IF NOT EXISTS idx_app_library_user_id ON app_library(user_id)
+  `);
+
   console.log(`${LOG_PREFIX} Initialized successfully`);
 }

@@ -9,7 +9,7 @@
 #   ./scripts/dev.sh --stop   # Stop everything
 #
 # Prerequisites:
-#   - Node.js 22+ and pnpm installed
+#   - Node.js 24.x and pnpm installed
 #   - Docker Desktop running
 #   - Dependencies installed (pnpm install)
 

@@ -52,7 +52,7 @@ Web Mobile Simulator is a self-hosted platform that runs iOS Simulators and Andr
 | **macOS** | 13+ | Required to run iOS Simulator and Android Emulator (Hypervisor framework) |
 | **Xcode** | 15+ | Provides `xcrun simctl` and iOS Simulator runtimes |
 | **Android Studio** or **Android SDK CLI** | Latest | Provides `adb`, `avdmanager`, `sdkmanager`, `emulator` |
-| **Node.js** | ≥ 20.0.0 | Specified in `engines` field |
+| **Node.js** | 24.x | Pinned via `.nvmrc` and enforced in `engines` |
 | **pnpm** | ≥ 9.0.0 | Workspace manager; install via `npm i -g pnpm` |
 | **Docker Desktop for Mac** | Latest | Required for containerised deployment |
 

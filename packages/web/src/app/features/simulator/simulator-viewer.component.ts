@@ -15,6 +15,7 @@ import {
 } from '@angular/core';
 import { TitleCasePipe } from '@angular/common';
 import { WebCodecsService } from '../../core/services/webcodecs.service';
+import { DeviceBezelComponent } from '../../shared/components/device-bezel/device-bezel.component';
 
 /** Connection state of the streaming session. */
 export type ConnectionState =
@@ -53,7 +54,7 @@ export type StreamMode = 'webcodecs' | 'mjpeg';
 @Component({
   selector: 'app-simulator-viewer',
   standalone: true,
-  imports: [TitleCasePipe],
+  imports: [TitleCasePipe, DeviceBezelComponent],
   templateUrl: './simulator-viewer.component.html',
   styleUrl: './simulator-viewer.component.scss',
 })

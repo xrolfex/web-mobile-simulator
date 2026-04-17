@@ -1,4 +1,5 @@
 <div class="dashboard">
+  <div class="dashboard__content">
   <!-- Page header -->
   <header class="dashboard__header">
     <div class="dashboard__header-left">
@@ -29,7 +30,13 @@
     <h3 class="section-title">Launch Simulator</h3>
     <div class="launcher-grid">
       @for (card of platformCards; track card.platform) {
-        <button class="launcher-card" (click)="openDialog(card.platform)" [attr.aria-label]="'Launch ' + card.title">
+        <button
+          class="launcher-card"
+          [class.launcher-card--ios]="card.platform === 'ios'"
+          [class.launcher-card--android]="card.platform === 'android'"
+          (click)="openDialog(card.platform)"
+          [attr.aria-label]="'Launch ' + card.title"
+        >
           <div class="launcher-card__icon" aria-hidden="true">
             @if (card.platform === 'ios') {
               <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor">
@@ -195,6 +202,7 @@
       }
     }
   </section>
+  </div><!-- /.dashboard__content -->
 </div>
 
 <!-- Launch dialog overlay -->

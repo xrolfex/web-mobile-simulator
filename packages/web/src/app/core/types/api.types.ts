@@ -106,6 +106,30 @@ export interface SessionCapacityInfo {
   perPlatform: Record<string, { active: number; max: number }>;
 }
 
+// ── App Library Types ─────────────────────────────────────────────────────────
+
+/** An app stored in the user's library. */
+export interface LibraryApp {
+  id: string;
+  userId: string;
+  fileName: string;
+  platform: Platform;
+  fileSize: number;
+  storagePath: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Response from listing library apps. */
+export interface AppLibraryListResponse {
+  apps: LibraryApp[];
+}
+
+/** Response from uploading a library app. */
+export interface AppLibraryUploadResponse {
+  app: LibraryApp;
+}
+
 // ── App Upload/Install Types ──────────────────────────────────────────────────
 
 /** Supported app file extensions by platform. */

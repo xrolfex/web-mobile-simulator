@@ -340,14 +340,41 @@
     </div>
   </aside>
 
-  <!-- ── Main Content ───────────────────────────────────────────────────── -->
+  <!-- ── Center: Main Content ──────────────────────────────────────────────── -->
   <main class="session-main" aria-label="Simulator display area">
 
     @if (loading()) {
-      <div class="loading-state" role="status" aria-live="polite">
-        <div class="loading-spinner" aria-hidden="true"></div>
-        <p class="loading-state__message">Starting simulator…</p>
-        <p class="loading-state__hint">This may take up to a minute.</p>
+      <div class="boot-stage" role="status" aria-live="polite">
+        <app-device-bezel [platform]="sessionPlatform()">
+          @if (sessionPlatform() === 'ios') {
+            <!-- iOS boot screen: black background, pulsing Apple logo -->
+            <div class="boot-screen boot-screen--ios" aria-hidden="true">
+              <div class="boot-screen__logo boot-screen__logo--ios">
+                <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/>
+                </svg>
+              </div>
+            </div>
+          } @else {
+            <!-- Android boot screen: dark background, Google-colored spinner -->
+            <div class="boot-screen boot-screen--android" aria-hidden="true">
+              <div class="boot-screen__logo boot-screen__logo--android">
+                <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <path d="M17.6 9.48l1.84-3.18c.16-.31.04-.69-.27-.86-.31-.16-.69-.04-.86.27l-1.86 3.22c-1.15-.53-2.43-.83-3.77-.87h-.27c-1.34.04-2.62.34-3.77.87L6.79 5.71c-.16-.31-.54-.43-.86-.27-.31.16-.43.55-.27.86l1.84 3.18C4.67 11.11 2.84 14.09 2.5 17.5h19c-.34-3.41-2.17-6.39-4.9-8.02zM8.5 14.5c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1zm7 0c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1z"/>
+                </svg>
+              </div>
+              <div class="boot-screen__android-ring" aria-hidden="true">
+                <div class="android-ring__dot android-ring__dot--1"></div>
+                <div class="android-ring__dot android-ring__dot--2"></div>
+                <div class="android-ring__dot android-ring__dot--3"></div>
+                <div class="android-ring__dot android-ring__dot--4"></div>
+              </div>
+            </div>
+          }
+        </app-device-bezel>
+
+        <p class="boot-stage__message">Starting simulator…</p>
+        <p class="boot-stage__hint">This may take up to a minute.</p>
       </div>
     }
 
@@ -386,4 +413,63 @@
     }
 
   </main>
+
+  <!-- ── Right Panel: App Library ──────────────────────────────────────────── -->
+  <aside class="app-library-panel">
+    <div class="panel-header">
+      <h3>App Library</h3>
+      <label class="panel-upload-btn" tabindex="0">
+        + Upload
+        <input type="file" [accept]="acceptedFileTypes()" (change)="onLibraryUpload($event)" hidden />
+      </label>
+    </div>
+
+    @if (libraryLoading()) {
+      <div class="panel-loading">
+        <div class="panel-spinner"></div>
+      </div>
+    }
+
+    @if (!libraryLoading() && libraryApps().length === 0) {
+      <div class="panel-empty">
+        <p>No apps uploaded yet.</p>
+        <p class="panel-empty__hint">Upload .{{ sessionPlatform() === 'ios' ? 'ipa' : 'apk' }} files to your library</p>
+      </div>
+    }
+
+    @if (!libraryLoading() && libraryApps().length > 0) {
+      <div class="panel-app-list">
+        @for (app of libraryApps(); track app.id) {
+          <div class="app-card">
+            <div class="app-card__info">
+              <span class="app-card__name" [title]="app.fileName">{{ app.fileName }}</span>
+              <span class="app-card__size">{{ formatFileSize(app.fileSize) }}</span>
+            </div>
+            <div class="app-card__actions">
+              <button
+                class="app-card__btn app-card__btn--install"
+                (click)="onInstallLibraryApp(app)"
+                [disabled]="!isReady() || installingAppId() === app.id"
+                title="Install on device"
+              >
+                @if (installingAppId() === app.id) {
+                  Installing…
+                } @else {
+                  Install
+                }
+              </button>
+              <button
+                class="app-card__btn app-card__btn--delete"
+                (click)="onDeleteLibraryApp(app)"
+                title="Remove from library"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+        }
+      </div>
+    }
+  </aside>
+
 </div>

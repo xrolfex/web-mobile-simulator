@@ -1,0 +1,46 @@
+<!-- Device bezel wrapper — platform class drives all CSS variations -->
+<div
+  class="device-bezel"
+  [ngClass]="'device-bezel--' + platform"
+  [attr.aria-label]="platform === 'ios' ? 'iPhone 15 Pro frame' : 'Pixel 8 frame'"
+  role="presentation"
+>
+
+  <!-- ── iOS-only: side hardware buttons ──────────────────────────────── -->
+  @if (platform === 'ios') {
+    <!-- Volume Up -->
+    <div class="device-bezel__btn device-bezel__btn--vol-up"   aria-hidden="true"></div>
+    <!-- Volume Down -->
+    <div class="device-bezel__btn device-bezel__btn--vol-down" aria-hidden="true"></div>
+    <!-- Silent switch -->
+    <div class="device-bezel__btn device-bezel__btn--silent"   aria-hidden="true"></div>
+    <!-- Power / Side button -->
+    <div class="device-bezel__btn device-bezel__btn--power"    aria-hidden="true"></div>
+  }
+
+  <!-- ── Screen area ───────────────────────────────────────────────────── -->
+  <div class="device-bezel__screen">
+
+    <!-- iOS Dynamic Island -->
+    @if (platform === 'ios') {
+      <div class="device-bezel__dynamic-island" aria-hidden="true"></div>
+    }
+
+    <!-- Android punch-hole camera -->
+    @if (platform === 'android') {
+      <div class="device-bezel__camera-hole" aria-hidden="true"></div>
+    }
+
+    <!-- Projected content (canvas, overlays, etc.) -->
+    <div class="device-bezel__content">
+      <ng-content></ng-content>
+    </div>
+
+    <!-- iOS home indicator bar -->
+    @if (platform === 'ios') {
+      <div class="device-bezel__home-indicator" aria-hidden="true"></div>
+    }
+
+  </div><!-- /.device-bezel__screen -->
+
+</div><!-- /.device-bezel -->

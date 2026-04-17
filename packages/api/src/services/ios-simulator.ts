@@ -2323,8 +2323,18 @@ export class IOSSimulatorService {
   // -------------------------------------------------------------------------
 
   /**
-   * List all installed iOS runtimes.
-   * Runs: `xcrun simctl list runtimes -j`
+   * List all installed and downloadable iOS runtimes.
+   *
+   * Combines two data sources:
+   * 1. `xcrun simctl list runtimes -j` — installed runtimes (always available).
+   * 2. `xcrun simctl runtime list -j`  — downloadable runtimes (Xcode 14+).
+   *
+   * Runtimes present in the downloadable list but NOT already installed are
+   * included with `status: 'available'`. If the second command fails (older
+   * Xcode), it is silently skipped and only installed runtimes are returned.
+   *
+   * The final array is sorted: installed runtimes first, then available ones,
+   * each group sorted by version string descending.
    *
    * @returns Array of `Runtime` objects filtered to the iOS platform.
    */
@@ -2332,13 +2342,14 @@ export class IOSSimulatorService {
     log('Listing runtimes…');
     await this.assertSimctlAvailable();
 
+    // ── 1. Installed runtimes ────────────────────────────────────────────────
     const output = await execJSON<Pick<SimctlListOutput, 'runtimes'>>(
       SIMCTL,
       ['simctl', 'list', 'runtimes', '-j'],
       XCRUN_EXEC_OPTIONS,
     );
 
-    return output.runtimes
+    const installedRuntimes: Runtime[] = output.runtimes
       .filter((rt) => rt.platform === 'iOS')
       .map((rt): Runtime => ({
         id: rt.identifier,
@@ -2347,6 +2358,51 @@ export class IOSSimulatorService {
         identifier: rt.identifier,
         status: rt.isAvailable ? 'installed' : 'error',
       }));
+
+    // Build a Set of installed version names for fast deduplication.
+    const installedVersionNames = new Set(installedRuntimes.map((rt) => rt.version));
+
+    // ── 2. Downloadable runtimes (Xcode 14+ only — graceful degradation) ────
+    let availableRuntimes: Runtime[] = [];
+    try {
+      // `xcrun simctl runtime list -j` returns a dict keyed by platform-version
+      // strings, e.g. { "iOS 18.2": { … }, "tvOS 18.2": { … } }.
+      const downloadableDict = await execJSON<Record<string, unknown>>(
+        SIMCTL,
+        ['simctl', 'runtime', 'list', '-j'],
+        XCRUN_EXEC_OPTIONS,
+      );
+
+      availableRuntimes = Object.keys(downloadableDict)
+        // Keep only iOS entries.
+        .filter((versionKey) => versionKey.startsWith('iOS '))
+        // Exclude runtimes that are already installed.
+        .filter((versionKey) => !installedVersionNames.has(versionKey))
+        .map((versionKey): Runtime => ({
+          // Use a stable, URL-safe id that won't collide with installed identifiers.
+          id: `available-${versionKey.replace(/\s+/g, '-')}`,
+          platform: 'ios',
+          version: versionKey,        // e.g. "iOS 18.2"
+          identifier: versionKey,     // `simctl runtime add` accepts this form
+          status: 'available',
+        }));
+    } catch (error: unknown) {
+      // `simctl runtime list` is not available on older Xcode versions — skip.
+      warn(
+        `Could not fetch downloadable runtimes (xcrun simctl runtime list -j): ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    // ── 3. Merge and sort ────────────────────────────────────────────────────
+    // Installed first, available second; each group sorted by version descending.
+    const sortByVersionDesc = (a: Runtime, b: Runtime): number =>
+      b.version.localeCompare(a.version, undefined, { numeric: true, sensitivity: 'base' });
+
+    return [
+      ...installedRuntimes.sort(sortByVersionDesc),
+      ...availableRuntimes.sort(sortByVersionDesc),
+    ];
   }
 
   // -------------------------------------------------------------------------

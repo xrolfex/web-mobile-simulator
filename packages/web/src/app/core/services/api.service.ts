@@ -3,6 +3,9 @@ import { HttpClient } from '@angular/common/http';
 import { environment } from '../../../environments/environment';
 import {
   ApiResponse,
+  AppInstallResult,
+  AppLibraryListResponse,
+  AppLibraryUploadResponse,
   AppUploadResponse,
   CreateSessionRequest,
   CreateSessionResponse,
@@ -269,6 +272,60 @@ export class ApiService {
   forcePurgeSession(id: string) {
     return this.http.delete<ApiResponse<{ message: string }>>(
       `${this.baseUrl}/api/admin/sessions/${id}`,
+    );
+  }
+
+  // ── App Library ───────────────────────────────────────────────────────────
+
+  /**
+   * List apps in the user's library, optionally filtered by platform.
+   * GET /api/apps?platform=ios|android
+   * @param platform Optional platform filter.
+   */
+  getLibraryApps(platform?: Platform) {
+    const params = platform ? `?platform=${platform}` : '';
+    return this.http.get<ApiResponse<AppLibraryListResponse>>(
+      `${this.baseUrl}/api/apps${params}`,
+    );
+  }
+
+  /**
+   * Upload an app file to the user's library.
+   * POST /api/apps
+   * @param platform The target platform for the app.
+   * @param file     The app file (.ipa or .apk) to upload.
+   */
+  uploadLibraryApp(platform: Platform, file: File) {
+    const formData = new FormData();
+    formData.append('file', file, file.name);
+    formData.append('platform', platform);
+    return this.http.post<ApiResponse<AppLibraryUploadResponse>>(
+      `${this.baseUrl}/api/apps`,
+      formData,
+    );
+  }
+
+  /**
+   * Delete an app from the user's library.
+   * DELETE /api/apps/:id
+   * @param appId The library app UUID to delete.
+   */
+  deleteLibraryApp(appId: string) {
+    return this.http.delete<ApiResponse<void>>(
+      `${this.baseUrl}/api/apps/${appId}`,
+    );
+  }
+
+  /**
+   * Install a library app onto a running session's simulator/emulator.
+   * POST /api/apps/:id/install/:sessionId
+   * @param appId     The library app UUID.
+   * @param sessionId The session UUID to install into.
+   */
+  installLibraryApp(appId: string, sessionId: string) {
+    return this.http.post<ApiResponse<{ result: AppInstallResult }>>(
+      `${this.baseUrl}/api/apps/${appId}/install/${sessionId}`,
+      {},
     );
   }
 }

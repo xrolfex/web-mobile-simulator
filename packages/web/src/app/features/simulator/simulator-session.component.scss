@@ -7,10 +7,28 @@
 
 .session-layout {
   display: grid;
-  grid-template-columns: 280px 1fr;
+  grid-template-columns: 240px 1fr 280px;
   height: 100%;
   min-height: 0;
   background: var(--color-bg);
+
+  // ── Responsive: hide right panel below 1200px ──────────────────────────────
+  @media (max-width: 1200px) {
+    grid-template-columns: 240px 1fr;
+
+    .app-library-panel {
+      display: none;
+    }
+  }
+
+  // ── Responsive: also hide left sidebar below 768px ─────────────────────────
+  @media (max-width: 768px) {
+    grid-template-columns: 1fr;
+
+    .session-sidebar {
+      display: none;
+    }
+  }
 }
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -29,6 +47,204 @@
     flex-direction: column;
     gap: 0.5rem;
     margin-top: auto;
+  }
+}
+
+// ── App Library Panel (right column) ─────────────────────────────────────────
+
+.app-library-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1.5rem 1rem;
+  background: var(--color-surface);
+  border-left: 1px solid var(--color-border);
+  overflow-y: auto;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+
+  h3 {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin: 0;
+  }
+}
+
+.panel-upload-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.3rem 0.65rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  font-family: var(--font-sans);
+  background: var(--color-accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--transition-fast), box-shadow var(--transition-fast);
+  white-space: nowrap;
+  flex-shrink: 0;
+
+  &:hover {
+    background: var(--color-accent-hover);
+    box-shadow: 0 2px 8px rgba(99, 102, 241, 0.35);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+}
+
+// ── Panel loading state ───────────────────────────────────────────────────────
+
+.panel-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem 1rem;
+  flex: 1;
+}
+
+.panel-spinner {
+  width: 28px;
+  height: 28px;
+  border: 2px solid var(--color-surface-raised);
+  border-top-color: var(--color-accent);
+  border-radius: var(--radius-full);
+  animation: spin 0.75s linear infinite;
+}
+
+// ── Panel empty state ─────────────────────────────────────────────────────────
+
+.panel-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  padding: 2rem 1rem;
+  border: 2px dashed var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  text-align: center;
+  gap: 0.25rem;
+
+  p {
+    font-size: 0.85rem;
+    color: var(--color-text-muted);
+    margin: 0;
+  }
+
+  &__hint {
+    font-size: 0.75rem;
+    opacity: 0.6;
+  }
+}
+
+// ── Panel app list ────────────────────────────────────────────────────────────
+
+.panel-app-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+// ── App card ──────────────────────────────────────────────────────────────────
+
+.app-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+
+  &:hover {
+    border-color: var(--color-accent);
+    box-shadow: var(--shadow-sm);
+  }
+
+  &__info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+  }
+
+  &__name {
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--color-text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  &__size {
+    font-size: 0.7rem;
+    color: var(--color-text-muted);
+    opacity: 0.7;
+  }
+
+  &__actions {
+    display: flex;
+    gap: 0.35rem;
+  }
+
+  &__btn {
+    flex: 1;
+    padding: 0.3rem 0.5rem;
+    border-radius: var(--radius-sm);
+    font-size: 0.72rem;
+    font-weight: 500;
+    font-family: var(--font-sans);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    border: 1px solid transparent;
+    white-space: nowrap;
+
+    &:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    &--install {
+      background: rgba(99, 102, 241, 0.15);
+      color: var(--color-accent);
+      border-color: rgba(99, 102, 241, 0.3);
+
+      &:hover:not(:disabled) {
+        background: var(--color-accent);
+        color: #fff;
+        border-color: var(--color-accent);
+        box-shadow: 0 2px 8px rgba(99, 102, 241, 0.3);
+      }
+    }
+
+    &--delete {
+      flex: 0 0 auto;
+      background: rgba(239, 68, 68, 0.08);
+      color: #f87171;
+      border-color: rgba(239, 68, 68, 0.2);
+
+      &:hover:not(:disabled) {
+        background: rgba(239, 68, 68, 0.2);
+        border-color: #ef4444;
+      }
+    }
   }
 }
 
@@ -326,6 +542,170 @@
   border-top-color: var(--color-accent);
   border-radius: var(--radius-full);
   animation: spin 0.75s linear infinite;
+}
+
+// ── Boot stage (loading state with device bezel) ──────────────────────────────
+
+.boot-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.5rem;
+  height: 100%;
+  width: 100%;
+
+  // Let the bezel shrink to fit available height
+  app-device-bezel {
+    flex-shrink: 1;
+    min-height: 0;
+  }
+
+  &__message {
+    font-size: 1rem;
+    font-weight: 500;
+    color: var(--color-text-primary);
+    margin: 0;
+  }
+
+  &__hint {
+    font-size: 0.85rem;
+    color: var(--color-text-muted);
+    margin: -1rem 0 0; // pull up closer to message
+    opacity: 0.7;
+  }
+}
+
+// ── Boot screen (fills the bezel's screen slot) ───────────────────────────────
+
+.boot-screen {
+  // Phone aspect ratio: 9 wide × 19.5 tall (modern full-screen phones)
+  aspect-ratio: 9 / 19.5;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2rem;
+  background: #000;
+  position: relative;
+  overflow: hidden;
+
+  // ── iOS boot screen ───────────────────────────────────────────────────────
+
+  &--ios {
+    background: #000;
+  }
+
+  // ── Android boot screen ───────────────────────────────────────────────────
+
+  &--android {
+    background: #0f0f0f;
+  }
+}
+
+// ── Boot screen logo ──────────────────────────────────────────────────────────
+
+.boot-screen__logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  svg {
+    display: block;
+  }
+
+  // iOS: white Apple logo, pulsing glow
+  &--ios {
+    width: 15%;
+    color: #fff;
+    filter: drop-shadow(0 0 12px rgba(255, 255, 255, 0.4));
+    animation: ios-pulse 2s ease-in-out infinite;
+
+    svg {
+      width: 100%;
+      height: auto;
+    }
+  }
+
+  // Android: white robot logo, subtle fade
+  &--android {
+    width: 18%;
+    color: rgba(255, 255, 255, 0.85);
+    animation: android-fade 2s ease-in-out infinite;
+
+    svg {
+      width: 100%;
+      height: auto;
+    }
+  }
+}
+
+// ── Android spinning dots ring ────────────────────────────────────────────────
+
+.boot-screen__android-ring {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  position: absolute;
+  bottom: 12%;
+}
+
+.android-ring__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  animation: android-dot-bounce 1.2s ease-in-out infinite;
+
+  &--1 {
+    background: #4285f4; // Google Blue
+    animation-delay: 0s;
+  }
+
+  &--2 {
+    background: #ea4335; // Google Red
+    animation-delay: 0.15s;
+  }
+
+  &--3 {
+    background: #fbbc05; // Google Yellow
+    animation-delay: 0.3s;
+  }
+
+  &--4 {
+    background: #34a853; // Google Green
+    animation-delay: 0.45s;
+  }
+}
+
+// ── Boot animations ───────────────────────────────────────────────────────────
+
+@keyframes ios-pulse {
+  0%, 100% {
+    opacity: 1;
+    filter: drop-shadow(0 0 8px rgba(255, 255, 255, 0.3));
+  }
+  50% {
+    opacity: 0.75;
+    filter: drop-shadow(0 0 20px rgba(255, 255, 255, 0.7));
+  }
+}
+
+@keyframes android-fade {
+  0%, 100% { opacity: 0.85; }
+  50%       { opacity: 0.5; }
+}
+
+@keyframes android-dot-bounce {
+  0%, 80%, 100% {
+    transform: scale(0.6);
+    opacity: 0.4;
+  }
+  40% {
+    transform: scale(1);
+    opacity: 1;
+  }
 }
 
 // ── Error state ───────────────────────────────────────────────────────────────

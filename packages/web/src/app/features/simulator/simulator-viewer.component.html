@@ -59,8 +59,10 @@
     </div>
   </div>
 
-  <!-- ── Canvas Container ────────────────────────────────────────────── -->
-  <div class="canvas-container" aria-label="Simulator display">
+  <!-- ── Canvas Container (wrapped in device bezel) ────────────────── -->
+  <div class="bezel-stage" aria-label="Simulator display">
+  <app-device-bezel [platform]="platform">
+  <div class="canvas-container">
 
     <!-- Shared canvas — used for both MJPEG and WebCodecs modes -->
     <canvas
@@ -105,5 +107,7 @@
         <button class="btn btn--retry" (click)="reconnect()">Reconnect</button>
       </div>
     }
-  </div>
+  </div><!-- /.canvas-container -->
+  </app-device-bezel>
+  </div><!-- /.bezel-stage -->
 </div>

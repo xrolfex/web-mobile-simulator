@@ -16,12 +16,15 @@ import { ApiService } from '../../core/services/api.service';
 import { ToastService } from '../../core/services/toast.service';
 import {
   DeviceOrientation,
+  LibraryApp,
+  Platform,
   Session,
   SessionStatus,
   SimulatorButton,
 } from '../../core/types/api.types';
 import { SimulatorViewerComponent } from './simulator-viewer.component';
 import type { ConnectionState, StreamMode } from './simulator-viewer.component';
+import { DeviceBezelComponent } from '../../shared/components/device-bezel/device-bezel.component';
 
 /** How often (ms) to poll the session endpoint while waiting for it to become active. */
 const POLL_INTERVAL_MS = 2_000;
@@ -42,7 +45,7 @@ const MAX_POLL_ATTEMPTS = 30;
 @Component({
   selector: 'app-simulator-session',
   standalone: true,
-  imports: [SimulatorViewerComponent, FormsModule],
+  imports: [SimulatorViewerComponent, FormsModule, DeviceBezelComponent],
   templateUrl: './simulator-session.component.html',
   styleUrl: './simulator-session.component.scss',
 })
@@ -78,6 +81,14 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
     return s?.status === 'active' && !!s.streamUrl;
   });
 
+  /**
+   * The platform of the current session, available even during `creating` status.
+   * Defaults to `'ios'` before the first poll response arrives.
+   */
+  protected readonly sessionPlatform = computed<'ios' | 'android'>(() => {
+    return this.session()?.device.platform ?? 'ios';
+  });
+
   /** Whether a file upload is in progress. */
   protected readonly uploading = signal<boolean>(false);
 
@@ -111,6 +122,15 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
     if (!s) return '';
     return s.device.platform === 'ios' ? '.app,.ipa' : '.apk';
   });
+
+  /** Apps stored in the user's library for the current platform. */
+  protected readonly libraryApps = signal<LibraryApp[]>([]);
+
+  /** Whether the library app list is being fetched. */
+  protected readonly libraryLoading = signal<boolean>(false);
+
+  /** The ID of the library app currently being installed (empty when idle). */
+  protected readonly installingAppId = signal<string>('');
 
   private readonly api = inject(ApiService);
   private readonly route = inject(ActivatedRoute);
@@ -457,6 +477,91 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
     });
   }
 
+  // ── App Library handlers ───────────────────────────────────────────────────
+
+  /**
+   * Handle file selection from the library upload input.
+   * Uploads the file to the user's app library.
+   * @param event The file input change event.
+   */
+  protected onLibraryUpload(event: Event): void {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    // Reset so the same file can be re-selected
+    input.value = '';
+
+    const platform = this.sessionPlatform();
+    this.api.uploadLibraryApp(platform, file).subscribe({
+      next: (response) => {
+        if (response.success && response.data) {
+          this.libraryApps.update(apps => [response.data!.app, ...apps]);
+          this.toast.success(`Added ${file.name} to library`);
+        } else {
+          this.toast.error(response.error?.message ?? 'Upload failed');
+        }
+      },
+      error: (err: unknown) => {
+        this.toast.error(err instanceof Error ? err.message : 'Upload failed');
+      },
+    });
+  }
+
+  /**
+   * Install a library app onto the current session's simulator/emulator.
+   * @param app The library app to install.
+   */
+  protected onInstallLibraryApp(app: LibraryApp): void {
+    const currentSession = this.session();
+    if (!currentSession) return;
+
+    this.installingAppId.set(app.id);
+    this.api.installLibraryApp(app.id, currentSession.id).subscribe({
+      next: (response) => {
+        this.installingAppId.set('');
+        if (response.success) {
+          this.toast.success(`Installed ${app.fileName}`);
+        } else {
+          this.toast.error(response.error?.message ?? 'Install failed');
+        }
+      },
+      error: (err: unknown) => {
+        this.installingAppId.set('');
+        this.toast.error(err instanceof Error ? err.message : 'Install failed');
+      },
+    });
+  }
+
+  /**
+   * Remove an app from the user's library.
+   * @param app The library app to delete.
+   */
+  protected onDeleteLibraryApp(app: LibraryApp): void {
+    this.api.deleteLibraryApp(app.id).subscribe({
+      next: (response) => {
+        if (response.success) {
+          this.libraryApps.update(apps => apps.filter(a => a.id !== app.id));
+          this.toast.success(`Removed ${app.fileName}`);
+        } else {
+          this.toast.error(response.error?.message ?? 'Delete failed');
+        }
+      },
+      error: (err: unknown) => {
+        this.toast.error(err instanceof Error ? err.message : 'Delete failed');
+      },
+    });
+  }
+
+  /**
+   * Format a byte count into a human-readable string (B / KB / MB).
+   * @param bytes The file size in bytes.
+   */
+  protected formatFileSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
   // ── Private helpers ────────────────────────────────────────────────────────
 
   /** Re-focus the simulator canvas so keyboard events continue working after a control action. */
@@ -589,6 +694,8 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
       next: (response) => {
         if (!response.success || !response.data) return;
         this.session.set(response.data.session);
+        // Load library once we know the platform from the first session response
+        this.loadLibraryApps(response.data.session.device.platform);
         if (response.data.session.status === 'active' && response.data.session.streamUrl) {
           this.streamMode.set(this.determineStreamMode(response.data.session));
           this.loading.set(false);
@@ -615,5 +722,24 @@ export class SimulatorSessionComponent implements OnInit, OnDestroy {
    */
   private isTerminalStatus(status: SessionStatus): boolean {
     return status === 'terminated' || status === 'terminating' || status === 'error';
+  }
+
+  /**
+   * Fetch the user's library apps for the given platform and populate the list.
+   * @param platform The platform to filter apps by.
+   */
+  private loadLibraryApps(platform?: Platform): void {
+    this.libraryLoading.set(true);
+    this.api.getLibraryApps(platform).subscribe({
+      next: (response) => {
+        this.libraryLoading.set(false);
+        if (response.success && response.data) {
+          this.libraryApps.set(response.data.apps);
+        }
+      },
+      error: () => {
+        this.libraryLoading.set(false);
+      },
+    });
   }
 }
