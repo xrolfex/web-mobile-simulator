@@ -62,6 +62,11 @@ fi
 # --- Setup directories ---
 mkdir -p "$PID_DIR" "$LOG_DIR"
 
+# --- Rebuild native modules (ensures correct Node.js ABI) ---
+info "Rebuilding native modules…"
+cd "$PROJECT_ROOT"
+pnpm rebuild better-sqlite3 > /dev/null 2>&1 && ok "Native modules rebuilt" || warn "Native module rebuild failed — check manually"
+
 # --- Start API server ---
 info "Starting API server (port $API_PORT)…"
 

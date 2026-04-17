@@ -219,6 +219,7 @@
 
 .dialog__footer {
   display: flex;
+  flex-wrap: nowrap;
   justify-content: flex-end;
   gap: 0.75rem;
   padding: 1rem 1.5rem;
@@ -249,7 +250,9 @@
     background: var(--color-surface-raised);
     color: var(--color-text-muted);
     border: 1px solid var(--color-border);
-    transition: all var(--transition-fast);
+    white-space: nowrap;
+    flex-shrink: 0;
+    transition: color var(--transition-fast), background var(--transition-fast), box-shadow var(--transition-fast);
 
     &:hover:not(:disabled) {
       color: var(--color-text-primary);
@@ -259,7 +262,9 @@
   &--launch {
     background: var(--color-accent);
     color: #fff;
-    transition: all var(--transition-fast);
+    min-width: 110px;
+    white-space: nowrap;
+    transition: background var(--transition-fast), box-shadow var(--transition-fast);
 
     &:hover:not(:disabled) {
       background: var(--color-accent-hover);

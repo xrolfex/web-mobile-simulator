@@ -21,25 +21,10 @@
   <!-- ── Screen area ───────────────────────────────────────────────────── -->
   <div class="device-bezel__screen">
 
-    <!-- iOS Dynamic Island -->
-    @if (platform === 'ios') {
-      <div class="device-bezel__dynamic-island" aria-hidden="true"></div>
-    }
-
-    <!-- Android punch-hole camera -->
-    @if (platform === 'android') {
-      <div class="device-bezel__camera-hole" aria-hidden="true"></div>
-    }
-
     <!-- Projected content (canvas, overlays, etc.) -->
     <div class="device-bezel__content">
       <ng-content></ng-content>
     </div>
-
-    <!-- iOS home indicator bar -->
-    @if (platform === 'ios') {
-      <div class="device-bezel__home-indicator" aria-hidden="true"></div>
-    }
 
   </div><!-- /.device-bezel__screen -->
 

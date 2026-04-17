@@ -28,6 +28,20 @@ interface SimctlDeviceType {
   productFamily: string;
 }
 
+/**
+ * Shape of a single entry in the dict returned by `xcrun simctl runtime list -j`.
+ * The dict is keyed by a friendly version string (e.g. `"iOS 18.2"`); the actual
+ * reverse-DNS runtime identifier lives inside the value object.
+ */
+interface SimctlRuntimeListEntry {
+  /** Reverse-DNS identifier, e.g. "com.apple.CoreSimulator.SimRuntime.iOS-18-2". */
+  runtimeIdentifier?: string;
+  /** Lifecycle state string, e.g. "Installed", "NotInstalled". */
+  state?: string;
+  /** Download size in bytes. */
+  sizeBytes?: number;
+}
+
 /** A runtime entry from `xcrun simctl list runtimes -j`. */
 interface SimctlRuntime {
   /** Human-readable name, e.g. "iOS 17.5". */
@@ -2373,19 +2387,26 @@ export class IOSSimulatorService {
         XCRUN_EXEC_OPTIONS,
       );
 
-      availableRuntimes = Object.keys(downloadableDict)
+      availableRuntimes = Object.entries(downloadableDict)
         // Keep only iOS entries.
-        .filter((versionKey) => versionKey.startsWith('iOS '))
+        .filter(([versionKey]) => versionKey.startsWith('iOS '))
         // Exclude runtimes that are already installed.
-        .filter((versionKey) => !installedVersionNames.has(versionKey))
-        .map((versionKey): Runtime => ({
-          // Use a stable, URL-safe id that won't collide with installed identifiers.
-          id: `available-${versionKey.replace(/\s+/g, '-')}`,
-          platform: 'ios',
-          version: versionKey,        // e.g. "iOS 18.2"
-          identifier: versionKey,     // `simctl runtime add` accepts this form
-          status: 'available',
-        }));
+        .filter(([versionKey]) => !installedVersionNames.has(versionKey))
+        .map(([versionKey, entry]): Runtime => {
+          const entryTyped = entry as SimctlRuntimeListEntry;
+          // Prefer the proper reverse-DNS identifier from inside the value object;
+          // fall back to the friendly version key if the field is absent.
+          const runtimeIdentifier =
+            entryTyped.runtimeIdentifier ?? versionKey;
+          return {
+            // Use a stable, URL-safe id that won't collide with installed identifiers.
+            id: `available-${versionKey.replace(/\s+/g, '-')}`,
+            platform: 'ios',
+            version: versionKey,          // e.g. "iOS 18.2"
+            identifier: runtimeIdentifier, // e.g. "com.apple.CoreSimulator.SimRuntime.iOS-18-2"
+            status: 'available',
+          };
+        });
     } catch (error: unknown) {
       // `simctl runtime list` is not available on older Xcode versions — skip.
       warn(
@@ -2655,27 +2676,34 @@ export class IOSSimulatorService {
     await this.assertSimctlAvailable();
 
     // `xcrun simctl runtime add` was added in Xcode 14 / simctl 800.
-    // We attempt it first and fall back to xcodebuild on failure.
-    try {
-      await exec(SIMCTL, ['simctl', 'runtime', 'add', identifier], XCRUN_EXEC_OPTIONS);
-      log(`Runtime download initiated via simctl for: ${identifier}`);
-    } catch (simctlError: unknown) {
-      warn(
-        `simctl runtime add failed (${String(simctlError)}); ` +
-          `falling back to xcodebuild -downloadPlatform iOS`,
-      );
-      try {
-        await exec('xcodebuild', ['-downloadPlatform', 'iOS'], XCRUN_EXEC_OPTIONS);
-        log('Runtime download initiated via xcodebuild.');
-      } catch (xcodebuildError: unknown) {
-        throw new Error(
-          `Failed to download runtime "${identifier}".\n` +
-            `simctl error:     ${String(simctlError)}\n` +
-            `xcodebuild error: ${String(xcodebuildError)}`,
-          { cause: xcodebuildError },
-        );
-      }
-    }
+    // This is intentionally fire-and-forget: downloads take 5–15+ minutes,
+    // so we spawn the process detached and return immediately rather than
+    // awaiting completion (which would hang the HTTP request).
+    const child = spawn(
+      SIMCTL,
+      ['simctl', 'runtime', 'add', identifier],
+      {
+        env: XCRUN_EXEC_OPTIONS.env as NodeJS.ProcessEnv,
+        detached: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+
+    child.stdout?.on('data', (d: Buffer) =>
+      log(`[runtime download] ${d.toString().trim()}`),
+    );
+    child.stderr?.on('data', (d: Buffer) =>
+      log(`[runtime download] stderr: ${d.toString().trim()}`),
+    );
+    child.on('close', (code: number | null) =>
+      log(`[runtime download] exited with code ${code}`),
+    );
+
+    // Detach the child from this process so it survives if the API server
+    // restarts, and prevent Node from waiting for it to exit.
+    child.unref();
+
+    log(`Runtime download spawned (fire-and-forget) for: ${identifier}`);
   }
 
   // -------------------------------------------------------------------------

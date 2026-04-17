@@ -68,8 +68,8 @@ type DownloadRequest = FastifyRequest<{ Body: RuntimeDownloadRequest }>;
  * - GET  /api/runtimes/:platform  — List runtimes for a specific platform
  * - POST /api/runtimes/download   — Initiate a runtime/system-image download
  *
- * NOTE: The download routes currently run synchronously.  Progress reporting
- * via WebSocket events will be added in a subsequent iteration.
+ * NOTE: iOS runtime downloads are fire-and-forget (spawned background process).
+ * Progress reporting via WebSocket events will be added in a subsequent iteration.
  */
 const runtimeRoutes: FastifyPluginAsync = async (fastify) => {
   /**
@@ -214,6 +214,9 @@ const runtimeRoutes: FastifyPluginAsync = async (fastify) => {
       // --- Dispatch to the appropriate service ---
       try {
         if (platform === 'ios') {
+          // downloadRuntime() is non-blocking (fire-and-forget spawn).
+          // We still await the Promise so any synchronous setup errors
+          // (e.g. simctl not found) are caught and returned as 502.
           await iosSimulatorService.downloadRuntime(cleanIdentifier);
         } else {
           await androidEmulatorService.installSystemImage(cleanIdentifier);

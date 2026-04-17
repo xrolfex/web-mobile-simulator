@@ -48,4 +48,4 @@ export const ALLOWED_APP_EXTENSIONS: Record<'ios' | 'android', string[]> = {
  * Per (deviceTypeId, runtimeId) combination.
  * Env: `IOS_WARM_POOL_SIZE`.
  */
-export const DEFAULT_IOS_WARM_POOL_SIZE = 1;
+export const DEFAULT_IOS_WARM_POOL_SIZE = 0;

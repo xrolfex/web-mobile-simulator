@@ -5,8 +5,11 @@
   "type": "module",
   "main": "./dist/server.js",
   "scripts": {
+    "predev": "pnpm rebuild better-sqlite3",
     "dev": "lsof -ti:3000 | xargs kill 2>/dev/null; tsx watch --ignore '../../node_modules/**' --ignore 'node_modules/**' src/server.ts",
+    "prebuild": "pnpm rebuild better-sqlite3",
     "build": "tsc",
+    "prestart": "pnpm rebuild better-sqlite3",
     "start": "node dist/server.js",
     "lint": "eslint src/",
     "test": "vitest run",

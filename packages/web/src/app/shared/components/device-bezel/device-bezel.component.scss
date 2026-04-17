@@ -1,3 +1,5 @@
+@use 'sass:color';
+
 // ── Device Bezel Component ────────────────────────────────────────────────────
 //
 // Pure-CSS device frames for iPhone 15 Pro (iOS) and Pixel 8 (Android).
@@ -7,17 +9,19 @@
 // ─────────────
 // .device-bezel            — outer shell (the physical body of the phone)
 //   .device-bezel__btn     — hardware buttons (iOS only, absolutely positioned)
-//   .device-bezel__screen  — inset screen area (clips content, holds notch/camera)
-//     .device-bezel__dynamic-island  — iOS Dynamic Island pill
-//     .device-bezel__camera-hole     — Android punch-hole camera
-//     .device-bezel__content         — ng-content projection slot
-//     .device-bezel__home-indicator  — iOS home indicator bar
+//   .device-bezel__screen  — inset screen area (clips content)
+//     .device-bezel__content — ng-content projection slot
 //
 // Sizing strategy
 // ───────────────
 // The bezel uses padding to create the physical border around the screen.
 // The screen area grows to fit whatever content is projected into it.
 // This means the bezel scales with the canvas — no fixed heights needed.
+//
+// Note: Dynamic Island, camera punch-hole, and home indicator are NOT rendered
+// here as CSS elements. The simulator stream already renders those UI elements
+// as part of the screen bitmap content, so adding them in CSS would duplicate
+// them visually and offset the status-bar text position.
 
 // ── Shared tokens ─────────────────────────────────────────────────────────────
 
@@ -28,20 +32,17 @@ $ios-body-border:    #1a1a1e;
 $ios-button-color:   #222226;
 $ios-button-border:  #111114;
 $ios-screen-bg:      #000;
-$ios-island-color:   #0a0a0a;
-$ios-home-bar:       rgba(255, 255, 255, 0.35);
 
 // Pixel 8 — Obsidian (matte black) palette
 $android-body-bg:       #1a1a1a;
 $android-body-bg-light: #252525;
 $android-body-border:   #0d0d0d;
 $android-screen-bg:     #000;
-$android-camera-color:  #0a0a0a;
 
 // ── Host ──────────────────────────────────────────────────────────────────────
 
 :host {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   justify-content: center;
 }
@@ -56,6 +57,8 @@ $android-camera-color:  #0a0a0a;
   // Prevent the bezel from ever overflowing its parent
   max-width: 100%;
   max-height: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
 
   // ── iOS — iPhone 15 Pro ───────────────────────────────────────────────────
 
@@ -65,7 +68,7 @@ $android-camera-color:  #0a0a0a;
       160deg,
       $ios-body-bg-light 0%,
       $ios-body-bg       40%,
-      darken($ios-body-bg, 4%) 100%
+      color.adjust($ios-body-bg, $lightness: -4%) 100%
     );
     border-radius: 55px;
     border: 1.5px solid $ios-body-border;
@@ -95,7 +98,7 @@ $android-camera-color:  #0a0a0a;
       160deg,
       $android-body-bg-light 0%,
       $android-body-bg       50%,
-      darken($android-body-bg, 3%) 100%
+      color.adjust($android-body-bg, $lightness: -3%) 100%
     );
     border-radius: 40px;
     border: 1.5px solid $android-body-border;
@@ -136,7 +139,6 @@ $android-camera-color:  #0a0a0a;
 // ── Content projection slot ───────────────────────────────────────────────────
 
 .device-bezel__content {
-  flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -145,80 +147,9 @@ $android-camera-color:  #0a0a0a;
 
   // Allow projected canvas/content to fill the screen area
   min-width: 0;
-  min-height: 0;
 
   // Pass through pointer events to the projected content
   pointer-events: auto;
-}
-
-// ── iOS Dynamic Island ────────────────────────────────────────────────────────
-
-.device-bezel__dynamic-island {
-  // Pill-shaped cutout at the top center of the screen
-  position: relative;
-  flex-shrink: 0;
-  align-self: center;
-  margin-top: 10px;
-  margin-bottom: 6px;
-
-  width: 30%;
-  max-width: 120px;
-  min-width: 80px;
-  height: 34px;
-
-  background: $ios-island-color;
-  border-radius: 20px;
-
-  // Subtle inner glow to simulate the sensor array depth
-  box-shadow:
-    inset 0 1px 3px rgba(0, 0, 0, 0.9),
-    0 0 0 1px rgba(0, 0, 0, 0.6);
-
-  // Pointer events: none — it's purely decorative
-  pointer-events: none;
-}
-
-// ── Android punch-hole camera ─────────────────────────────────────────────────
-
-.device-bezel__camera-hole {
-  position: relative;
-  flex-shrink: 0;
-  align-self: center;
-  margin-top: 10px;
-  margin-bottom: 6px;
-
-  width: 12px;
-  height: 12px;
-
-  background: $android-camera-color;
-  border-radius: 50%;
-
-  box-shadow:
-    inset 0 1px 2px rgba(0, 0, 0, 0.9),
-    0 0 0 1.5px rgba(255, 255, 255, 0.04),
-    0 0 0 1px rgba(0, 0, 0, 0.8);
-
-  pointer-events: none;
-}
-
-// ── iOS Home Indicator ────────────────────────────────────────────────────────
-
-.device-bezel__home-indicator {
-  position: relative;
-  flex-shrink: 0;
-  align-self: center;
-  margin-bottom: 8px;
-  margin-top: 6px;
-
-  width: 34%;
-  max-width: 130px;
-  min-width: 80px;
-  height: 5px;
-
-  background: $ios-home-bar;
-  border-radius: 3px;
-
-  pointer-events: none;
 }
 
 // ── iOS Hardware Buttons ──────────────────────────────────────────────────────

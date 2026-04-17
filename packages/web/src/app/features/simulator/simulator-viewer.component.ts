@@ -90,6 +90,10 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
   @ViewChild('displayCanvas')
   private readonly canvasRef!: ElementRef<HTMLCanvasElement>;
 
+  /** @ViewChild reference to the bezel stage container used for ResizeObserver-based scaling. */
+  @ViewChild('bezelStage')
+  private readonly bezelStageRef!: ElementRef<HTMLDivElement>;
+
   // ── Public signals (template-accessible) ─────────────────────────────────
 
   /** Current connection state, exposed to the template as a signal. */
@@ -132,6 +136,9 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
   // FPS tracking
   private frameCount = 0;
   private fpsInterval: ReturnType<typeof setInterval> | null = null;
+
+  /** ResizeObserver that re-applies scale when the bezel stage container resizes. */
+  private resizeObserver: ResizeObserver | null = null;
 
   /**
    * Minimum pointer displacement (in CSS pixels) required to classify
@@ -211,6 +218,15 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
         this.frameCount = 0;
       }, 1000);
     }
+
+    // Set up ResizeObserver to re-apply scale when the stage container resizes
+    const stageEl = this.bezelStageRef?.nativeElement;
+    if (stageEl && typeof ResizeObserver !== 'undefined') {
+      this.resizeObserver = new ResizeObserver(() => {
+        this.ngZone.run(() => this.applyScaleMode());
+      });
+      this.resizeObserver.observe(stageEl);
+    }
   }
 
   ngOnDestroy(): void {
@@ -219,6 +235,8 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
       clearInterval(this.fpsInterval);
       this.fpsInterval = null;
     }
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
   }
 
   // ── Template event handlers ────────────────────────────────────────────────
@@ -651,30 +669,73 @@ export class SimulatorViewerComponent implements AfterViewInit, OnDestroy {
   /**
    * Apply the current scale mode to the canvas display element.
    *
-   * In `'auto'` mode, CSS handles scaling via `max-width`/`max-height`.
-   * In fixed modes (`1x`, `0.75x`, `0.5x`), a CSS `transform: scale()` is applied.
+   * In `'auto'` mode, computes the largest scale at which the canvas fits
+   * entirely within the bezel stage (maintaining aspect ratio) and sets
+   * the canvas CSS width/height explicitly. The bezel (inline-flex, content-sized)
+   * automatically wraps around the scaled canvas.
+   *
+   * In fixed modes (`1x`, `0.75x`, `0.5x`), scales relative to the auto-fit
+   * size so the canvas always starts from a "fits in viewport" baseline.
    */
   private applyScaleMode(): void {
     const el = this.canvasRef?.nativeElement;
     if (!el) return;
 
-    const mode = this.scaleMode();
+    const frameW = this.frameWidth();
+    const frameH = this.frameHeight();
 
-    if (mode === 'auto') {
-      el.style.transform = '';
-      el.style.transformOrigin = '';
+    // Nothing to scale until we have frame dimensions
+    if (frameW <= 0 || frameH <= 0) {
       el.style.width = '';
       el.style.height = '';
-    } else {
-      const scaleFactors: Record<ScaleMode, number> = {
-        auto: 1,
-        '1x': 1,
-        '0.75x': 0.75,
-        '0.5x': 0.5,
-      };
-      const scale = scaleFactors[mode];
-      el.style.transformOrigin = 'top left';
-      el.style.transform = `scale(${scale})`;
+      el.style.transform = '';
+      el.style.transformOrigin = '';
+      return;
     }
+
+    const stageEl = this.bezelStageRef?.nativeElement;
+    if (!stageEl) return;
+
+    // Available canvas area = stage content area minus:
+    //   - stage padding: 24px top + 24px bottom = 48px, 16px left + 16px right = 32px
+    //   - bezel chrome: only the physical bezel padding, since DI / camera-hole /
+    //     home-indicator are rendered by the simulator stream (not CSS elements).
+    //     iOS:     top 12px + bottom 12px + 1.5px border×2 ≈ 27px  → 32px with safety margin
+    //     Android: top 14px + bottom 8px  + 1.5px border×2 ≈ 25px  → 32px with safety margin
+    //     Horizontal (iOS): left 8px + right 8px + border×2 ≈ 19px → 22px with safety margin
+    const STAGE_PADDING_H = 32;  // horizontal
+    const STAGE_PADDING_V = 48;  // vertical
+    const BEZEL_CHROME_H  = 32;  // fixed bezel chrome height (bezel padding only, no DI/home-bar)
+    const BEZEL_CHROME_W  = 22;  // fixed bezel chrome width  (left + right bezel padding)
+
+    const availW = stageEl.clientWidth  - STAGE_PADDING_H - BEZEL_CHROME_W;
+    const availH = stageEl.clientHeight - STAGE_PADDING_V - BEZEL_CHROME_H;
+
+    if (availW <= 0 || availH <= 0) return;
+
+    // Scale to fit: the largest multiplier where the canvas fits in both dimensions
+    const fitScale = Math.min(availW / frameW, availH / frameH, 1.0);
+
+    const mode = this.scaleMode();
+
+    const scaleFactors: Record<ScaleMode, number> = {
+      auto:   1.0,
+      '1x':   1.0,
+      '0.75x': 0.75,
+      '0.5x':  0.5,
+    };
+
+    // In auto mode use fitScale directly; in fixed modes multiply against fitScale
+    // so the user gets a predictable fraction of the "fits in viewport" size.
+    const finalScale = mode === 'auto'
+      ? fitScale
+      : fitScale * scaleFactors[mode];
+
+    // Set explicit CSS dimensions — this drives the bezel to auto-size around it.
+    // Clear any leftover CSS transform from previous calls.
+    el.style.transform = '';
+    el.style.transformOrigin = '';
+    el.style.width  = `${Math.round(frameW * finalScale)}px`;
+    el.style.height = `${Math.round(frameH * finalScale)}px`;
   }
 }

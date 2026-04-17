@@ -47,14 +47,14 @@ Web Mobile Simulator is a self-hosted platform that runs iOS Simulators and Andr
 
 ## Prerequisites
 
-| Requirement | Version | Notes |
-|---|---|---|
-| **macOS** | 13+ | Required to run iOS Simulator and Android Emulator (Hypervisor framework) |
-| **Xcode** | 15+ | Provides `xcrun simctl` and iOS Simulator runtimes |
-| **Android Studio** or **Android SDK CLI** | Latest | Provides `adb`, `avdmanager`, `sdkmanager`, `emulator` |
-| **Node.js** | 24.x | Pinned via `.nvmrc` and enforced in `engines` |
-| **pnpm** | ≥ 9.0.0 | Workspace manager; install via `npm i -g pnpm` |
-| **Docker Desktop for Mac** | Latest | Required for containerised deployment |
+| Requirement                               | Version | Notes                                                                     |
+| ----------------------------------------- | ------- | ------------------------------------------------------------------------- |
+| **macOS**                                 | 13+     | Required to run iOS Simulator and Android Emulator (Hypervisor framework) |
+| **Xcode**                                 | 15+     | Provides `xcrun simctl` and iOS Simulator runtimes                        |
+| **Android Studio** or **Android SDK CLI** | Latest  | Provides `adb`, `avdmanager`, `sdkmanager`, `emulator`                    |
+| **Node.js**                               | 24.x    | Pinned via `.nvmrc` and enforced in `engines`                             |
+| **pnpm**                                  | ≥ 9.0.0 | Workspace manager; install via `npm i -g pnpm`                            |
+| **Docker Desktop for Mac**                | Latest  | Required for containerised deployment                                     |
 
 > **Note:** iOS Simulators cannot run in Docker or Linux — they require direct access to macOS and the Xcode toolchain. All simulator/emulator processes run on the host. In production, the API, web, and nginx are all containerised; in development, only the Angular dev server and nginx run in Docker while the API runs directly on the host.
 
@@ -77,11 +77,11 @@ pnpm install
 ./scripts/dev.sh
 ```
 
-| Service | URL |
-|---|---|
-| App (via nginx) | http://localhost:8080 |
-| Fastify API (host) | http://localhost:3000 |
-| Health check | http://localhost:3000/api/health |
+| Service            | URL                              |
+| ------------------ | -------------------------------- |
+| App (via nginx)    | http://localhost:8080            |
+| Fastify API (host) | http://localhost:3000            |
+| Health check       | http://localhost:3000/api/health |
 
 ---
 
@@ -252,27 +252,27 @@ For full data-flow diagrams, container architecture, and architectural decision 
 
 ### REST
 
-| Method | Path | Status | Description |
-|---|---|---|---|
-| `GET` | `/api/health` | ✅ Implemented | Server status, uptime, version |
-| `POST` | `/api/sessions` | 🔲 Stub | Create a new simulator session |
-| `GET` | `/api/sessions` | 🔲 Stub | List all active sessions |
-| `GET` | `/api/sessions/:id` | 🔲 Stub | Get session details |
-| `DELETE` | `/api/sessions/:id` | 🔲 Stub | Terminate a session |
-| `GET` | `/api/devices` | 🔲 Stub | List all device types (iOS + Android) |
-| `GET` | `/api/devices/:platform` | 🔲 Stub | List device types for `ios` or `android` |
-| `GET` | `/api/runtimes` | 🔲 Stub | List all runtimes (installed + available) |
-| `GET` | `/api/runtimes/:platform` | 🔲 Stub | List runtimes for `ios` or `android` |
-| `POST` | `/api/runtimes/download` | 🔲 Stub | Initiate a background runtime download |
+| Method   | Path                      | Status         | Description                               |
+| -------- | ------------------------- | -------------- | ----------------------------------------- |
+| `GET`    | `/api/health`             | ✅ Implemented | Server status, uptime, version            |
+| `POST`   | `/api/sessions`           | 🔲 Stub        | Create a new simulator session            |
+| `GET`    | `/api/sessions`           | 🔲 Stub        | List all active sessions                  |
+| `GET`    | `/api/sessions/:id`       | 🔲 Stub        | Get session details                       |
+| `DELETE` | `/api/sessions/:id`       | 🔲 Stub        | Terminate a session                       |
+| `GET`    | `/api/devices`            | 🔲 Stub        | List all device types (iOS + Android)     |
+| `GET`    | `/api/devices/:platform`  | 🔲 Stub        | List device types for `ios` or `android`  |
+| `GET`    | `/api/runtimes`           | 🔲 Stub        | List all runtimes (installed + available) |
+| `GET`    | `/api/runtimes/:platform` | 🔲 Stub        | List runtimes for `ios` or `android`      |
+| `POST`   | `/api/runtimes/download`  | 🔲 Stub        | Initiate a background runtime download    |
 
 Stub endpoints return `501 NOT_IMPLEMENTED` with an `ApiResponse<never>` error body.
 
 ### WebSocket
 
-| Path | Description |
-|---|---|
+| Path         | Description                                                             |
+| ------------ | ----------------------------------------------------------------------- |
 | `/ws/events` | Server-sent events: session state changes, device state changes, errors |
-| `/ws/vnc` | VNC stream proxy for active iOS Simulator sessions (via websockify) |
+| `/ws/vnc`    | VNC stream proxy for active iOS Simulator sessions (via websockify)     |
 
 ### Response envelope
 
@@ -294,20 +294,20 @@ interface ApiResponse<T> {
 
 ## Technology Stack
 
-| Technology | Version | Role |
-|---|---|---|
-| **Angular** | 21.2.x | SPA frontend — standalone components, Signals, OnPush, `@if`/`@for` |
-| **Fastify** | 5.x | REST + WebSocket API backend |
-| **TypeScript** | 5.7 / 5.9 | Language for both API and frontend |
-| **noVNC** | Latest | Browser-side VNC viewer for iOS Simulator streaming |
-| **websockify** | Latest | Bridges VNC TCP → WebSocket on the macOS host |
-| **scrcpy** | Latest | Android Emulator display capture and input injection |
-| **SQLite** | — | Session and device state persistence |
-| **Drizzle ORM** | Latest | Type-safe schema, queries, and migrations for SQLite |
-| **Docker** | — | Containerises nginx and the Angular build (all services in production) |
-| **nginx** | latest (Alpine) | Reverse proxy — static serving, gzip compression, WebSocket proxy, SPA fallback |
-| **pnpm** | 9+ | Monorepo package manager with workspaces |
-| **Vitest** | 4.x | Unit testing for the Angular package |
+| Technology      | Version         | Role                                                                            |
+| --------------- | --------------- | ------------------------------------------------------------------------------- |
+| **Angular**     | 21.2.x          | SPA frontend — standalone components, Signals, OnPush, `@if`/`@for`             |
+| **Fastify**     | 5.x             | REST + WebSocket API backend                                                    |
+| **TypeScript**  | 5.7 / 5.9       | Language for both API and frontend                                              |
+| **noVNC**       | Latest          | Browser-side VNC viewer for iOS Simulator streaming                             |
+| **websockify**  | Latest          | Bridges VNC TCP → WebSocket on the macOS host                                   |
+| **scrcpy**      | Latest          | Android Emulator display capture and input injection                            |
+| **SQLite**      | —               | Session and device state persistence                                            |
+| **Drizzle ORM** | Latest          | Type-safe schema, queries, and migrations for SQLite                            |
+| **Docker**      | —               | Containerises nginx and the Angular build (all services in production)          |
+| **nginx**       | latest (Alpine) | Reverse proxy — static serving, gzip compression, WebSocket proxy, SPA fallback |
+| **pnpm**        | 9+              | Monorepo package manager with workspaces                                        |
+| **Vitest**      | 4.x             | Unit testing for the Angular package                                            |
 
 ---
 
