@@ -238,4 +238,37 @@ export class ApiService {
       request,
     );
   }
+
+  // ── Admin ──────────────────────────────────────────────────────────────────
+
+  /**
+   * Retrieve all sessions (all statuses) with capacity info — admin view.
+   * GET /api/admin/sessions
+   */
+  getAdminSessions() {
+    return this.http.get<ApiResponse<SessionListResponse>>(
+      `${this.baseUrl}/api/admin/sessions`,
+    );
+  }
+
+  /**
+   * Clear terminated and error sessions from history.
+   * DELETE /api/admin/sessions/history
+   */
+  clearSessionHistory() {
+    return this.http.delete<ApiResponse<{ message: string; count: number }>>(
+      `${this.baseUrl}/api/admin/sessions/history`,
+    );
+  }
+
+  /**
+   * Force-purge a single session regardless of its current state.
+   * DELETE /api/admin/sessions/:id
+   * @param id The session UUID to purge.
+   */
+  forcePurgeSession(id: string) {
+    return this.http.delete<ApiResponse<{ message: string }>>(
+      `${this.baseUrl}/api/admin/sessions/${id}`,
+    );
+  }
 }

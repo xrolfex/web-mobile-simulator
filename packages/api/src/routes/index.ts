@@ -7,6 +7,7 @@ import wsEventsRoutes from './ws-events.js';
 import wsStreamRoutes from './ws-stream.js';
 import appRoutes from './apps.js';
 import deviceControlRoutes from './device-control.js';
+import adminRoutes from './admin.js';
 
 /**
  * Registers all API route plugins on the provided Fastify instance.
@@ -22,4 +23,5 @@ export async function registerRoutes(fastify: FastifyInstance): Promise<void> {
   await fastify.register(wsStreamRoutes);
   await fastify.register(appRoutes);
   await fastify.register(deviceControlRoutes);
+  await fastify.register(adminRoutes);
 }

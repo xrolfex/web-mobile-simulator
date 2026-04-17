@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { getDb, schema } from './index.js';
 import type {
   Session,
@@ -115,6 +115,35 @@ export class SessionRepository {
       .from(schema.sessions)
       .all()
       .map((row) => this.rowToSession(row));
+  }
+
+  /**
+   * Delete a single session row from the database by its ID.
+   *
+   * @param id - The session UUID to delete.
+   */
+  deleteById(id: string): void {
+    getDb()
+      .delete(schema.sessions)
+      .where(eq(schema.sessions.id, id))
+      .run();
+  }
+
+  /**
+   * Delete all session rows whose status matches any of the given values.
+   *
+   * @param statuses - Array of {@link SessionStatus} values to match against.
+   * @returns The number of rows deleted.
+   */
+  deleteByStatuses(statuses: SessionStatus[]): number {
+    if (statuses.length === 0) return 0;
+
+    const result = getDb()
+      .delete(schema.sessions)
+      .where(inArray(schema.sessions.status, statuses))
+      .run();
+
+    return result.changes;
   }
 
   // -------------------------------------------------------------------------

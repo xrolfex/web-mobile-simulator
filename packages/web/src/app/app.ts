@@ -1,4 +1,4 @@
-import { Component } from '@angular/core';
+import { Component, signal } from '@angular/core';
 import { RouterOutlet, RouterLink, RouterLinkActive } from '@angular/router';
 import { ToastContainerComponent } from './shared/toast/toast-container.component';
 
@@ -17,4 +17,17 @@ import { ToastContainerComponent } from './shared/toast/toast-container.componen
   templateUrl: './app.html',
   styleUrl: './app.scss',
 })
-export class App {}
+export class App {
+  /** Whether the mobile sidebar drawer is currently open. */
+  readonly sidebarOpen = signal(false);
+
+  /** Toggles the mobile sidebar open/closed. */
+  toggleSidebar(): void {
+    this.sidebarOpen.update(open => !open);
+  }
+
+  /** Closes the mobile sidebar (used by backdrop click and nav link click). */
+  closeSidebar(): void {
+    this.sidebarOpen.set(false);
+  }
+}

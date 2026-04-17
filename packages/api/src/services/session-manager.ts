@@ -449,6 +449,94 @@ export class SessionManagerService {
   }
 
   /**
+   * Force-remove a session from both the in-memory Map and the database,
+   * regardless of its current status.
+   *
+   * Intended for cleaning up dangling sessions in `error` or `terminated`
+   * state that cannot be stopped through the normal termination flow.  If the
+   * session is `active` or `creating`, screen capture is stopped and a
+   * best-effort device teardown is attempted before deletion.
+   *
+   * @param id - ID of the session to purge.
+   * @throws If no session with the given ID exists (in-memory or DB).
+   */
+  async forcePurgeSession(id: string): Promise<void> {
+    const session = this.sessions.get(id);
+    if (!session) {
+      // Confirm it exists in the DB before throwing.
+      let exists = false;
+      try {
+        exists = sessionRepository.findById(id) !== null;
+      } catch {
+        // DB unavailable — treat as not found.
+      }
+      if (!exists) {
+        throw new Error(`Session not found: ${id}`);
+      }
+      // Session is only in the DB (already evicted from memory) — just delete it.
+      try {
+        sessionRepository.deleteById(id);
+      } catch (err: unknown) {
+        warn(`forcePurgeSession: failed to delete session ${id} from database: ${String(err)}`);
+      }
+      log(`Force-purged session ${id} (DB only).`);
+      return;
+    }
+
+    // If the session is still active/creating, stop capture and tear down the device.
+    if (session.status === 'active' || session.status === 'creating') {
+      screenCaptureService.stopCapture(id);
+      await this.teardownDevice(session).catch((err: unknown) => {
+        warn(`forcePurgeSession: device teardown failed for session ${id}: ${String(err)}`);
+      });
+    }
+
+    this.sessions.delete(id);
+
+    try {
+      sessionRepository.deleteById(id);
+    } catch (err: unknown) {
+      warn(`forcePurgeSession: failed to delete session ${id} from database: ${String(err)}`);
+    }
+
+    log(`Force-purged session ${id}.`);
+  }
+
+  /**
+   * Remove all sessions with status `terminated` or `error` from both the
+   * in-memory Map and the database.
+   *
+   * @returns The total number of sessions removed.
+   */
+  clearHistory(): number {
+    const idsToRemove: string[] = [];
+
+    for (const [id, session] of this.sessions) {
+      if (session.status === 'terminated' || session.status === 'error') {
+        idsToRemove.push(id);
+      }
+    }
+
+    for (const id of idsToRemove) {
+      this.sessions.delete(id);
+    }
+
+    let dbDeleted = 0;
+    try {
+      dbDeleted = sessionRepository.deleteByStatuses(['terminated', 'error']);
+    } catch (err: unknown) {
+      warn(`clearHistory: failed to delete sessions from database: ${String(err)}`);
+    }
+
+    // Return the larger of the two counts — the DB may hold sessions that were
+    // already evicted from memory, and the in-memory set may have sessions not
+    // yet flushed (edge case).
+    const count = Math.max(idsToRemove.length, dbDeleted);
+    log(`Cleared ${count} terminated/error session(s) from history.`);
+    return count;
+  }
+
+  /**
    * Return current session capacity information for monitoring and API responses.
    *
    * @returns Snapshot of active session counts vs. configured maximums.

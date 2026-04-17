@@ -1,0 +1,154 @@
+<div class="admin">
+  <!-- Page header -->
+  <header class="admin__header">
+    <div class="admin__header-left">
+      <h2 class="admin__title">Admin</h2>
+      <p class="admin__subtitle">Manage sessions and system resources</p>
+    </div>
+  </header>
+
+  <!-- Capacity info card -->
+  @if (capacity()) {
+    <section class="capacity-card" aria-label="Capacity overview">
+      <h3 class="section-title">Capacity</h3>
+      <div class="capacity-card__body">
+        <div class="capacity-stat">
+          <span class="capacity-stat__label">Active Sessions</span>
+          <span class="capacity-stat__value">{{ capacity()!.activeSessions }}</span>
+          @if (capacity()!.maxConcurrentSessions > 0) {
+            <span class="capacity-stat__max">/ {{ capacity()!.maxConcurrentSessions }}</span>
+          }
+        </div>
+
+        @if (capacity()!.maxConcurrentSessions > 0) {
+          <div class="capacity-bar-wrapper">
+            <div class="capacity-bar">
+              <div
+                class="capacity-bar__fill"
+                [style.width.%]="(capacity()!.activeSessions / capacity()!.maxConcurrentSessions) * 100"
+                [class.capacity-bar__fill--warning]="capacity()!.activeSessions >= capacity()!.maxConcurrentSessions * 0.8"
+                [class.capacity-bar__fill--full]="capacity()!.activeSessions >= capacity()!.maxConcurrentSessions"
+              ></div>
+            </div>
+          </div>
+        }
+
+        @if (platformEntries().length > 0) {
+          <div class="capacity-platforms">
+            @for (entry of platformEntries(); track entry.platform) {
+              <div class="capacity-platform">
+                <span class="capacity-platform__name">{{ entry.platform }}</span>
+                <span class="capacity-platform__count">{{ entry.active }}</span>
+                @if (entry.max > 0) {
+                  <span class="capacity-platform__max">/ {{ entry.max }}</span>
+                }
+              </div>
+            }
+          </div>
+        }
+      </div>
+    </section>
+  }
+
+  <!-- All sessions -->
+  <section class="sessions-section" aria-labelledby="admin-sessions-heading">
+    <div class="sessions-section__header">
+      <h3 id="admin-sessions-heading" class="section-title">All Sessions</h3>
+      <div class="bulk-actions">
+        <button
+          class="bulk-btn bulk-btn--secondary"
+          (click)="clearHistory()"
+          title="Remove all terminated and error sessions"
+        >
+          Clear History
+        </button>
+        <button
+          class="bulk-btn bulk-btn--default"
+          (click)="refresh()"
+          title="Reload session list"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="23 4 23 10 17 10"/>
+            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+          </svg>
+          Refresh
+        </button>
+      </div>
+    </div>
+
+    @if (loading()) {
+      <div class="sessions-loading" role="status" aria-live="polite">
+        <div class="spinner spinner--sm" aria-hidden="true"></div>
+        <span>Loading sessions…</span>
+      </div>
+    } @else if (sessions().length === 0) {
+      <div class="sessions-empty" role="status">
+        <svg class="sessions-empty__icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="5" y="2" width="14" height="20" rx="2" ry="2"/>
+          <line x1="12" y1="18" x2="12.01" y2="18"/>
+        </svg>
+        <p class="sessions-empty__text">No sessions found</p>
+        <p class="sessions-empty__hint">Sessions will appear here once created</p>
+      </div>
+    } @else {
+      <div class="sessions-table-wrapper">
+        <table class="sessions-table" aria-label="All simulator sessions">
+          <thead>
+            <tr>
+              <th>Device</th>
+              <th>Runtime</th>
+              <th>Status</th>
+              <th>Created</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (session of sessions(); track session.id) {
+              <tr class="sessions-table__row">
+                <td class="sessions-table__device">
+                  <span class="sessions-table__platform-icon" aria-hidden="true">
+                    @if (session.device.platform === 'ios') {
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/></svg>
+                    } @else {
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M17.6 9.48l1.84-3.18c.16-.31.04-.69-.27-.86-.31-.16-.69-.04-.86.27l-1.86 3.22c-1.15-.53-2.43-.83-3.77-.87h-.27c-1.34.04-2.62.34-3.77.87L6.79 5.71c-.16-.31-.54-.43-.86-.27-.31.16-.43.55-.27.86l1.84 3.18C4.67 11.11 2.84 14.09 2.5 17.5h19c-.34-3.41-2.17-6.39-4.9-8.02zM8.5 14.5c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1zm7 0c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1z"/></svg>
+                    }
+                  </span>
+                  <span class="sessions-table__device-name">{{ session.device.deviceType.modelName }}</span>
+                </td>
+                <td class="sessions-table__runtime">{{ session.device.runtime.version }}</td>
+                <td>
+                  <span
+                    class="status-badge"
+                    [class.status-badge--active]="session.status === 'active'"
+                    [class.status-badge--creating]="session.status === 'creating'"
+                    [class.status-badge--error]="session.status === 'error'"
+                    [class.status-badge--terminating]="session.status === 'terminating'"
+                    [class.status-badge--terminated]="session.status === 'terminated'"
+                  >
+                    {{ session.status }}
+                  </span>
+                </td>
+                <td class="sessions-table__created">{{ formatDate(session.createdAt) }}</td>
+                <td class="sessions-table__actions">
+                  <button
+                    class="action-btn action-btn--purge"
+                    (click)="forcePurge(session.id)"
+                    [disabled]="isPurging(session.id)"
+                    title="Force-purge this session"
+                    [attr.aria-label]="'Force purge session ' + session.id"
+                  >
+                    @if (isPurging(session.id)) {
+                      <span class="btn-spinner" aria-hidden="true"></span>
+                    } @else {
+                      Force Purge
+                    }
+                  </button>
+                </td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </div>
+    }
+  </section>
+</div>
