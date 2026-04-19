@@ -31,11 +31,15 @@ Web Mobile Simulator is a self-hosted platform that runs iOS Simulators and Andr
 - ✅ Fastify 5 API backend
 - ✅ Docker + nginx containerisation (reverse proxy, static file serving, WebSocket proxy)
 - ✅ Shared TypeScript types and constants across frontend and backend
-- ✅ iOS Simulator streaming via VNC + websockify + noVNC
-- ✅ Android Emulator streaming via scrcpy
+- ✅ iOS Simulator streaming via screenshot-based MJPEG and native H.264 encoding
+- ✅ Android Emulator streaming via scrcpy (H.264 NALU + WebCodecs decoding in browser)
+- ✅ Device control — hardware buttons, rotation, shake, clipboard, URL opening, text input, screenshots
+- ✅ App installation — upload and install .ipa/.apk files directly to running sessions
+- ✅ App library — persistent per-user app storage with install-to-session support
+- ✅ Admin endpoints — session history cleanup, force-purge, capacity monitoring
 - ✅ OS runtime management — browse, download, and install iOS/Android runtimes
 - ✅ Session lifecycle management with SQLite persistence via Drizzle ORM
-- ✅ Multi-session support with dynamic port allocation (VNC range: 6900–6999)
+- ✅ Multi-session support with dynamic port allocation
 - ✅ **Distributed master/worker mode** — scale across multiple Mac nodes with `NODE_MODE=standalone|master|worker`
 
 ---
@@ -92,22 +96,41 @@ web-mobile-simulator/
 │   │       ├── server.ts     # Entry point — mode-based startup/shutdown
 │   │       ├── config.ts     # Environment-driven config (port, paths, DB, VNC, distributed)
 │   │       ├── db/
-│   │       │   ├── schema.ts                    # Drizzle schema (sessions, session_worker_map)
-│   │       │   ├── migrate.ts                   # DDL runner at startup
-│   │       │   └── session-worker-map-repository.ts  # Master routing table CRUD
+│   │       │   ├── index.ts                       # DB barrel export
+│   │       │   ├── schema.ts                      # Drizzle schema (sessions, session_worker_map, app_library)
+│   │       │   ├── migrate.ts                     # DDL runner at startup
+│   │       │   ├── session-repository.ts          # Session CRUD
+│   │       │   ├── session-worker-map-repository.ts  # Master routing table CRUD
+│   │       │   └── app-library-repository.ts      # App library persistence
 │   │       ├── services/
-│   │       │   ├── worker-registry.ts           # Master-side worker registry
-│   │       │   ├── worker-registration.ts       # Worker-side registration + heartbeat
-│   │       │   └── session-router.ts            # Session routing + HTTP/WS proxy
-│   │       └── routes/
-│   │           ├── health.ts          # GET /api/health
-│   │           ├── sessions.ts        # Session CRUD (standalone / worker)
-│   │           ├── devices.ts         # Device inventory
-│   │           ├── runtimes.ts        # Runtime management
-│   │           ├── master-sessions.ts # POST/DELETE sessions (master mode)
-│   │           ├── master-proxy.ts    # HTTP + WS proxy to workers (master mode)
-│   │           ├── internal.ts        # /internal/workers/* registration + heartbeat
-│   │           └── index.ts           # Mode-based route registration
+│   │       │   ├── index.ts                       # Service barrel export
+│   │       │   ├── session-manager.ts             # Session lifecycle orchestration
+│   │       │   ├── ios-simulator.ts               # iOS Simulator control (simctl, touch, keys)
+│   │       │   ├── android-emulator.ts            # Android Emulator control (adb, emulator CLI)
+│   │       │   ├── screen-capture.ts              # MJPEG + H.264 NALU capture and streaming
+│   │       │   ├── event-bus.ts                   # In-process event pub/sub
+│   │       │   ├── app-install.ts                 # App binary installation to devices
+│   │       │   ├── app-library-service.ts         # Persistent app library management
+│   │       │   ├── worker-registry.ts             # Master-side worker registry
+│   │       │   ├── worker-registration.ts         # Worker-side registration + heartbeat
+│   │       │   └── session-router.ts              # Session routing + HTTP/WS proxy
+│   │       ├── routes/
+│   │       │   ├── index.ts           # Mode-based route registration
+│   │       │   ├── health.ts          # GET /api/health
+│   │       │   ├── sessions.ts        # Session CRUD (standalone / worker)
+│   │       │   ├── devices.ts         # Device inventory
+│   │       │   ├── runtimes.ts        # Runtime management
+│   │       │   ├── device-control.ts  # Hardware buttons, rotation, clipboard, etc.
+│   │       │   ├── apps.ts            # App upload + install to sessions
+│   │       │   ├── app-library.ts     # Persistent app library CRUD
+│   │       │   ├── admin.ts           # Admin session management
+│   │       │   ├── ws-events.ts       # WebSocket event stream
+│   │       │   ├── ws-stream.ts       # MJPEG + H.264 display streaming
+│   │       │   ├── master-sessions.ts # POST/DELETE sessions (master mode)
+│   │       │   ├── master-proxy.ts    # HTTP + WS proxy to workers (master mode)
+│   │       │   └── internal.ts        # /internal/workers/* registration + heartbeat
+│   │       └── utils/
+│   │           └── exec.ts            # Child process execution helper
 │   │
 │   ├── web/                  # Angular 21 SPA
 │   │   └── src/              # Standalone components, Signals, OnPush
@@ -120,7 +143,7 @@ web-mobile-simulator/
 │
 ├── docs/
 │   └── architecture/
-│       └── ARCHITECTURE.md   # Full architecture diagrams, ADRs (incl. ADR-008)
+│       └── ARCHITECTURE.md   # Full architecture diagrams, ADRs
 │
 ├── scripts/
 │   ├── dev.sh
@@ -130,10 +153,17 @@ web-mobile-simulator/
 │   ├── health-check.sh
 │   ├── install-ios-runtime.sh
 │   └── install-android-image.sh
+├── Dockerfile.api            # API container image
+├── Dockerfile.dev            # Development container image
+├── Dockerfile.web            # Angular build + static serving image
+├── docker-compose.yml        # Production compose (nginx + master + worker)
+├── docker-compose.dev.yml    # Dev compose (Angular + nginx only)
 ├── nginx.conf
 ├── nginx.dev.conf
-├── docker-compose.yml
+├── eslint.config.mjs
 ├── .env.example
+├── .nvmrc
+├── .npmrc
 ├── pnpm-workspace.yaml
 ├── tsconfig.base.json
 └── package.json
@@ -302,10 +332,10 @@ Workers self-register with the master on startup and send periodic heartbeats. T
 
 The platform is split into four distinct layers:
 
-1. **Browser** — Angular 21 SPA renders the device picker, runtime manager, and embeds noVNC (iOS) or scrcpy-web (Android) for live streaming.
-2. **Reverse Proxy (nginx)** — Serves the Angular static build, routes `/api/*` to Fastify, and proxies WebSocket streams from host-side websockify/scrcpy processes.
-3. **API (Fastify / Node.js)** — Manages session lifecycle, spawns and monitors simulator/emulator processes, allocates VNC proxy ports, and persists state to SQLite via Drizzle ORM. In master mode, routes requests to registered workers via HTTP + WebSocket proxy.
-4. **Host macOS** — Runs iOS Simulators (via `xcrun simctl`) and Android Emulators (via `emulator` CLI), plus websockify (VNC→WS bridge) and scrcpy instances — one per active session.
+1. **Browser** — Angular 21 SPA renders the device picker, runtime manager, and uses WebCodecs (H.264) or an MJPEG image stream for live simulator/emulator display with touch and keyboard input forwarding.
+2. **Reverse Proxy (nginx)** — Serves the Angular static build, routes `/api/*` to Fastify, and proxies WebSocket streams (`/ws/*`) to the API server.
+3. **API (Fastify / Node.js)** — Manages session lifecycle, spawns and monitors simulator/emulator processes, captures screens (MJPEG screenshots or H.264 NALU encoding), and persists state to SQLite via Drizzle ORM. In master mode, routes requests to registered workers via HTTP + WebSocket proxy.
+4. **Host macOS** — Runs iOS Simulators (via `xcrun simctl`) and Android Emulators (via `emulator` CLI), plus scrcpy instances for Android streaming — one per active session.
 
 For full data-flow diagrams, container architecture, and architectural decision records (ADRs), see:
 
@@ -317,34 +347,66 @@ For full data-flow diagrams, container architecture, and architectural decision 
 
 ### REST
 
-| Method   | Path                      | Status         | Description                               |
-| -------- | ------------------------- | -------------- | ----------------------------------------- |
-| `GET`    | `/api/health`             | ✅ Implemented | Server status, uptime, version            |
-| `POST`   | `/api/sessions`           | ✅ Implemented | Create a new simulator session            |
-| `GET`    | `/api/sessions`           | ✅ Implemented | List all active sessions                  |
-| `GET`    | `/api/sessions/:id`       | ✅ Implemented | Get session details                       |
-| `DELETE` | `/api/sessions/:id`       | ✅ Implemented | Terminate a session                       |
-| `GET`    | `/api/devices`            | ✅ Implemented | List all device types (iOS + Android)     |
-| `GET`    | `/api/devices/:platform`  | ✅ Implemented | List device types for `ios` or `android`  |
-| `GET`    | `/api/runtimes`           | ✅ Implemented | List all runtimes (installed + available) |
-| `GET`    | `/api/runtimes/:platform` | ✅ Implemented | List runtimes for `ios` or `android`      |
-| `POST`   | `/api/runtimes/download`  | ✅ Implemented | Initiate a background runtime download    |
+| Method   | Path                                    | Status         | Description                                    |
+| -------- | --------------------------------------- | -------------- | ---------------------------------------------- |
+| `GET`    | `/api/health`                           | ✅ Implemented | Server status, uptime, version                 |
+| `POST`   | `/api/sessions`                         | ✅ Implemented | Create a new simulator session                 |
+| `GET`    | `/api/sessions`                         | ✅ Implemented | List all active sessions                       |
+| `GET`    | `/api/sessions/:id`                     | ✅ Implemented | Get session details                            |
+| `DELETE` | `/api/sessions/:id`                     | ✅ Implemented | Terminate a session                            |
+| `GET`    | `/api/devices`                          | ✅ Implemented | List all device types (iOS + Android)          |
+| `GET`    | `/api/devices/:platform`                | ✅ Implemented | List device types for `ios` or `android`       |
+| `GET`    | `/api/runtimes`                         | ✅ Implemented | List all runtimes (installed + available)      |
+| `GET`    | `/api/runtimes/:platform`               | ✅ Implemented | List runtimes for `ios` or `android`           |
+| `POST`   | `/api/runtimes/download`                | ✅ Implemented | Initiate a background runtime download         |
+
+### Device Control
+
+| Method   | Path                                    | Status         | Description                                    |
+| -------- | --------------------------------------- | -------------- | ---------------------------------------------- |
+| `POST`   | `/api/sessions/:id/control/button`      | ✅ Implemented | Press a hardware button (home, lock, volume)   |
+| `POST`   | `/api/sessions/:id/control/rotate`      | ✅ Implemented | Set device orientation                         |
+| `POST`   | `/api/sessions/:id/control/shake`       | ✅ Implemented | Trigger shake gesture (iOS only)               |
+| `GET`    | `/api/sessions/:id/control/screenshot`  | ✅ Implemented | Capture and return a PNG screenshot            |
+| `POST`   | `/api/sessions/:id/control/clipboard`   | ✅ Implemented | Set clipboard text                             |
+| `GET`    | `/api/sessions/:id/control/clipboard`   | ✅ Implemented | Get clipboard text                             |
+| `POST`   | `/api/sessions/:id/control/open-url`    | ✅ Implemented | Open a URL or deep-link on the device          |
+| `POST`   | `/api/sessions/:id/control/send-text`   | ✅ Implemented | Type text into the focused input field         |
+
+### App Management
+
+| Method   | Path                                    | Status         | Description                                    |
+| -------- | --------------------------------------- | -------------- | ---------------------------------------------- |
+| `POST`   | `/api/sessions/:id/apps`                | ✅ Implemented | Upload and install an app on a running session |
+| `GET`    | `/api/apps`                             | ✅ Implemented | List apps in the user's library                |
+| `POST`   | `/api/apps`                             | ✅ Implemented | Upload a new app to the library                |
+| `GET`    | `/api/apps/:id`                         | ✅ Implemented | Get a single app library entry                 |
+| `DELETE` | `/api/apps/:id`                         | ✅ Implemented | Delete an app from the library                 |
+| `POST`   | `/api/apps/:id/install/:sessionId`      | ✅ Implemented | Install a library app into a session           |
+
+### Admin
+
+| Method   | Path                                    | Status         | Description                                    |
+| -------- | --------------------------------------- | -------------- | ---------------------------------------------- |
+| `GET`    | `/api/admin/sessions`                   | ✅ Implemented | List ALL sessions with capacity info           |
+| `DELETE` | `/api/admin/sessions/history`           | ✅ Implemented | Clear all terminated/error sessions            |
+| `DELETE` | `/api/admin/sessions/:id`               | ✅ Implemented | Force-purge a single session                   |
 
 ### Internal API (master/worker only)
 
-| Method   | Path                               | Description                              |
-| -------- | ---------------------------------- | ---------------------------------------- |
-| `POST`   | `/internal/workers/register`       | Worker registers with master             |
-| `POST`   | `/internal/workers/:id/heartbeat`  | Worker sends heartbeat to master         |
-| `DELETE` | `/internal/workers/:id`            | Worker deregisters from master           |
-| `GET`    | `/internal/workers`                | List all registered workers              |
+| Method   | Path                                    | Description                              |
+| -------- | --------------------------------------- | ---------------------------------------- |
+| `POST`   | `/internal/workers/register`            | Worker registers with master             |
+| `POST`   | `/internal/workers/:workerId/heartbeat` | Worker sends heartbeat to master         |
+| `DELETE` | `/internal/workers/:workerId`           | Worker deregisters from master           |
+| `GET`    | `/internal/workers`                     | List all registered workers              |
 
 ### WebSocket
 
-| Path         | Description                                                             |
-| ------------ | ----------------------------------------------------------------------- |
-| `/ws/events` | Server-sent events: session state changes, device state changes, errors |
-| `/ws/vnc`    | VNC stream proxy for active iOS Simulator sessions (via websockify)     |
+| Path                          | Description                                                                                          |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `/ws/events`                  | Server-sent events: session state changes, device state changes, errors                              |
+| `/ws/stream/:sessionId`       | Display stream — supports MJPEG (default) and H.264 NALU mode (`?format=h264`) with touch/key input |
 
 ### Response envelope
 
@@ -371,8 +433,7 @@ interface ApiResponse<T> {
 | **Angular**     | 21.2.x          | SPA frontend — standalone components, Signals, OnPush, `@if`/`@for`             |
 | **Fastify**     | 5.x             | REST + WebSocket API backend                                                    |
 | **TypeScript**  | 5.7 / 5.9       | Language for both API and frontend                                              |
-| **noVNC**       | Latest          | Browser-side VNC viewer for iOS Simulator streaming                             |
-| **websockify**  | Latest          | Bridges VNC TCP → WebSocket on the macOS host                                   |
+| **WebCodecs**   | —               | Browser-side H.264 decoding for low-latency simulator/emulator streaming    |
 | **scrcpy**      | Latest          | Android Emulator display capture and input injection                            |
 | **SQLite**      | —               | Session and device state persistence                                            |
 | **Drizzle ORM** | Latest          | Type-safe schema, queries, and migrations for SQLite                            |

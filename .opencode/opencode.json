@@ -13,6 +13,19 @@
           "name": "GPT-OSS 120B"
         }
       }
+    },
+    "omlx": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Omlx (Local)",
+      "options": {
+        "baseURL": "http://127.0.0.1:8000/v1",
+        "apiKey": "omlx-29brxyn7lhz7jzyw"
+      },
+      "models": {
+        "Qwen3.6-35B-A3B-UD-MLX-4bit": {
+          "name": "Qwen3.6-35B"
+        }
+      }
     }
   }
 }
